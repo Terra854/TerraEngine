@@ -357,6 +357,12 @@ namespace TerraEngine::Tests {
 		{
 			using namespace TerraEngine::Renderer::Vulkan;
 			const TerraEngine::UUID meshId = MakeRuntimeUuid(17u);
+			// The pool already owns the pinned page. Import its exact recorded
+			// lifetime rather than inventing persistence from an unverified ID.
+			PersistentPhysicalPageAllocationState allocator;
+			allocator.nextAllocationId = 100u;
+			allocator.owners.emplace(99u, PersistentPhysicalPageAllocationOwner{
+				meshId, 1u, 3u, 7u, 512u, 5u, 12u});
 			const std::vector<PersistentPhysicalPageUploadInput> inputs{
 				{ meshId, 9u, 4u, 8u, 1024u, 0u, 0u, false, true },
 				{ meshId, 1u, 3u, 7u, 512u, 99u, 12u, true, true }
@@ -366,7 +372,7 @@ namespace TerraEngine::Tests {
 					inputs,
 					4096u,
 					2048u,
-					6u);
+					6u, allocator);
 			context.Expect(plan.valid,
 				"Complete page inputs should produce one atomic persistent upload plan.");
 			context.ExpectEqual<std::size_t>(

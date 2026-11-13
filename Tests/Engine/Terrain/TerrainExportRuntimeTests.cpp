@@ -13,6 +13,7 @@
 #include "Terrain/TerrainAreaCodec.h"
 #include "Terrain/TerrainAssetStore.h"
 #include "Terrain/TerrainMaterial.h"
+#include "ThreadPool/ThreadPool.h"
 #include "Resource/ResourceManager.h"
 
 #include <array>
@@ -29,6 +30,43 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
+		// Normal engine bootstrap starts runtime workers before resource loading.
+		// These archive-only fixtures supply that runtime prerequisite themselves
+		// without borrowing editor services or changing an existing host pool.
+		class TerrainRuntimeWorkerLease final
+		{
+		public:
+			TerrainRuntimeWorkerLease()
+			{
+				if(ThreadPool::instance().getThreadCount() != 0U) return;
+				try
+				{
+					ThreadPool::instance().initialize(2U);
+					ownsWorkers = true;
+				}
+				catch(...)
+				{
+					// Construction can fail after starting a worker. Retire only the
+					// initially empty pool this fixture attempted to acquire.
+					ThreadPool::instance().shutdown();
+					throw;
+				}
+			}
+
+			~TerrainRuntimeWorkerLease()
+			{
+				// Mounted preparation and provider cooking have returned before the
+				// lease is destroyed; shutdown joins any remaining owned work.
+				if(ownsWorkers) ThreadPool::instance().shutdown();
+			}
+
+			TerrainRuntimeWorkerLease(const TerrainRuntimeWorkerLease&) = delete;
+			TerrainRuntimeWorkerLease& operator=(const TerrainRuntimeWorkerLease&) = delete;
+
+		private:
+			bool ownsWorkers = false;
+		};
+
 		class TerrainExportWorkspace final
 		{
 		public:
@@ -117,6 +155,7 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Terrain.ExportRuntime.BuildsDirectMeshFromSavedMountedGeneration", [](TestContext& context) {
+			const TerrainRuntimeWorkerLease runtimeWorkers;
 			TerrainExportWorkspace workspace;
 			const TerraEngine::UUID assetId = TerraEngine::GenerateUUID();
 			std::vector<std::int32_t> heights(TerraEngine::Terrain::kTerrainAreaSampleCount, 1250);
@@ -165,6 +204,8 @@ namespace TerraEngine::Tests
 				mount, assetId, "Terrain/Runtime.teterrain");
 			context.Expect(loaded.Succeeded() && loaded.renderProxy.mesh->generatedDirectMeshletRoute.IsComplete()
 				&& !loaded.renderProxy.mesh->meshletRecords.empty() && loaded.collisionRecipe.IsComplete()
+				&& loaded.collisionRecipe.cookedCollision && loaded.collisionRecipe.cookedCollision->payload
+				&& !loaded.collisionRecipe.cookedCollision->payload->empty()
 				&& loaded.collisionRecipe.sampleSpacingMetres == 2.0F
 				&& loaded.collisionRecipe.heightMillimetres.front() == 1250,
 				"A saved raw-channel terrain generation must become complete direct-resident render and collision products without editor services. "
@@ -185,6 +226,7 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Terrain.ExportRuntime.SignedSparsePartialCoverageUsesOneCurrentRoot", [](TestContext& context) {
+			const TerrainRuntimeWorkerLease runtimeWorkers;
 			TerrainExportWorkspace workspace;
 			const TerraEngine::UUID assetId = TerraEngine::GenerateUUID();
 			const TerraEngine::Terrain::TerrainSampleBounds authoredBounds{-256, -256, 258, 258};
@@ -238,6 +280,12 @@ namespace TerraEngine::Tests
 			const auto partial = std::find_if(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
 				return area.area == TerraEngine::Terrain::TerrainAreaCoordinate{1, 1};
 			});
+			// A valid recipe alone is insufficient: every mounted area must retain
+			// the actual worker-cooked provider payload used for protected adoption.
+			const bool allCollisionCooked = std::all_of(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
+				return area.collisionRecipe.cookedCollision && area.collisionRecipe.cookedCollision->payload
+					&& !area.collisionRecipe.cookedCollision->payload->empty();
+			});
 			const bool oneGeneration = std::all_of(loaded.areas.begin(), loaded.areas.end(), [](const auto& area) {
 				return area.authoredGeneration == 11u;
 			});
@@ -252,7 +300,7 @@ namespace TerraEngine::Tests
 			context.Expect(loaded.Succeeded() && loaded.areas.size() == 9u
 				&& loaded.sourceRootHash == encodedRoot.contentHash
 				&& loaded.sourcePublicationGeneration == 11u
-				&& loaded.authoredBounds == authoredBounds && oneGeneration && removedAreaAbsent
+				&& loaded.authoredBounds == authoredBounds && allCollisionCooked && oneGeneration && removedAreaAbsent
 				&& negative != loaded.areas.end() && !negative->implicitDefault
 				&& negative->collisionRecipe.areaX == -1 && negative->collisionRecipe.areaZ == -1
 				&& negative->collisionRecipe.heightMillimetres.front() == 3210

@@ -2,8 +2,12 @@
 #include "../TestHarness.h"
 #include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.h"
 #include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyArtifacts.h"
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "../TestSha256.h"
+#endif
 #include <array>
 #include <bit>
 #include <fstream>
@@ -54,6 +58,7 @@ namespace TerraEngine::EditorTests
 		};
 		std::string HashBytes(const std::vector<std::uint8_t>& bytes)
 		{
+#ifdef _WIN32
 			// Independently verify every referenced file with the host's bundled OS
 			// cryptography API; comparison does not reuse the exporter's hash helper.
 			struct Algorithm { BCRYPT_ALG_HANDLE value = nullptr; ~Algorithm() { if(value) BCryptCloseAlgorithmProvider(value,0); } } algorithm;
@@ -67,6 +72,14 @@ namespace TerraEngine::EditorTests
 				|| BCryptFinishHash(hash.value,digest.data(),static_cast<ULONG>(digest.size()),0) < 0) throw std::runtime_error("Test SHA failed.");
 			constexpr char hex[] = "0123456789abcdef"; std::string text;
 			for(const auto byte : digest) { text += hex[byte >> 4]; text += hex[byte & 15]; } return text;
+#else
+			// Preserve these real-file export checks on supported POSIX hosts. This
+			// qualified portable helper is also used by the POSIX exporter, so this
+			// branch checks artifact closure rather than independent SHA arithmetic.
+			const auto text = bytes.empty() ? std::string_view{} : std::string_view(
+				reinterpret_cast<const char*>(bytes.data()), bytes.size());
+			return ComputeTestSha256(text);
+#endif
 		}
 		nlohmann::json Counters(const ExportFixture& fixture, const RendererEfficiencyEvidenceExportResult& result)
 		{

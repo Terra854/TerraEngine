@@ -4,9 +4,81 @@
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
 #include "VulkanContextSource.h"
+#include "Tests/Support/ReviewRemediation/DiscardedPrimaryReviewHooks.h"
 #include "ThreadPool/ScopedTaskSettlement.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 
+
+namespace TerraEngine::Tests::Review
+{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	// Only the actual protected frame owner observes this immutable hook lease.
+	static thread_local DiscardedPrimaryReviewHook* primaryReviewHook = nullptr;
+#endif
+	bool SetDiscardedPrimaryReviewHook(DiscardedPrimaryReviewHook* hook) noexcept
+	{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		primaryReviewHook = hook; return true;
+#else
+		return hook == nullptr;
+#endif
+	}
+	bool ObserveDiscardedPrimaryReview(PrimaryReviewEvent event) noexcept
+	{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (auto* hook = primaryReviewHook)
+		{
+			if (hook->count < hook->events.size()) hook->events[hook->count++] = event;
+			else hook->overflow = true;
+			if (event.point == PrimaryReviewPoint::Prefix && hook->overflow)
+			{
+				++hook->unsafeDependentViewBlocked; return true;
+			}
+			if (hook->refusals && event.point == PrimaryReviewPoint::Prefix
+				&& event.frame == hook->refusedFrame && event.view != hook->refusedView)
+			{
+				// A later view may reuse OR allocate a different primary. Only real
+				// recorder-success events after the refused prefix can qualify it.
+				bool animationRecorded = false, deformationRecorded = false;
+				for (std::uint32_t index = hook->refusedEventIndex + 1; index < hook->count; ++index)
+				{
+					const auto& row = hook->events[index];
+					if (row.frame != event.frame || row.command != event.command || row.view != event.view) continue;
+					animationRecorded |= row.point == PrimaryReviewPoint::AnimationRecorded && row.animationDispatches != 0;
+					deformationRecorded |= row.point == PrimaryReviewPoint::DeformationRecorded && row.deformationDispatches != 0;
+				}
+				if (!animationRecorded || !deformationRecorded)
+				{
+					++hook->unsafeDependentViewBlocked; return true;
+				}
+			}
+
+			// Refuse only AFTER both real production recorders emitted work.
+			// No fake pending plan, generation, dispatch or completion is authored.
+			if (event.point == PrimaryReviewPoint::LightingRefusal && hook->armed
+				&& event.animationDispatches && event.deformationDispatches)
+			{
+				bool animationRecorded = false, deformationRecorded = false;
+				for (std::uint32_t index = 0; index < hook->count; ++index)
+				{
+					const auto& row = hook->events[index];
+					if (row.frame != event.frame || row.command != event.command || row.view != event.view) continue;
+					if (row.point == PrimaryReviewPoint::Begin || row.point == PrimaryReviewPoint::Reset)
+						animationRecorded = deformationRecorded = false;
+					animationRecorded |= row.point == PrimaryReviewPoint::AnimationRecorded && row.animationDispatches != 0;
+					deformationRecorded |= row.point == PrimaryReviewPoint::DeformationRecorded && row.deformationDispatches != 0;
+				}
+				if (hook->overflow || !animationRecorded || !deformationRecorded) return false;
+				hook->armed = false; ++hook->refusals;
+				hook->refusedFrame = event.frame; hook->refusedCommand = event.command; hook->refusedView = event.view;
+				hook->refusedEventIndex = hook->count - 1;
+				return true;
+			}
+		}
+#endif
+		return false;
+	}
+}
 
 void VulkanContext::RenderFrame(
 	std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication,
@@ -766,6 +838,9 @@ void VulkanContext::RenderFrame(
 			cmd = impl->commandBuffers[impl->currentFrame];
 			const auto resetCommandStart = BackendClock::now();
 			const VkResult resetCommandResult = vkResetCommandBuffer(cmd, 0);
+			TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
+				TerraEngine::Tests::Review::PrimaryReviewPoint::Reset, publication->frameId,
+				reinterpret_cast<std::uintptr_t>(cmd), 0, { selection.outputKind, selection.viewType, selection.outputId }, 0, 0, resetCommandResult });
 			if (impl->MarkDeviceLost(
 				resetCommandResult, "render frame primary command buffer reset"))
 			{
@@ -823,6 +898,10 @@ void VulkanContext::RenderFrame(
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
 		return;
 	}
+	TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
+		TerraEngine::Tests::Review::PrimaryReviewPoint::Begin, publication->frameId,
+		reinterpret_cast<std::uintptr_t>(cmd), 0, {selection.outputKind, selection.viewType, selection.outputId},
+		0, 0, VK_SUCCESS });
 	const std::uint64_t shadowCommandSerial = impl->nextShadowCommandSerial++;
 	impl->shadowCommandOwnership[cmd] = {shadowCommandSerial, currentFrame};
 	// The resource replacement already occurred at protected preparation. Bind
@@ -863,6 +942,39 @@ void VulkanContext::RenderFrame(
 			owner->shadowCommandOwnership.erase(command);
 		}
 	} shadowRecordingSettlement{impl.get(), cmd, shadowCommandSerial};
+	struct ComputeRecordingSettlement
+	{
+		Impl& owner;
+		VkCommandBuffer command;
+		std::uint32_t frame;
+		std::uint64_t session, backendGeneration;
+		bool priorAnimationRecorded, priorDeformationRecorded;
+		std::uint32_t priorAnimationDispatches, priorDeformationDispatches;
+		bool admitted = false;
+		~ComputeRecordingSettlement() noexcept
+		{
+			// This guard precedes all compute recording and runs before the shadow
+			// settlement erases the real command's ownership/submission receipt.
+			if (admitted || owner.deviceLost || owner.currentFrame != frame
+				|| owner.renderSessionGeneration != session
+				|| owner.backendResourceGeneration != backendGeneration) return;
+			const auto receipt = owner.shadowCommandOwnership.find(command);
+			if (receipt != owner.shadowCommandOwnership.end() && receipt->second.submitSerial != 0)
+				return; // An actually accepted native prefix cannot be revoked here.
+			// A discarded primary's commands will never execute. Roll back only
+			// the four recording facts changed below, preserving prior accepted
+			// views and leaving deliberate invalid-plan/fallback decisions intact.
+			owner.animationComputeRecordedForCurrentFrame = priorAnimationRecorded;
+			owner.deformationComputeRecordedForCurrentFrame = priorDeformationRecorded;
+			owner.recordedAnimationDispatchCountForCurrentFrame = priorAnimationDispatches;
+			owner.recordedDeformationDispatchCountForCurrentFrame = priorDeformationDispatches;
+		}
+	} computeRecordingSettlement{*impl, cmd, impl->currentFrame,
+		impl->renderSessionGeneration, impl->backendResourceGeneration,
+		impl->animationComputeRecordedForCurrentFrame,
+		impl->deformationComputeRecordedForCurrentFrame,
+		impl->recordedAnimationDispatchCountForCurrentFrame,
+		impl->recordedDeformationDispatchCountForCurrentFrame};
 	// A mixed P2 cohort captures lighting and shadow adjuncts from the same real
 	// targeted frame. Untargeted frames still render, but do not seize its token.
 	const bool shadowValidationRequested = !presentation.efficiencyFixtureIntent.correlation.operationId.empty()
@@ -921,6 +1033,9 @@ void VulkanContext::RenderFrame(
 				impl->animationComputeRecordedForCurrentFrame = true;
 				impl->recordedAnimationDispatchCountForCurrentFrame =
 					result.recordedDispatchCount;
+				TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
+					TerraEngine::Tests::Review::PrimaryReviewPoint::AnimationRecorded, publication->frameId,
+					reinterpret_cast<std::uintptr_t>(cmd), 0, { selection.outputKind, selection.viewType, selection.outputId }, result.recordedDispatchCount, 0, 0 });
 			}
 		}
 		if (!impl->animationComputeRecordedForCurrentFrame)
@@ -969,6 +1084,9 @@ void VulkanContext::RenderFrame(
 				true;
 			impl->recordedDeformationDispatchCountForCurrentFrame =
 				result.deformationDispatchCount;
+			TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
+				TerraEngine::Tests::Review::PrimaryReviewPoint::DeformationRecorded, publication->frameId,
+				reinterpret_cast<std::uintptr_t>(cmd), 0, { selection.outputKind, selection.viewType, selection.outputId }, 0, result.deformationDispatchCount, 0 });
 		}
 		else
 		{
@@ -1807,9 +1925,24 @@ void VulkanContext::RenderFrame(
 	}
 
 
+	// Observe the actual prefix before refusing its later lighting upload. This
+	// leaves the ordinary failure return untouched and never submits partial work.
+	const TerraEngine::Tests::Review::PrimaryReviewEvent reviewPrefix{
+		TerraEngine::Tests::Review::PrimaryReviewPoint::Prefix, publication->frameId,
+		reinterpret_cast<std::uintptr_t>(cmd), 0, { selection.outputKind, selection.viewType, selection.outputId },
+		impl->recordedAnimationDispatchCountForCurrentFrame,
+		impl->recordedDeformationDispatchCountForCurrentFrame, 0 };
+	if (TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview(reviewPrefix))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Validation withheld a dependent view whose discarded primary compute was not re-recorded.");
+		return;
+	}
+	auto reviewLighting = reviewPrefix;
+	reviewLighting.point = TerraEngine::Tests::Review::PrimaryReviewPoint::LightingRefusal;
+	const bool reviewRefusesLighting = TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview(reviewLighting);
 	// Even zero lights upload/clear the analysis tail. Failed writes stop this
 	// command before shaders can consume partly updated or stale light records.
-	if (!impl->UploadLightAnalysisInputData(*canonicalAnalysisLights, renderViewType, diagnosticViewId,
+	if (reviewRefusesLighting || !impl->UploadLightAnalysisInputData(*canonicalAnalysisLights, renderViewType, diagnosticViewId,
 		forceFullLighting, lightingUploadEvidence[1])
 		|| !impl->UploadLightingData(*canonicalFinalLights, renderViewType, diagnosticViewId,
 			forceFullLighting, lightingUploadEvidence[0])) {
@@ -4303,6 +4436,11 @@ void VulkanContext::RenderFrame(
 			// structurally valid and reject every consumer of this range together, so
 			// no main or shadow pass can reference stale indirect commands.
 			prepared.clear();
+			// Partition copies are actual consumers too, including cached static
+			// composition passes. Reject them with the shared indirect range.
+			for (auto& record : shadowLightRecords) {
+				record.staticDraws.clear(); record.dynamicDraws.clear();
+			}
 			for (PreparedShadowList& preparedList : preparedShadowLists) {
 				preparedList.draws.clear();
 				preparedList.groupedDraws.clear(); preparedList.execution = {};
@@ -4336,6 +4474,12 @@ void VulkanContext::RenderFrame(
 					draw.push.indirectDrawOffset = indirectDrawOffset;
 				}
 				for (PreparedDraw& draw : preparedList.groupedDraws) draw.push.indirectDrawOffset = indirectDrawOffset;
+			}
+			// These lists were copied before reservation. Publish the exact final
+			// command-buffer range to every partition pass, not just its source.
+			for (auto& record : shadowLightRecords) {
+				for (auto& draw : record.staticDraws) draw.push.indirectDrawOffset = indirectDrawOffset;
+				for (auto& draw : record.dynamicDraws) draw.push.indirectDrawOffset = indirectDrawOffset;
 			}
 			const VulkanBuffer& indirectDrawBuffer = impl->indirectDrawBuffers[impl->currentFrame];
 			void* data = nullptr;
@@ -4752,7 +4896,9 @@ void VulkanContext::RenderFrame(
 		return count;
 	};
 	const auto recordStaticComposition = [&](ShadowLightRecord& record) {
-		if (!record.staticEntry || !record.preparedList || !impl->staticShadowLoadRenderPass) return false;
+		// Failed indirect preparation invalidates all copies, including the static
+		// partition. Never publish its cleared draw list as complete cached content.
+		if (!record.staticEntry || !record.preparedList || !record.preparedList->recordingReady || !impl->staticShadowLoadRenderPass) return false;
 		auto& entry = *record.staticEntry;
 		const auto layers = record.type == 1 ? 6U : 1U;
 		const auto requiredMask = static_cast<std::uint8_t>(layers == 6 ? 0x3f : 1);
@@ -5641,7 +5787,13 @@ void VulkanContext::RenderFrame(
 		impl->pendingPrimaryCommandBuffersSubmitted.resize(impl->MAX_FRAMES_IN_FLIGHT, 0u);
 	}
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+	// The existing admission list now owns this completed primary. No new
+	// submission, wait or visibility boundary is introduced by settlement.
+	computeRecordingSettlement.admitted = true;
 	shadowRecordingSettlement.admitted = true;
+	auto reviewAdmission = reviewPrefix;
+	reviewAdmission.point = TerraEngine::Tests::Review::PrimaryReviewPoint::Admitted;
+	TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview(reviewAdmission);
 	impl->activeRenderSnapshot.state = RenderSnapshotState::Recorded;
 
 	if (!impl->pendingRenderSnapshotDiagnostics.ownerSummaries.empty()) {

@@ -1,0 +1,1864 @@
+{
+  "schemaVersion": "current-source-review-provenance-v1",
+  "structuralOnly": true,
+  "semanticCompletenessProven": false,
+  "lifetimeAcceptance": false,
+  "method": "Consolidated existing reviewed decisions. Native LF restoration was accepted only by the actual executable-token and physical-location comparator against the pre-cleanup image. This is preservation of existing source review, not a new independent semantic review or runtime acceptance.",
+  "historicalRevision": "87d3fd037c1e881ff6630a4918c91be707673c1b",
+  "priorManifestSha256": "36d75ea32b29f35bee0bc6a1409d3b2351bc87be67f7fbb302c7fce2471fc3c7",
+  "archivedReviewHistory": {
+    "checkpointSha256": "7a95a2f8a942457ae8af41ad76d5da7c679f367703ece1c917c4b69da1f6ccdd",
+    "qualification": "Original review history is retained locally in before-cleanup.zip; this archive is not a build or verification input."
+  },
+  "files": [
+    {
+      "path": "Editor/AssetCompilers/MeshCompiler.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "8430fdce5390dfa91fe3bbd85084d020862dc3736b535012bbea7e0c5a9f4f58",
+      "currentDiffSha256": "8430fdce5390dfa91fe3bbd85084d020862dc3736b535012bbea7e0c5a9f4f58"
+    },
+    {
+      "path": "Editor/AssetCompilers/MotionDatabaseCompiler.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "26c664146983125f8c0ba6d4ec28318ccb0468b49bda7b142b69199178a3df6d",
+      "currentDiffSha256": "1671e8d3af8a4200cd43f0c6368ce35ac8bc107465cde551a6b5e8fe5e4e22b5",
+      "newlineRestoration": {
+        "beforeSha256": "98bc774493d29ee2ad039cc52704ff6ac0acad3d95f8878d7df8952386dfa43c",
+        "afterSha256": "d868dc42ee73da04c0f7159e41c43665b0116d5f6d8eb632e143cff238a2f443",
+        "crlfRemoved": 1400,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/AssetCompilers/ShaderCompiler.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "151ed63bf2ea3ddacb9b1b4f3403c5f71ad1e2a20d4dc59a29276e6b8a89d452",
+      "currentDiffSha256": "151ed63bf2ea3ddacb9b1b4f3403c5f71ad1e2a20d4dc59a29276e6b8a89d452"
+    },
+    {
+      "path": "Editor/AssetCompilers/VirtualGeometryAssemblyBuilder.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "7b558462efcb097c1c00c70a57ebd40b806cecb3127a79f944f14645443cf57f",
+      "currentDiffSha256": "7b558462efcb097c1c00c70a57ebd40b806cecb3127a79f944f14645443cf57f"
+    },
+    {
+      "path": "Editor/AssetCompilers/VirtualGeometrySplineCurveBuilder.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "e27ecbc7169105eaa7818cf1991e69e966bcf93202bc0eef655b14ae0583b699",
+      "currentDiffSha256": "f065df698e7542be86a0b5c02f944365a22c4269ce231ff3184f2064d8a0834f",
+      "newlineRestoration": {
+        "beforeSha256": "56143900c850de657ef0026ed8cddbbc3d45cf351de7eafecb4e7e96f8b1e2a4",
+        "afterSha256": "db0d456d45ed5fcf56a2c38ec6d43ffaa390b91420666222c10761f10ed1571f",
+        "crlfRemoved": 78,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/AssetCompilers/VirtualGeometrySplineCurveBuilder.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "2f05b00b4e9ad243321fb9bb59b924be0e0e20aed591f0e71363a2504bb6b860",
+      "currentDiffSha256": "2519f2f1ef616824a5d5d5201db2550ab095434a61b6667cf9f38c7eaf02d7b6",
+      "newlineRestoration": {
+        "beforeSha256": "51a81f586e9f73a22b06139ef45a115a63c38f9f782570c2e7f14402ec157464",
+        "afterSha256": "e3fc3ce24939aee4be5f039bd95bf11d4491edefe0ffc8032f75cbb8263e7d73",
+        "crlfRemoved": 11,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/Export/BuildProfile.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "4ec1c76c7e7b8a95fade93e13113f5066c08d31004a8e2bfd9b9255ddd4575a4",
+      "currentDiffSha256": "43f3f1b4904955d11a310785f83ceff4006b3dff18d008ea05a58bb6b7484571",
+      "newlineRestoration": {
+        "beforeSha256": "a40db15abdbcaf5dddfc0f42a2bdda95b48f7aa574406010983fb128bc0cae76",
+        "afterSha256": "69521d88ad98d2b7fa642232ff72a2d90186c296182a20d9e3f7e7f3041983e0",
+        "crlfRemoved": 544,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/Export/ExportOutputTransaction.cpp",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "0fadebc6e934797d7e92cf9e1be9ee410bb79e7c26d8876a460c8f073627a4e7",
+      "currentDiffSha256": "0fadebc6e934797d7e92cf9e1be9ee410bb79e7c26d8876a460c8f073627a4e7"
+    },
+    {
+      "path": "Editor/Export/ExportOutputTransaction.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "396b02c602d2cf102336edd5f80995deedc1ef22ef34c44be6a697364032ab5e",
+      "currentDiffSha256": "dff3604e01845a9d4e71f25fd2b1b841ec6b8a4970e87e4a908fa87e66d46d4d",
+      "newlineRestoration": {
+        "beforeSha256": "5583acd219a07f2d5ec5bd89eca79c9b400d146c8b61dc7379370eed01c4a30b",
+        "afterSha256": "46a438087835e53e882adeecb3182b9fe1adcc17d20e2d353e5cef23d025a263",
+        "crlfRemoved": 164,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/Export/ExportTypes.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "9f4b3a68026844893d2cec6f03041ee9837dfecbe1951c559e93f5dc7ee53697",
+      "currentDiffSha256": "6eedf36a9fefca177906bafe9903eb4f3df828ec0ca9c8b526e72d87958112be",
+      "newlineRestoration": {
+        "beforeSha256": "14676e9dc59b545b948662ddf248b88ffb9ae0e2eff92218c60dabffeddc0fb0",
+        "afterSha256": "4ae2d0b956e211bc7c5e58578dc440bf05093ff19ef8e9f9f38bc5ff1e6928cf",
+        "crlfRemoved": 184,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Animation/AnimationControllerAuthoringService.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "d47706a9b3a345623bd58a6d637d0324f429e48350400141aad302cb8b0f670c",
+      "currentDiffSha256": "e437d666cd2355103f22cced08347c8d3a25f246af498eeabcca8b4bbecf317a",
+      "newlineRestoration": {
+        "beforeSha256": "a6e27db67aa2fb6f6aaa31f2080859d231be8cc5efb35fef865e18fe1ace8274",
+        "afterSha256": "a551ed1b7efc5bec733bde35c7fd454aa9c2b27d749a774ea8b22649715fc961",
+        "crlfRemoved": 593,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "edd68315ce2ce87e2db9c75bd1389c04084af85e599eb33078bd3fb9b2011f1c",
+      "currentDiffSha256": "edd68315ce2ce87e2db9c75bd1389c04084af85e599eb33078bd3fb9b2011f1c"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Assets/AssetDatabase.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "5abfced3636451414486b84331511644e20789145ec56d84c548b46f8dc056f8",
+      "currentDiffSha256": "5abfced3636451414486b84331511644e20789145ec56d84c548b46f8dc056f8"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "fc7063b2a04089ef5f72a69bd528abe54b3e6aeadaa91765ca50c21f8cbf66c3",
+      "currentDiffSha256": "358fb6412a4273a866b0cbf697ab8910633970a442bbdae24f1f4fe6e27414b5",
+      "newlineRestoration": {
+        "beforeSha256": "226dab15ed0fb06c7e3e79858e20c8119b807b2dd40c52480ac5a93dd705e22a",
+        "afterSha256": "e94013ef111855e243e70374d50c2abeec6b15bdb7f6384cf13f3d65c2638dcb",
+        "crlfRemoved": 814,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "fc8d1f2a1b3040fcd3d982e589546a3168f6975993d3f03319082ea712b16040",
+      "currentDiffSha256": "0ad5db586368d2493c9fc9bffd654c819cb845de2d21c0515f88473c3c7d390e",
+      "newlineRestoration": {
+        "beforeSha256": "2a65f2769eb7f40d2ca65f0c37b4607978ab2cafeec05347320437352a0dd513",
+        "afterSha256": "6b4e7dea35e6b237891da7126afbe205afa7349e43368657841880a12d550651",
+        "crlfRemoved": 86,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/AnimationAutomationTransactions.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "c790bf6385b41449ecc2bd880f89d74d28280ecdbe4940c50684eb95dad50d69",
+      "currentDiffSha256": "bd8ddbc1d422000d1786a7927f39767303efcebcc48f30328ae97559e4fe98fb",
+      "newlineRestoration": {
+        "beforeSha256": "846ba2ba2ae9c4f3117680a807abbdcd707e37225f155f7cb18e2789fa19158e",
+        "afterSha256": "71339c01ce9dcbb51c6292d8bda24d1dff8f9de5d60db75073ab41f71d13ca15",
+        "crlfRemoved": 153,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/AnimationRuntimeOperations.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "49ac9341fdb1d86b7e22f5234323e3b760bc6390b3b3daf1b8f6866ccde3140d",
+      "currentDiffSha256": "f580704c9c312f47cee67157a86d879acc6c4aab56df211ebd95ca89c4d17b17",
+      "newlineRestoration": {
+        "beforeSha256": "ce07336b8b88d548517372e46fce932b8d027f9b7c559e76d9522d70c1ce7168",
+        "afterSha256": "7d340b105cddfc24dd6282ec46ab1d9920b860ae61001b08326bfc7be7e16ce8",
+        "crlfRemoved": 1496,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "16d8fdf849940358daf9f76a5c429b61216d6c970182dfe2e9aedc3653f9f0c5",
+      "currentDiffSha256": "83f07fbba8dd05855865333c7323e694a959250677625ee14f09f8b09f620ec3",
+      "newlineRestoration": {
+        "beforeSha256": "29d0f9011c941ef2f6b60c6a7967185a1e211b1d877851077f5975ef3a7082d8",
+        "afterSha256": "6ef16b27e1b0d1eb53697c78a291363f899dc00c2c069542b6006730631065b6",
+        "crlfRemoved": 11769,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "2bb6e1fbf8defbdfdad310774500d6074401ac0f6450f2a9f237eb68f31089dd",
+      "currentDiffSha256": "2275dfb3aa0ec47b4df4de31eb66f26582af48596d2c08a275885b62f02844fa",
+      "newlineRestoration": {
+        "beforeSha256": "516167709b7a1e53158c15e56fe1afd926b5d2dd1729f53ae2ed864757092d55",
+        "afterSha256": "c580f917578d45755a9a073a0768ca440d8e12e9317b149bcdd898b7c6db04c1",
+        "crlfRemoved": 1535,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/Providers/AssetPrefabAutomationProvider.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "e722e95506b0fbd45bcddf472700cf8ce7289d70aa6bc5c9abdc04918bcc3269",
+      "currentDiffSha256": "bedd47bd6e3dbd198ce419a9a6aec244c43376da7fae2200c9be2702ef34face",
+      "newlineRestoration": {
+        "beforeSha256": "7c499884fd9598c53cf986cdbff896833274be7f84c515658a9c8c0cd9cd7f7d",
+        "afterSha256": "424041df28f9025d635b615a73515d7dc318fe5290aea8192b460e63e491ff27",
+        "crlfRemoved": 337,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Automation/Providers/EditorDiagnosticsAutomationProvider.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "5b77635e3471083a0940ba5ab1b1a234357809a2812b4d58d9553554af0d95f2",
+      "currentDiffSha256": "5b77635e3471083a0940ba5ab1b1a234357809a2812b4d58d9553554af0d95f2"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Core/EditorSystem.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "18ba91bfedbfa683597156d2e6b016bcec8626d4179b7b2841fc9ef89de49888",
+      "currentDiffSha256": "18ba91bfedbfa683597156d2e6b016bcec8626d4179b7b2841fc9ef89de49888"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Core/EditorSystem.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "dc2cd81879e58e190296ef6f33824fe0c05ba15b4efe4dcfa8e31b77c8a5b5b5",
+      "currentDiffSha256": "dc2cd81879e58e190296ef6f33824fe0c05ba15b4efe4dcfa8e31b77c8a5b5b5"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Core/WorkspaceLayoutDecode.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "0a475e69b7113282a436f804cd83ac32e69edf75fe04f518a67c2cbad27504d7",
+      "currentDiffSha256": "0a475e69b7113282a436f804cd83ac32e69edf75fe04f518a67c2cbad27504d7"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "93f242c0226d0ddd8b0ca2ae432931b1f66e28c0c1092bb9222994939c828abd",
+      "currentDiffSha256": "93f242c0226d0ddd8b0ca2ae432931b1f66e28c0c1092bb9222994939c828abd"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Profiling/EditorProfilerService.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "4ce172880dc9551dc4bd15235c14b6cf246c8420a5fe2622b6175d8fa6811091",
+      "currentDiffSha256": "4ce172880dc9551dc4bd15235c14b6cf246c8420a5fe2622b6175d8fa6811091"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Project/EditorPreferences.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "d5e8255fbbbdd2b174e4ad78960491bf665a6835d012eec89ab6fba972f9622a",
+      "currentDiffSha256": "d5e8255fbbbdd2b174e4ad78960491bf665a6835d012eec89ab6fba972f9622a"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "e6b0d7ff1c2f9e5d8610e4e6b6ea1663b06f6caec890000903b7b42e5459a8e7",
+      "currentDiffSha256": "e6b0d7ff1c2f9e5d8610e4e6b6ea1663b06f6caec890000903b7b42e5459a8e7"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "fc90bac440737838b24f7a99a316d80cb0563e23201077f18e7e4ea10f6e8e00",
+      "currentDiffSha256": "fc90bac440737838b24f7a99a316d80cb0563e23201077f18e7e4ea10f6e8e00"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/EditorClosePolicy.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "955d16adf84be50f986110f553051e6141dabf1008ae3a8399999bbb8f941e58",
+      "currentDiffSha256": "955d16adf84be50f986110f553051e6141dabf1008ae3a8399999bbb8f941e58"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/EditorClosePolicy.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "a0f309caa241b04ae1a6d3d22acae435980b9053e1bf4fd749a7ebbe7d555d86",
+      "currentDiffSha256": "a0f309caa241b04ae1a6d3d22acae435980b9053e1bf4fd749a7ebbe7d555d86"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "724aae2e897eda490705344afd0c64e6224e69396b37d52bc21e507f67a93414",
+      "currentDiffSha256": "724aae2e897eda490705344afd0c64e6224e69396b37d52bc21e507f67a93414"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "2e54d6f72bb5de12026cc4079dbfef546da8e35c52d70540feb5efc1d81ff43d",
+      "currentDiffSha256": "2e54d6f72bb5de12026cc4079dbfef546da8e35c52d70540feb5efc1d81ff43d"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/PrefabInstanceReset.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "9128d2a0f0b155c1311d96a8f834800bdc1dfb8468c216223d1b28105a4ed620",
+      "currentDiffSha256": "9128d2a0f0b155c1311d96a8f834800bdc1dfb8468c216223d1b28105a4ed620"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "7e48d9600b263b0956cedaaf278b85909c647277cf70cf9306c5c7a4260ec465",
+      "currentDiffSha256": "7e48d9600b263b0956cedaaf278b85909c647277cf70cf9306c5c7a4260ec465"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "b06f5097dc43b9b8638ae4d8e277798564eef6b4484e691c00764fb30e5ae833",
+      "currentDiffSha256": "b06f5097dc43b9b8638ae4d8e277798564eef6b4484e691c00764fb30e5ae833"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Terrain/TerrainCreationService.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "355964b3d250fdb5a54ea8e77a21aa1dbc214311d31ed7bc85df5480666660e5",
+      "currentDiffSha256": "45f95d9c846101f87e58315750da339298b55204a8fa51adb77513f37c5331a0",
+      "newlineRestoration": {
+        "beforeSha256": "041427ca2a09f4140751f677a4c3216d7ff259014a0e1acf485d137994394015",
+        "afterSha256": "eb1e2b9fdc9a614c9ce65be9d59e104e197873a1b15332649f12ca05e7f30443",
+        "crlfRemoved": 510,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Terrain/TerrainPrecommitJob.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "dc7c5723e19b6b711a2a6527753037e2e63b5fd03d2062b7911e5c72347fb574",
+      "currentDiffSha256": "dc7c5723e19b6b711a2a6527753037e2e63b5fd03d2062b7911e5c72347fb574"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Terrain/TerrainProceduralJobs.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "80377a759c2f291afcbfe8be9d5b1a8db4f6016fcb8d74c6136bb688c6cfd814",
+      "currentDiffSha256": "80377a759c2f291afcbfe8be9d5b1a8db4f6016fcb8d74c6136bb688c6cfd814"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/AnimationClipEditorWindow.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "eebb57ed3cc9562ebad522f195338491ac9f2831bb987ef5b5b683e173b8f3b0",
+      "currentDiffSha256": "d3853a2b8e722bc49644184ba833ded74636c47e79568c41badf9faedc3b8ca0",
+      "newlineRestoration": {
+        "beforeSha256": "5a5ad4de9bf6f370880e70d3c52b277d34b311aab9ef9ac53fef02a78f2396e6",
+        "afterSha256": "25e09854b1f86cf2c13dd5c262b2d87d5bb38f4ecc1e77991579a613b4241cc6",
+        "crlfRemoved": 293,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/AnimationClipEditorWindow.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "c308db67d92616c28f8f4282e5ea61e95e01377f6a00549ded5bde4906218ffb",
+      "currentDiffSha256": "b1f58c34459254f304e9f92e4f9b25d2a23bc6f61db759db407c5cd996f5c0b8",
+      "newlineRestoration": {
+        "beforeSha256": "bd4e96928677bfe1b2f9024a5624eccedad62bf9a5082788da293cf0ee972958",
+        "afterSha256": "0243d02e095b1747ad97fdc366b484b4e99650c9b9aeaa2011713de5257b2444",
+        "crlfRemoved": 36,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/AudioMixerWindow.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "5ea2ff20ab6e1b9d2b5a918a4b722ca29a6782a2914dfb76fe52566ce8317b15",
+      "currentDiffSha256": "f87c1dc1ccc2655650c0cc7f82c5b8018c3d84b5981efc253c1d79de2fa0e663",
+      "newlineRestoration": {
+        "beforeSha256": "d152524fbeccce5f112375e2ce02a3c8a57a41966f51197af5635c40fe22364c",
+        "afterSha256": "25ea91731881d1f6c67d62db0fd69c70ff942bfacb88d4be34a83b8a8b48e8c6",
+        "crlfRemoved": 78,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "b6cf43e2d262834e69bf023e74d5b8c40cf7218cdc3a9616eee1a9abfc72942e",
+      "currentDiffSha256": "b6cf43e2d262834e69bf023e74d5b8c40cf7218cdc3a9616eee1a9abfc72942e"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "641ea0c2e61a1243f3977e40b4b432561bee0b2ced2dabfeb74846eae11301b4",
+      "currentDiffSha256": "36014e26a9d99a2694a1882e313cb64ab3fbeb1264eceec5c045d4bad2d4056b",
+      "newlineRestoration": {
+        "beforeSha256": "908cfcc1d3032ad45d24205eca23da84fc45a0827c396becfc9b69d7eecdd6bd",
+        "afterSha256": "7e87a86ff56f903546d7b0d70f0ce3a33d21a2fcae496566af3c7d459c26a4e6",
+        "crlfRemoved": 711,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "7d7ee049961b0f93b2cde006ecf528f87f282f601263232dd03722e613c0e858",
+      "currentDiffSha256": "7d7ee049961b0f93b2cde006ecf528f87f282f601263232dd03722e613c0e858"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "263cbad9c7b87a8d0b02646a70f9eb9b56117898828f32c85fc01484d0ee2ec1",
+      "currentDiffSha256": "ec61b152873bcc3d4547bfd7bb7c9082ec0ae6847e2bb8a857ea023d5e1e0849",
+      "newlineRestoration": {
+        "beforeSha256": "4d7177f65245d72043078b8044bc0436a9ec0bbe1493d199d061e1c1ffd2420c",
+        "afterSha256": "bcb39ab5a018cc51e2ffc66bdde54d86a6be7274c4104bfe47b9ca8fe1378afd",
+        "crlfRemoved": 2429,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "7b0e169956bd9f622451f6f686d95baf4b74024393dafd2ad7cc9a94bf490bfc",
+      "currentDiffSha256": "1999cdeb75fc4c01acba8bc8f852da4bbf28131e5f7dea3c781494089afd1715",
+      "newlineRestoration": {
+        "beforeSha256": "37819675f067298016bb8ce20658918c0c3172a89152a8d6e35730cf354ca780",
+        "afterSha256": "9b068726f7dd46982ebe5a0055307a64bd0f0506066d5ed88eb18fc5119af319",
+        "crlfRemoved": 297,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "dd96ac8d3035dd7be1ac631e654d81ef18ea8c956971cfc2988b185991ffd4cc",
+      "currentDiffSha256": "51708d78bb398094f8e3b39e47ae724f5899f9674983cc695010fdddcf3d1536",
+      "newlineRestoration": {
+        "beforeSha256": "65cd81df24c6997ae21f2af454a7ad6c8e1facae27132f2aabbb7929c50007d1",
+        "afterSha256": "6954c874bdd90b467a7d55114e765fff273b0cbd361cbb5400048568ad8980a9",
+        "crlfRemoved": 613,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "10ed6088193b62a969daa74fd5240d10620d90518cdb27c8d05b2e5e900ca8d5",
+      "currentDiffSha256": "8644e0960718f3e2d4a56f4aaa4fe69364f11667fc97e0b5984ccffb23abdc3d",
+      "newlineRestoration": {
+        "beforeSha256": "b000a97c848f28036fd812705c312f475dacee3ad8c1a35d916f66f14e18a5b9",
+        "afterSha256": "65de117010a0e729ae6bbeb34ca110e2ae1fa22854af76cab91b8a53f258301c",
+        "crlfRemoved": 4175,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/SceneViewWindow.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "825125b50a31d0fbe85750fd0c7f551767136f34812e062a2286dd0d49bd2c4d",
+      "currentDiffSha256": "825125b50a31d0fbe85750fd0c7f551767136f34812e062a2286dd0d49bd2c4d"
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "c417b117327233e610a60342e9d7381dbfe46ed8261d1937f838ad05d750cbc1",
+      "currentDiffSha256": "e096fb4727a5971d67dfe81911263520e2a13dfac625181099531927a234aeda",
+      "newlineRestoration": {
+        "beforeSha256": "f9e884677d5af129775732aa03ae327b3d5d3cc12aec5d658af9f1f1f4401e7c",
+        "afterSha256": "0e833367c93fd3b2873b627426e0484d77a132dfe14633d0ea6cadd31557f4ec",
+        "crlfRemoved": 4380,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/TerrainWindow.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "070a4190c3aaeb2cce25df6126bfcad0127d5f74b0dd359011e41d0b4e16e879",
+      "currentDiffSha256": "0f47d20b3e878d4018176371bdecd145281899660baacabb4acca08c91aed6d7",
+      "newlineRestoration": {
+        "beforeSha256": "6ef9f105a2b5f3ae088f48fea5523a2a62842234add4ad530e4596b5caf1fd31",
+        "afterSha256": "6ba25f12ed605f563a380997761ea30497cded1e24897056caddbd2c31ed069a",
+        "crlfRemoved": 362,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "954797665e01702d2b868ffbb4d5c43eff3b8a23e9aa693c79962ec305192d64",
+      "currentDiffSha256": "5d6fbc8fb5358b8870ef0c33d9d8695682a2c743009f8daa41598b461fb67c01",
+      "newlineRestoration": {
+        "beforeSha256": "32d754e0612cf3452873949b55c1239bd86061b97469a5595d37fcdf8f444c07",
+        "afterSha256": "bfa66597e267ba9ff57ee166453bfc5594a5f5362624835e329cca2ec8304595",
+        "crlfRemoved": 2974,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngine-Editor/Windows/UIBuilderWindow.h",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "7889a004009034a237bc7c451d6de0b4c28ed190e1b5583b5e8eefeb659ec953",
+      "currentDiffSha256": "16b7c68668f6912d0c60d7af681fa8a9766d55989dea1e2e6295e1df0bad5d2d",
+      "newlineRestoration": {
+        "beforeSha256": "c3419b1555344622aa50c35cf6cb45f2209b2c0c88605091b99c1d1843e50c0f",
+        "afterSha256": "fb3419cbb765cf461e9884a41295a85c848e82efe0657db3bddf3666d3f6b1a2",
+        "crlfRemoved": 213,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Editor/TerraEngineShaderCompiler.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "4934c6c8d8b5e4a61525d5a9d5a7eec93c6c1a418c189e87c9d4184e4d75d92e",
+      "currentDiffSha256": "6a303a53cc6162842a98a822b41fab282b166195b82b2c7d1b08eb732a65a759",
+      "newlineRestoration": {
+        "beforeSha256": "b9d7aece03814740b3c21fcc38eba973f7f38770c34ea139f0560b1540a97b9d",
+        "afterSha256": "0f4408e833b5aae742143263ef12ea8bec938b428d11c1aaebff29b4e2cc7e19",
+        "crlfRemoved": 209,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/AnimationPresentationSystem.cpp",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "82e282ae1a435de86866397078a9b8424588a4c8c509dc545198c8c24e5a2e67",
+      "currentDiffSha256": "f083e49eda4034c955b4eefeae83162da4307cf5ea7d2c0f10fea10383195335",
+      "newlineRestoration": {
+        "beforeSha256": "99b5d688406a115c253633d02aa22597ea571fbd6d76aacc2cd606613252e3fb",
+        "afterSha256": "aeefcfd089fff027949e33c3b4fe0718de1aaab2dae182048949f62f3d61cc1b",
+        "crlfRemoved": 1202,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/AnimationPresentationSystem.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "c293d20e0a15c2fb4b4166d82ff6b27d6c87cd4b798324c3dda3508f1f25170d",
+      "currentDiffSha256": "fc3862a12ddad16d5e4caef5ebcad1a24cf937e8e005fe087261cb978a31e242",
+      "newlineRestoration": {
+        "beforeSha256": "aebbbd889fc6b495324fff418d95f040c9bca5f9dfeed91d2b28baba20f98d31",
+        "afterSha256": "c74ab3f3a2402fc96a4fd68db893c6eabdcb0c486bc1507ad2118c181cf62010",
+        "crlfRemoved": 244,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/AnimationSystemLifecycle.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "3360470fcff7fe45d17e5ebb9c78e36df56a0978a6e707c40be76141ce688a46",
+      "currentDiffSha256": "f4989501c36d7d39322d38c6cc0c553c8794eee6481dd7574f9a88e3da9a2011",
+      "newlineRestoration": {
+        "beforeSha256": "cb3b358bd83c489397f1940e66156df482801cd849614308bb6e7167934fe9df",
+        "afterSha256": "26f7daaf3267549e0d8220779eb64fe33763756ecb23a43f086212670c3f14ff",
+        "crlfRemoved": 1826,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Assets/AnimationClipAsset.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "6246f73a971562bb28d54c1428a3ab0cf39e1056ec0370d276b9eb43cf06fea8",
+      "currentDiffSha256": "ceb464e2d4dbbea500b5bdbbe062fb0590071128aee73a8e6f8cb9b0d9699bf1",
+      "newlineRestoration": {
+        "beforeSha256": "ce1d4c7268bc45eea5b67fb8a954830f446ba07fd36b9d0c1920b42b930aed3b",
+        "afterSha256": "631627bcf89e70bf8efebad5d15a7ae0535742bbf81b79adb8c433ed853547e2",
+        "crlfRemoved": 857,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Assets/MotionDatabaseAsset.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "135f30ef36b3e26a8b54be57189f0cb17c5aa1eeaad9e4953b1c6a6c652e7b7a",
+      "currentDiffSha256": "28b8b5b0f7208945db03eab6bea81cd67c64a33ac220aff979967a841b067926",
+      "newlineRestoration": {
+        "beforeSha256": "a62a57ae0a6f310936b53114f347e46ad5de7f8f2877da5cd7b7264fe582624a",
+        "afterSha256": "6a5016e197f1f6fdeef8a0f9ffa8c33b66ba5b8bd754cc33d2e2addf0066dd93",
+        "crlfRemoved": 975,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Diagnostics/AnimationDiagnostics.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "573f597f882e16f78a511bf39e097831bf5dfedf30ea42d4aceef56c556d10da",
+      "currentDiffSha256": "4f94d19c7663d814c13bb19193d98879ab62be2832306720dfd146640e3e8320",
+      "newlineRestoration": {
+        "beforeSha256": "47697471063dd31ef7a3ec771df8a05678326670e5fed2ab122155cefd4bb3ae",
+        "afterSha256": "5f6c6af35ebaed8bf110d0054f9848e58aff97f369fa06d2fb7405d477c50089",
+        "crlfRemoved": 253,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Evaluation/CpuDeterministicEvaluator.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "3298876f6653811ac9b30d72ace7d12a348a6b41f725255b6714de39521253ad",
+      "currentDiffSha256": "816ea52ccc9e5abf4a2424924d34286336aab6af140d964cd88deaadfd30fb1b",
+      "newlineRestoration": {
+        "beforeSha256": "f2265769a38d323fe88bf582e7787ce84e1ddc70fdf40f1b602e9cf5ea909946",
+        "afterSha256": "455bebe7d38c9aabdf6e93734b32dfe25eedde05c46529cd1ddd5fed70db214f",
+        "crlfRemoved": 259,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Gpu/GpuAnimationPlan.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "ba355898accc1481cff1844c629d972e06fd36b4512476c4ed3c3337f36b68f5",
+      "currentDiffSha256": "8942a7530f9f29a3d2e37339b4c33f3fcccfe8dbce4e45eda732b42394aab91f",
+      "newlineRestoration": {
+        "beforeSha256": "49a94addcb977d672bb6e7ef5ec0babcff0a0018627874178b3702d549fb08a7",
+        "afterSha256": "ef9c05e9e6c4420f865b3f00a55c7662136165795adab6bb657a8dc378a3f60f",
+        "crlfRemoved": 1635,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Gpu/GpuAnimationPlanner.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "f1c21804778ec7a4de865c42d712565d357044af2733eb03a74744cfee998305",
+      "currentDiffSha256": "2a21222ca9f4562e186015f795f5a6d999bdc95dfd557c1272340a05f88724a4",
+      "newlineRestoration": {
+        "beforeSha256": "6b519cbb41d9a51fdc221a1a2607f5eb81fd85bbb6c51d368e993dc19b50055f",
+        "afterSha256": "025412c916a3bae7fb7b9dd80a3669ffd0c50f426df16c44053d1c4c77a441ec",
+        "crlfRemoved": 1733,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Graph/LayerEvaluator.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "0399e642d9af32eb2591c76964dc6dad360025740fe8407e89b586b7d5ed27cc",
+      "currentDiffSha256": "20d646f5b5297119bc31f535eed3d7c61643f73522724df5b916bcf952c2de55",
+      "newlineRestoration": {
+        "beforeSha256": "ed0c181f93ae7f27dc25877db7cc8e22505bd9f43ae507ddb6cdedef638306d3",
+        "afterSha256": "307b1093cf0d33114b721dbc890fea9550be0d3b116a750ed11cbb326c77c123",
+        "crlfRemoved": 438,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Graph/ProceduralNodeEvaluator.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "e3eb904acee7d1e1aee2267994c846c50dd753153daa53c8ed7980c4aa97c9c9",
+      "currentDiffSha256": "c96738538349365c700bbbcf568fd026cb82f3d43a2aab2d27c009f13161858e",
+      "newlineRestoration": {
+        "beforeSha256": "f9e28c78c6697488bf419c4e2f8ba04c0c673ee2a33cf1eea03362840efb899b",
+        "afterSha256": "cde782574168ec81fb84b27acb4439d19efdae71221cbdaf9888f766be2b56f1",
+        "crlfRemoved": 726,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Ragdoll/PhysicsPoseSnapshot.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "062e5e061fbb10226249c88ee89efcb8ebd040e27f1ecfd8af9b40e914592904",
+      "currentDiffSha256": "989251a96fd4c37cfafcea3d474657003a80dd1619c8fd328fed10266ea5336e",
+      "newlineRestoration": {
+        "beforeSha256": "4d5e3c99d32b2d6f216eb99e9611d02affa8a07a63491f1f07293bb8c890f91d",
+        "afterSha256": "73db73e4cdfd853329a4c5afce5c10be8e169a79d60b59638739ee378e0c24bd",
+        "crlfRemoved": 131,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Ragdoll/RagdollProfileValidator.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "247dac2a9077cb4aa9b4037cca411252c20c49218c3177258bc32cb6d9e98db2",
+      "currentDiffSha256": "00dcfc6c187048ad5fcccf2899badfca88a483ad97ffce9fbaf81bf7163af4c7",
+      "newlineRestoration": {
+        "beforeSha256": "e4fcdf40e5c569fe7eeff9c0947f3b4b1c1a03187d68b4189580bd4ea6a9be84",
+        "afterSha256": "186703186644168cef5045c9c8a777ee49bf25ab16a830f0d2989219dffbdd71",
+        "crlfRemoved": 749,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Ragdoll/RagdollState.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "a9b87a33a9598cb43509a90883ca6e43cb79bc83635e2a222f0a633407ffa7ca",
+      "currentDiffSha256": "4cef6be56b4e7b7897e8f2e799f1b7a6ff3c04920ad9db9d51edec486efbed81",
+      "newlineRestoration": {
+        "beforeSha256": "3b71bfa7cd4f1d8a8a2a61bc94bcafa01f21256e7dccb056920c439aa863badd",
+        "afterSha256": "63c2fea22da4ce8dc0eac0f0898de0fd1c22b1c01fe787cc1b82321a619c2ba6",
+        "crlfRemoved": 281,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Animation/Streaming/AnimationHotReload.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "57b8d77603a1f1a30b3732d70abd4846fd43762110c9dfb0dcd70c3fe2f82545",
+      "currentDiffSha256": "d51521d934fea8cd77f673e7885e4b448740af869951a8659a9c18e4f92d0f4c",
+      "newlineRestoration": {
+        "beforeSha256": "d7a3a80160649c4fd1433aa6d700fa1828444f172e4c43f0f6e8a6a786f4b0c7",
+        "afterSha256": "b9d9e52ab8f02fadf3c06cbede869a7315b9ca47a7a8a154222c9574011108ca",
+        "crlfRemoved": 808,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Audio/Backend/Detail/MiniaudioOfflineProbe.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "87c728e463463ba5c547691e327144ec2eab3102315213eedd4d9cfdd15fd48e",
+      "currentDiffSha256": "87c728e463463ba5c547691e327144ec2eab3102315213eedd4d9cfdd15fd48e"
+    },
+    {
+      "path": "Engine/Audio/Backend/MiniaudioBackend.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "609acffb51d9d43661172afd453bdff6796065dcc413a584d816d7e6cab3d5ba",
+      "currentDiffSha256": "fbf0669e49b7d9929fd8ec53e37b9274ec8bc84b9fee65716a6bb9340dfa578e",
+      "newlineRestoration": {
+        "beforeSha256": "49dd2c03e30f8b64b617c31710d973ea59b563ecc046e9d1524622ba6b17273f",
+        "afterSha256": "b6662f0bf06709b04b40f27310541a7188cedf7b7cd83123526abdb6cc782753",
+        "crlfRemoved": 422,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Audio/Backend/MiniaudioBackend.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "6dd55f0af9937261b43ffb495906d0b2feb9d9b0ac0c946d989b6c9fbb42930e",
+      "currentDiffSha256": "3f469fbb74baea12802a57a8936945ab8dec92f5bbe11dad661a098e599fe5e6",
+      "newlineRestoration": {
+        "beforeSha256": "0d94a67b64508bf0c45fdbd9ae84ac4830ce63049d3ce8dd3821dce2708a75cd",
+        "afterSha256": "c3b5189e4e81ae415d305dcd029a7833d99c22f1659fa8f149eaa1a54ba54b4a",
+        "crlfRemoved": 24,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Components/Physics/RigidBodyComponent.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "8b5406f3bf8b304ae70df480936e9c6cd5d559a997af84531e12958d356ce46d",
+      "currentDiffSha256": "6e01a363601d722c9514a1fda674c81ec234437919e71feb0e46c109f2d4720b",
+      "newlineRestoration": {
+        "beforeSha256": "c460c58f8571163e01ca768143ea346c0e445e04afefe983efb894f75d51b788",
+        "afterSha256": "01a54436fa9d4fd26745e5a2d899a9cbbb3b8cad2e815a4bdea559b9e3cbb87f",
+        "crlfRemoved": 117,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Components/PrefabLinkComponent.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "66cbd3ed51630571cea68e29afeb5aed17305f756abddd93e37c220fa93e8a02",
+      "currentDiffSha256": "268f70dc1d7f38fe33e19d2277fb2948229e0b6a5fd9620f067d99b751297a3a",
+      "newlineRestoration": {
+        "beforeSha256": "eed323366b49e9f9f0ea7a9399c3c02ffe47efd561cfc3b92ce6ebdb69775331",
+        "afterSha256": "5edc2f2e9a9c2e5ca878cf891e0fdfdbb0607f3697c9f57b798fb4e6da10cb2a",
+        "crlfRemoved": 37,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Core/Logger/Logger.cpp",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "c6b6d841cdc8d03a751afeb94efe379c0c47e2a935e25eb416575cb261972973",
+      "currentDiffSha256": "c6b6d841cdc8d03a751afeb94efe379c0c47e2a935e25eb416575cb261972973"
+    },
+    {
+      "path": "Engine/Core/Logger/Logger.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "e36afbc6dfaab9edc879be4a3eade210f6157578cec1486581541bacd5130830",
+      "currentDiffSha256": "e36afbc6dfaab9edc879be4a3eade210f6157578cec1486581541bacd5130830"
+    },
+    {
+      "path": "Engine/Core/Object/Component.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "7d675dd51b1fcf02631fc3478002b9271b0725eed95e233f13b4409c8d3dac4f",
+      "currentDiffSha256": "80497bc7ba700ba855af955ec6546234c1ca1b9dca8ac76f1d7f13f870eb46f2",
+      "newlineRestoration": {
+        "beforeSha256": "e4c1ebb49cc98db02f222e7ec9de146c33322faefdaaa70834af4a06a17b9fc0",
+        "afterSha256": "a4fcdf201ef20014c4a6c9f9c6937da3a00acdbf11a53b618a77a23b675faf17",
+        "crlfRemoved": 811,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Core/Scheduling/FrameWorkload.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "dde196a515961e490742e1ddc70c49aa699276af0911bc19cbe3eda992348630",
+      "currentDiffSha256": "f057082705805911b7fb38ec7e45dd86500017ed31e236c084831460944de36a",
+      "newlineRestoration": {
+        "beforeSha256": "9896e87519d4899cca652a152c5f81c269eee83b3007f27968e33158bdf8d6f2",
+        "afterSha256": "9c49e314f52566a7bc871b5f1e072be1d3c92a390ce627b722271d4f361a212e",
+        "crlfRemoved": 1615,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Core/Scheduling/FrameWorkloadProfiling.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "50509f4e51c7f39193ab0e80f3ff843d301ad75ef728efacc386174dd74ca091",
+      "currentDiffSha256": "50509f4e51c7f39193ab0e80f3ff843d301ad75ef728efacc386174dd74ca091"
+    },
+    {
+      "path": "Engine/Core/Scheduling/SystemScheduler.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d6bb6558b8c38cc23a2687a578d61a604dec8eb4960c5854fa33a44caee34b72",
+      "currentDiffSha256": "102560b6ab95719e2220c1bdfba7809bdddb92ee7c7ab242e8d6df93f8448ae1",
+      "newlineRestoration": {
+        "beforeSha256": "17a53fd863ecc43ab64d3b51129c61b09b74b9f9a6d3e9d6144095d712346eb0",
+        "afterSha256": "1d8345fbb3a3e75b32312232a9e5f6b408911f4d742cd1e0a2aebefb5ea125ef",
+        "crlfRemoved": 1670,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/DotNet/DotNetHost.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "decc6c8f0ed8751631af85c3ab4266e47e4389cdd49c8ae95003ac24dc30e7f2",
+      "currentDiffSha256": "186143ddac6561b2a7088acac572f8b8c6ef3a6f17cd3cd472eea2a82c463fe3",
+      "newlineRestoration": {
+        "beforeSha256": "9e96c6aa9f547a96a90051e385acc931663a8ce873240fea5c2115f33c1f8ff8",
+        "afterSha256": "30408fe886b8a2ee4581e94e39e93a6af96eab69d4b3bf1562a359e121d324f1",
+        "crlfRemoved": 502,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/DotNet/DotNetHost.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "31d4d76f313b8782d99cafcf0e54df12ef1fb65fcb3d86623e9985c1dda25e3f",
+      "currentDiffSha256": "0e05146febb4fd19dbda726d597fcd38906b05c828a70030c814c639fca1b455",
+      "newlineRestoration": {
+        "beforeSha256": "34be9380c637a12ad550e543388ad2e0c078546d71af8542c5e2b5fb018cd9aa",
+        "afterSha256": "607349205d3883eaead32dd107acad3fad7c32a189231421dfdd9939203d7924",
+        "crlfRemoved": 103,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/File Formats/TerraEngineMeshFile.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "83a0b33899013fdda6a4edf796cb524889a0ea3c2b4f779b204fea30c5223186",
+      "currentDiffSha256": "83a0b33899013fdda6a4edf796cb524889a0ea3c2b4f779b204fea30c5223186"
+    },
+    {
+      "path": "Engine/Input/InputSystem.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "c095c8bfeac22f65126dc8654345b550bd4a8d91f379f3c1fda3ded3baaa4fec",
+      "currentDiffSha256": "f9138493f31326f6e6bc32fd34294294c6ad2863571767f55aca4f59e1dc8a02",
+      "newlineRestoration": {
+        "beforeSha256": "9b10a619e4e585c68ccef925388c375b9235d731fe1d81ba63a76320a30d7532",
+        "afterSha256": "4ea7a96b40bd79213ec1056bf29d0f2f431b2378396726820d0eba7cbef0d34d",
+        "crlfRemoved": 264,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Input/InputSystem.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "690fb6ba2162c102596c3fce51273d747762f1fa70af69bfefe4ad5e5f013f81",
+      "currentDiffSha256": "4a34f85d7f703d34fb01fe60e226773455e42c106919d2d4c715ecac355ac2d2",
+      "newlineRestoration": {
+        "beforeSha256": "2b26647469d2a2ea463e2e7da93821e4243d43d04c618f1863b1879d9f717a5e",
+        "afterSha256": "a7e99d5e007e514806bd9b5cade3f5b4882bbfec4d038c4d926c3829f674c1c5",
+        "crlfRemoved": 89,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Dynamic/NavigationPreparation.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "b148c53bcc4fba4593ca088a64a15b5dbbf4e67e47cc6cf6dc6d855ffc0404d5",
+      "currentDiffSha256": "0dd32dd3d7d94b6acd4df06542cb298d079a1cde9047489233de3b872342eeb8",
+      "newlineRestoration": {
+        "beforeSha256": "a04d0d1981b04afdde720cfc75ca1457ef4ed6b8ef8a96449c311d5e69e50ac1",
+        "afterSha256": "61b49b64ed62ae48b803c608edb33bdb726e385caa1b2566156e64f7d9215815",
+        "crlfRemoved": 206,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Dynamic/NavigationPreparation.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d55f5c78354249faf18134e05129cde8cc43af3df18b67fdc6659a989fc6b3f7",
+      "currentDiffSha256": "5e647158bd89ac73ce87f108c124e07e782944dc4a23b06ccaf9aae674b1a51c",
+      "newlineRestoration": {
+        "beforeSha256": "8034353ac0a139e8b703d185b29c7054cc99c1d77305750e1c2c2235838529d4",
+        "afterSha256": "0a171b35da55590a1c95990911109bdcd78ed8aa6c1afef98c31168c55a3c131",
+        "crlfRemoved": 144,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Ground/GroundPortalGraph.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "68bed1da443a826ce426c015b9de308064ebc292eab966dd618311dc8073d577",
+      "currentDiffSha256": "8d659bed6b6c089bacf24fb62a885934f448c112dc819a6a755782dc9fc38ef2",
+      "newlineRestoration": {
+        "beforeSha256": "3fc1d264054bd9f69b7366b19fa8ff6c5c7fad5c56ecac6878d79be59bfa2dc6",
+        "afterSha256": "e114b733d76d9af6367191e127bf79ea58859b47a0c8c62808a09b6b824646de",
+        "crlfRemoved": 308,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Ground/GroundRouteQuery.cpp",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "85489c9145eab1babc429e738f8c7ee89f6c99c4c0319fc3b1f0da3d83a0577d",
+      "currentDiffSha256": "7dae7ff39fd0eabe365271ebcaf558aac5d34e00d0930c6bfb672a357495c989",
+      "newlineRestoration": {
+        "beforeSha256": "ed4c9e7295868b9ee2e8fc712ef914ed551a8339e15823712b44ed017ab8d897",
+        "afterSha256": "b523ea7611dcb5feb4f30453d53f1ff78cfa119ffc89c030d8d09cf4aa8899b2",
+        "crlfRemoved": 300,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Ground/GroundRouteQuery.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "b85446d6507ebaabbfacc0c6f66d869455eb7a9624c054d2170acbfde8170b38",
+      "currentDiffSha256": "b85446d6507ebaabbfacc0c6f66d869455eb7a9624c054d2170acbfde8170b38"
+    },
+    {
+      "path": "Engine/Navigation/Integration/NavigationRuntimeSceneCapture.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d256527de0eb0cd44b9b58e96cd7caa6633b5acba8dc1193bf490da7ba599705",
+      "currentDiffSha256": "55753a76f6e48767f2668c106fb9e7590a5eeaa448a7b0d9f46ef5d02021815f",
+      "newlineRestoration": {
+        "beforeSha256": "72438abc2972ac15f951e1a0c27efb48f12164f18847def2518d0de84937fe20",
+        "afterSha256": "573278a60eac8c190d46b846f9df7a6803fb7135b4169741396ce6c951bd8cd7",
+        "crlfRemoved": 717,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/NavigationBudget.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "cfaddea694cd9c23682af031deeeef1559bef2b0a809848c43f9dfb0964445e7",
+      "currentDiffSha256": "669e7fc124656051b02e5f44e03a4ee2b56e6790ed1d2cf2aae54fba9a05ff79",
+      "newlineRestoration": {
+        "beforeSha256": "9f9be2c334de06e1232848c1734a2475bf0dc112d459fe7204f6b27341e2c71e",
+        "afterSha256": "7d47f54fdec448d6aa7211326204939b23bf540eab7e452f43791c2615760f10",
+        "crlfRemoved": 166,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/NavigationStores.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "da8fbfdcd868b5304e9d7a9bb81e57623830701e64ea6520384feef4e3b64e23",
+      "currentDiffSha256": "da87d058b8dba443e351eb5a7e447ebb893b43e35945323e8718e8ea08fb2f5b",
+      "newlineRestoration": {
+        "beforeSha256": "2a319b57474f854ac9b536c8e985d2f9c08cc6f59519a66ce90fdaf1e14e037b",
+        "afterSha256": "46bfa0fe3ee8dfa6a1c924b4c4ccb69ce6702f544075acc6cdfa2d3911ce988e",
+        "crlfRemoved": 346,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Persistence/SavedNavigationCache.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "5005a0819626d0f6e23c1fdf12d266f875f27474a7436e36dc4ffef0cfdcd08a",
+      "currentDiffSha256": "9f000a5b1601dc28fac83e19333d9fd12e7e03199d2d92c418e9b153d593125a",
+      "newlineRestoration": {
+        "beforeSha256": "80f3b5ef2362f60f4397756a78fe100f5e6e9dd6fd095ea7e0347e59204b1d48",
+        "afterSha256": "e313b83e2f6077c771fbd8d16676abec3bb1c15d8f893a3a92b88b165d977afc",
+        "crlfRemoved": 120,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Streaming/NavigationStreamingCoordinator.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "8c0519ad264a8de039877af11c1323ce303ad50e0f5b9c25da8272fbeecef6c3",
+      "currentDiffSha256": "0da143ca1815a30d424da4d6eeec21f49b0d8ec79d9540f9e101ce3c51aa8625",
+      "newlineRestoration": {
+        "beforeSha256": "f070aa028a41f0db8097469a30f8bd3fe1ed1203cc14a5f5b02d6cae8979f203",
+        "afterSha256": "76de299201b0982df79495cb1acfaa947fc2933b27ba2c4f1e2b46558a353603",
+        "crlfRemoved": 137,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Navigation/Streaming/NavigationStreamingCoordinator.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "65bf8a7aa7d6ffb6f4c6dc5d624c66153f640f2c9acb95a3a1e0a169b2775711",
+      "currentDiffSha256": "3823a4b5b3b10787618fa3d023b624d09521fdede1a8c9127f1dd0f0d43f4bfe",
+      "newlineRestoration": {
+        "beforeSha256": "92eb40a2a57f38294684af910e683b2d424b7a47870b5f51fcaf31170176104f",
+        "afterSha256": "d3d48c23ba67e616fe5ab635ecfe483f4f2e43f77e5fc3e8b240a91c991717e4",
+        "crlfRemoved": 86,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Backend/IPhysicsBackend.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "17dd188a9a19fadcb2e2ba96927d0ce6af960b315b9f2087a4a6b2196654449f",
+      "currentDiffSha256": "104e9a85745cc2dc633bdacadf1fe324f19fc49ae6dcafad00e03afc3e01c82b",
+      "newlineRestoration": {
+        "beforeSha256": "4bc0b328212cb7d3b8a929ee07dd414b18e5d598c286de78675388022500fbd9",
+        "afterSha256": "60878a2be4fe61a931f3fab3b348e9359cf054ef8fa4c4258606468718d14537",
+        "crlfRemoved": 670,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Backend/JoltPhysicsBackend.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "8f2fc0279989badfc8bf7fd1fc8b984169ab3a7ac076f63d31b9c6fb49d7d789",
+      "currentDiffSha256": "eabf17fdcd319c22329005f4c11f082ae38a5a72aacf26b484087989f3bac4e8",
+      "newlineRestoration": {
+        "beforeSha256": "52d66041f6cc7403e1a09588a97ebc1f99354cbc996676da5d3240851764f0df",
+        "afterSha256": "fa9169558a74db1985b9258c0195870bc90a0f50526df65d4ff2b5220b0ec005",
+        "crlfRemoved": 5272,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Backend/JoltPhysicsBackend.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "925c2295c20d9084827fc9005141303548faabae9b16c1d7bba65ed08ff918e9",
+      "currentDiffSha256": "06d88202173950b76042555969e6c2bf70fa3e212e2419e59fbc3e679794b60d",
+      "newlineRestoration": {
+        "beforeSha256": "38e77a78f3e18a10c3adb363b210034917dcb2eeb37e7fb9f1815b825b5931e7",
+        "afterSha256": "652d363f48caee2cda90f17604edf31c8369c2456055c3254e02ae2e7402d9d0",
+        "crlfRemoved": 156,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Backend/PhysicsAllocatorAdapter.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "c5fb27f8a47658c4adcef46fea6844d7fded448b51de3b7ed7ceae4706c6d332",
+      "currentDiffSha256": "948e068bc9cf0fddc46761aa942585aebae15acc40935b8b81fd12e41bf846e4",
+      "newlineRestoration": {
+        "beforeSha256": "6e92bda369a043f58a07daf03022a2fa448eb32f0bd3333d867f4c2b29c1c0cf",
+        "afterSha256": "4530099d4db3cf0e15bc6695b3fc9773a70c2d7634f317a1498d9cb6643b5d37",
+        "crlfRemoved": 408,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Backend/PhysicsAllocatorAdapter.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "7c9dfa122b66980dfc4e935cef100d676e66dcd1bf64565d6bb0b339c0ff8bfa",
+      "currentDiffSha256": "973ad4e971b4c0e76fff14bff3526fa0269efc516a46f2fb2c1144c7c0a93a25",
+      "newlineRestoration": {
+        "beforeSha256": "c96c6aadb2d4caa7cee478038b4debc7eb42d3857403d92f5d5e6631ab23004e",
+        "afterSha256": "bf0054cbdd6caf77b8b93d16b9bdb626cdc88aae9bc385e2297fcb28f8497692",
+        "crlfRemoved": 97,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/PhysicsReviewTestAccess.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "12febb5ee1c3d41eb0fc005b03b81f584ef2d32610126f9b56904c4c78efd89f",
+      "currentDiffSha256": "12febb5ee1c3d41eb0fc005b03b81f584ef2d32610126f9b56904c4c78efd89f"
+    },
+    {
+      "path": "Engine/Physics/PhysicsSystem.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "9a95f1886c4b386b9269815a46cb8d2ab466804eb8aed9456e41724eef787667",
+      "currentDiffSha256": "e7e2bfbd54c8533fe3cc87314c3df6c5c04221a926b9645c83a81f4a5fdf1dd5",
+      "newlineRestoration": {
+        "beforeSha256": "04ddce81ddf5876d58ad90aee4c964ac1e46569a5f10843e738b796a95cffdf9",
+        "afterSha256": "1559090d08680ec47324560e32d651a73ab4f723b7a3e64f58f04d5a67af14c7",
+        "crlfRemoved": 5805,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/PhysicsSystem.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "7716852b2dc95fe038e358aae1bd6247a588ca65bde584fe17ce63af1122de5a",
+      "currentDiffSha256": "f308c640665189cce45b45764db269510473e3fc9fc2cccc3e1e8da9338dd4c2",
+      "newlineRestoration": {
+        "beforeSha256": "9116338f51ec9a1ed29d6f482397e23696e5ee918b2899f476fde1807c7d6c21",
+        "afterSha256": "ac38f7f53e6436ee3893f80342ccc11ca7e5e683a88cc4011e084b7e70d8ecc0",
+        "crlfRemoved": 120,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/PhysicsTypes.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "f384650db30854efb390e43126601c1b8a83774e5edab001668920ab78f8e6dd",
+      "currentDiffSha256": "0baed07361f443aeac8761ae24df323b43fabb7f449a842635cea345b08bbb08",
+      "newlineRestoration": {
+        "beforeSha256": "d5345527dca64fb05289cd288650779d53583e55a682be51b272a2dbcc26ad27",
+        "afterSha256": "2400582fe7447d9297509fc7311fb74e22d745f159a4135f47e3a947389832d5",
+        "crlfRemoved": 529,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/PhysicsWorld.cpp",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "9d7525f0087244f2d190fa678a4c7262570f0a71a9ca3e11cd51741aa73eaa33",
+      "currentDiffSha256": "610030db78ca60c9c833b6459eecb8a14cf380d20906539f94b24489f95a80f6",
+      "newlineRestoration": {
+        "beforeSha256": "9ead8d7c688ee3a685e2b072f9db6ef393e16ea5bd3caaa62d77abafca8d248c",
+        "afterSha256": "d0e4be051fea553b843e8a37c20aa3a89473ffb213884fb0adc32c17bd2fdc6a",
+        "crlfRemoved": 1091,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/PhysicsWorld.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "6312985efbadd783a56c1ea53c11e52b40d46fcf338d9c3e6adfe5cd400fb594",
+      "currentDiffSha256": "309fa2cb7ef51f0454b40d28b526179487fb13dac4d5ade194ca89ac4edcc799",
+      "newlineRestoration": {
+        "beforeSha256": "7a932eb0d1463fd5b518e599c30d3ef30d256103834dadec7f30ac1ef0bb20f7",
+        "afterSha256": "e4496fa46a523e2867dcfc2f3ae424430a699e48b0b55f55004934634fe82c07",
+        "crlfRemoved": 424,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Terrain/TerrainCollisionSeamPreparation.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "0590fa24857d3e5a055bd4776ee949b2c55d60aaa2e2ed2902c0d0afdb353283",
+      "currentDiffSha256": "0590fa24857d3e5a055bd4776ee949b2c55d60aaa2e2ed2902c0d0afdb353283"
+    },
+    {
+      "path": "Engine/Physics/Terrain/TerrainCollisionSeamPreparation.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "fbd0706190e1fc24d10365697fc0646c004c52a9489b80dc6f173f7ea68dcefe",
+      "currentDiffSha256": "fbd0706190e1fc24d10365697fc0646c004c52a9489b80dc6f173f7ea68dcefe"
+    },
+    {
+      "path": "Engine/Physics/Terrain/TerrainCollisionSystem.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "43362a36d04f1e85c000cf341c1588ae25f4892341147cd934ff78acaa91f6a6",
+      "currentDiffSha256": "608a1f679f18524314911cb902f0ceb72e05f0dfed59bb1833228d0574d73daa",
+      "newlineRestoration": {
+        "beforeSha256": "900236680635bc6d1b4d7692eb6bc2f07aedfb7778f904e8b7f2e2dfc59c19d2",
+        "afterSha256": "fc4e531c274c142c9b7b485ee4457fb48de0203ccee202eaecf5e17b22e0c634",
+        "crlfRemoved": 448,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Physics/Terrain/TerrainCollisionSystem.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "4e4f5b021ae28d253c1d14978481bd1577303c4e1c50d1795172efbdce78e41a",
+      "currentDiffSha256": "6027ce10a047c4b4cf9f84302152ceeee86824e958af171f8bfc50f111d9300a",
+      "newlineRestoration": {
+        "beforeSha256": "bc2159df72655a4da30939685ec595d821815b8bd588ee9d7e40b5a35d4a7932",
+        "afterSha256": "98dd8a43a251339c46ec5721745934fa0dec82c76cdfdeeb97282bb9309bd064",
+        "crlfRemoved": 164,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Profiling/Profiler.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "ebe862a1cd932041099634ba7d9330f4cf84c7a1807b8129fc727a766d09e3cf",
+      "currentDiffSha256": "ebe862a1cd932041099634ba7d9330f4cf84c7a1807b8129fc727a766d09e3cf"
+    },
+    {
+      "path": "Engine/Profiling/ProfilerCapture.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "ba811db29f846f7c0dab402d6c5c4588066caa757401e49b575a2074c513cdbe",
+      "currentDiffSha256": "ba811db29f846f7c0dab402d6c5c4588066caa757401e49b575a2074c513cdbe"
+    },
+    {
+      "path": "Engine/Profiling/ProfilerCapture.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "b4ec9273655ede87fbd236592c2405f4ba1343cbc1ebf7da38b915be01e2254c",
+      "currentDiffSha256": "b4ec9273655ede87fbd236592c2405f4ba1343cbc1ebf7da38b915be01e2254c"
+    },
+    {
+      "path": "Engine/Renderer/Frame/RenderFrameCaches.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "9c2f4151fd3b39cc00ce3b2e28effd474a6e302045eb7804b18f8a48fb0bb4db",
+      "currentDiffSha256": "8682b5da0a5fdd735f3574560899479d7cfba855b1080e59e002c9d9a2433215",
+      "newlineRestoration": {
+        "beforeSha256": "bb318d58c1c0f850dbe704c54a0eb6966903670a56a9b79a848fb1dfa7235f58",
+        "afterSha256": "fefdf853bc75e30e584ccf05b23f7dba18950ec1a75d487d05b45c4d24511b00",
+        "crlfRemoved": 432,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/Frame/RenderTopologyPreparation.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "9a0938440732ac8a40254224f0c26d4ec5de209e55ceb02429c8dd6218a8084c",
+      "currentDiffSha256": "030491f8d9fd101d3fc0200fddad0e5daaee39af4c214f9f35dfde1487da5067",
+      "newlineRestoration": {
+        "beforeSha256": "94cd0fc1ff9f443ed3213c0e4e55757f8676cd2b06b10ee6bc6bb980823ab027",
+        "afterSha256": "0d1a014898f6663ce1335dab7dd0ce91b1e0eb14829dbd87e7ca5f91b818e8aa",
+        "crlfRemoved": 396,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/Frame/RenderViewBuilders.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "deb66d79f7c82871f932106cefe96e30ea11f367ef5b025150a67d398906f79c",
+      "currentDiffSha256": "d1b62c73da00f8f6f32d27f0acd6f55a297e690537b5251c2dd5efba17998e20",
+      "newlineRestoration": {
+        "beforeSha256": "5a0a31c3fa2b70f55c6a132b906d80c61d66980a45c7fb8168e13240b24be5a5",
+        "afterSha256": "96fc6851d3df5737f107ec65a0be50ec69166dd0b09cf03993099d9644ce8ffa",
+        "crlfRemoved": 515,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/Graph/RenderGraph.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d27a0e0968087ad4166d4a7f7dca5582efbafa10248fd43c0b9cfe7c9f44a2a2",
+      "currentDiffSha256": "4b91559f14b9424f76f4acd19512d65d0f42d22163a3d8ffb376f0dd9073ef5b",
+      "newlineRestoration": {
+        "beforeSha256": "303d6088c3680c08beeb79e5318ef09dd10d5999ead6b5fa87bd94553a53d5e9",
+        "afterSha256": "10876669516075a8988f00a93a6376fa7b24188db744c20a997a1e4900fe200d",
+        "crlfRemoved": 386,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanAnimationResources.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "1d318b14ae68ed88e6fd0b3ae4c8a1985176866f9696a37c4bcd13719b65dfc7",
+      "currentDiffSha256": "43dd4d102e70eec28444150827e90900c049fddff2ecd19595b1b73aec48875f",
+      "newlineRestoration": {
+        "beforeSha256": "b932819a6c64292235f2fc9cdb62486c8fefaca615dcaf02dec0db5437322fde",
+        "afterSha256": "317fe896215a5d7e8e375bcb5775f3bb6223216cd37cc34f19aadae479ed6fcd",
+        "crlfRemoved": 1889,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanContext.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "7598597aa4a2b9e61d487b5de5b61857c3ac1719684d6995710517761304fa15",
+      "currentDiffSha256": "404b245893e020fe9afbd4e88fdcf2bafc6751db4360c33ca6405d29c4c5160b",
+      "newlineRestoration": {
+        "beforeSha256": "c5b4281565d6961d7ca43a9d23c390783a0f7d72e07d3a9997e31ffa3cd5c15b",
+        "afterSha256": "8351ddb7f5f866fcebfb9e0cce4ff7a94404e8b86302bcaa6469db96c4dd02fc",
+        "crlfRemoved": 2126,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanContext.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "1dc4b160ae39ee3f79d7c18ed13059b6f9cb07cf9800cb31842ce1eaabceb4c3",
+      "currentDiffSha256": "1dc4b160ae39ee3f79d7c18ed13059b6f9cb07cf9800cb31842ce1eaabceb4c3"
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "19c6e53f14fba82bc865db4f27963569fe0a89a5bc88afe74f12dcd2c60eec6b",
+      "currentDiffSha256": "55432e954d373f067856cb9e6bc7095539919e655a51255742b93839a0ea217b",
+      "newlineRestoration": {
+        "beforeSha256": "488fbcd6760fa537e04bafc82d3653c5c521311b7339003f0aa4a6b3090ef0fe",
+        "afterSha256": "3e3be12115fa4d2598f617a4d998eaba7b5a3ec72c19fa8333971e0c2e7b32cf",
+        "crlfRemoved": 2181,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "0f46777b217ce34ca07a78a69f3ff4d5cd5541468a04af123c1eee561a320f5f",
+      "currentDiffSha256": "50ff2426b9e24c18b6e22c226c1b34c82e59bdc086f0d1e0087e8af86fefe092",
+      "newlineRestoration": {
+        "beforeSha256": "8bd97b7b07f33a999366b03298a00523901c54602c21d53f5cff08023b037a20",
+        "afterSha256": "7a88bbe442c3ce3f830a262daa5880338d8affcbfe5f0d2f7c56a5b783575e21",
+        "crlfRemoved": 3964,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "c2b1fe7db500e5b7e5217b0eab655581961b44be961eef9a8886608ab042393b",
+      "currentDiffSha256": "c2b1fe7db500e5b7e5217b0eab655581961b44be961eef9a8886608ab042393b"
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanEmptyFramePolicy.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "2aab4d8742d8ef2836319db7e675478d118ed0100f095092f933132756e97d22",
+      "currentDiffSha256": "dccf3a5fb7e1674ec7c9c706929d84991a881597d88e34a0b99dd10d278d7f70",
+      "newlineRestoration": {
+        "beforeSha256": "e98f9869eee947d1048a69f9e64573cdbf6a7cd6fcdb1a97dfa6e65fcb6227ce",
+        "afterSha256": "c8edcf3755445b372f11348a058bed002a99ebeb374fdf3bbe50c4edfdae7b01",
+        "crlfRemoved": 2,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "4387bf04d8eb3a4b760f89e8fd9d21efeefb087991d6d9ba59a5b65bb68e30c0",
+      "currentDiffSha256": "c959157af478736a8d485e3ebc8ef0d089424ca8bf0bd6b33e7dca0e99f5b611",
+      "newlineRestoration": {
+        "beforeSha256": "b704c9dc2ce5cd58810f9479f3088a6bdf53c05940d39c93286be37765a37cfb",
+        "afterSha256": "5f35de7be6a18c65e8f1c64fc06a0dfdb11a58b27f9d34ee10a5ca52c6766041",
+        "crlfRemoved": 5805,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanFrameSubmission.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "e92c08e3d3da024c1685346e747eb337aba875dede126ed7321546a2b8b028ee",
+      "currentDiffSha256": "e92c08e3d3da024c1685346e747eb337aba875dede126ed7321546a2b8b028ee"
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "f6b26c9143b7ed94a4ea62e4e0d885291edeca7cca7b3ed22b04c02424965c1a",
+      "currentDiffSha256": "f6b26c9143b7ed94a4ea62e4e0d885291edeca7cca7b3ed22b04c02424965c1a"
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanResourceSource.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "34370ff78cbcb10efc3d45d26ba051f46487cea429ea4c25996eee5f4502d459",
+      "currentDiffSha256": "34370ff78cbcb10efc3d45d26ba051f46487cea429ea4c25996eee5f4502d459"
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "9222923bff821bb87719a65260aaa26dc80892fe8be045f8b1cff05eb49fecbc",
+      "currentDiffSha256": "744d48eea86d6c307fb6f57320c50e6b4cccc318ff97cc640b0c438365672ace",
+      "newlineRestoration": {
+        "beforeSha256": "588c110b3cc8e696200f792e1ddf8fa97a0787543161488b9ab7a03a454bab7a",
+        "afterSha256": "3ae148e3a97e25ddcd29b29d75b5fc17ea171c4520af4ffcb58423be2c85c86f",
+        "crlfRemoved": 503,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "72f5fde18e2fe5291ec4e20e94312cc7ac992f6f9a1fa1804773e778321f346d",
+      "currentDiffSha256": "75087fa9b77954ec9695305dac7acd86c783932482a026408a2ab71a9832cef6",
+      "newlineRestoration": {
+        "beforeSha256": "56c068ee7449d8464f58e46745ef9bbde380a01c5be58801eb75cf3c67d9834b",
+        "afterSha256": "2c3193584d2e80edbef1f8be4a8464a59a7700def22ce8cb916a131b82cb9c7a",
+        "crlfRemoved": 243,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RHI/Vulkan/VulkanVRS.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "f2cd51cb1e02d5575aad154fa3403a3993c06fd87dec04479dfa898de500291a",
+      "currentDiffSha256": "c0d4c0399613baf40813f67fc84dc683dae33afa71e11eff75ded8b972211b22",
+      "newlineRestoration": {
+        "beforeSha256": "4368bdc5f0873dc695d2829aef6da0e08c5a798ae4e3170990635fbc27e16a4d",
+        "afterSha256": "0c05259b318816a19647f43e9c113927d4a91c70983e89dabad380ea74347bf6",
+        "crlfRemoved": 100,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RenderSystem.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "7f579b13e32af6207ddbe1bdae20fd05d522e8011616c6375d0495097d379dbc",
+      "currentDiffSha256": "a6c3ee6062447d6ffd204c5e3a2da25bc29f446532f649f6d634fae64876705f",
+      "newlineRestoration": {
+        "beforeSha256": "70ed53946c58008a7c4a10cbfea82339b199d077f9ee72ee76cf7ffb7fef0bc4",
+        "afterSha256": "6ac6ca9df06a283b77256e2d36450a59dc86b630744211076f8083efba263249",
+        "crlfRemoved": 2698,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RenderSystem.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "e305dc759c2a60fbd2ec7aad9345c5b91f95c37b01d6341074141aa12ad23f59",
+      "currentDiffSha256": "dd2f913b829c69ef3fc707f11f24950a2b9c22bfcdc803aa8a9c267eb2f785cb",
+      "newlineRestoration": {
+        "beforeSha256": "f27e2c92db4c98c1378bd9ef83e2007ab1409fff0c8cd91e4aaee81113c9d36d",
+        "afterSha256": "0f4d9343af767d5a94a255b59806be6f3ad36d69b616bbcaa34699d128344f55",
+        "crlfRemoved": 1178,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/RenderSystemSettings.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "293905625340b93908271203bfc621e16321ed2c4f5784265319c0a1d56812b3",
+      "currentDiffSha256": "34a410858b2e878679fc73b55090fd35dab63cd075fa4e40e6de5febbdded0f2",
+      "newlineRestoration": {
+        "beforeSha256": "9726247ba344eb4e94b290721b3a49da0802978908f1b0972a3ff960ed80b6ff",
+        "afterSha256": "3ea193248a1d9d380e1bc7525e3ccb83f6cb41b80a4c0b5cf820dc3fe2eca2d7",
+        "crlfRemoved": 828,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/SyntheticCapture.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "24581c87b82a411f52c54b49f9675055b70ef08503649b4d3e5f844ff42b89bc",
+      "currentDiffSha256": "76dfd3cfc3e68fa3457ce2078f2e103caa5e0a0c6a8250601c57c98cc196ef62",
+      "newlineRestoration": {
+        "beforeSha256": "03d8c405a1fe7e9d440dae6c36e8b4953942bd8fca7de355c85047ddf5475ecb",
+        "afterSha256": "0404345712f9f0af760a86aef6eca4d2c32863e15e3834c055bc430bc6d3c499",
+        "crlfRemoved": 166,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Renderer/Terrain/TerrainSurfaceCache.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "2e2911b46c4f948468f197e3e26f2fb26784b79d43bf410f121874ff01b4bbd3",
+      "currentDiffSha256": "4e45a0b3cc8544316ff25fe487aee2a2cac423d7aadadd23165d134f7bd8bb79",
+      "newlineRestoration": {
+        "beforeSha256": "6cde91da59b8ee334624e39bc1c31e397c3e531c24e65486c99ce8de29696937",
+        "afterSha256": "d633e6de0635d297c163c9b7fa4726604fbeedf23faa09b1640fae5e49af8706",
+        "crlfRemoved": 97,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Resource/ResourceManagerMesh.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "cae65ff8ce668e1b0a633024a33640bea30977f9338e51701b960732fedc3259",
+      "currentDiffSha256": "cae65ff8ce668e1b0a633024a33640bea30977f9338e51701b960732fedc3259"
+    },
+    {
+      "path": "Engine/Resource/ResourceManagerNavigation.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "70825e18b1395c00a379f55651bde9eaba57a4a66b2d785a11e9dd6dea2a8fe3",
+      "currentDiffSha256": "27b51269558c9cf9499891b8b3857d7b524c2a77dcf60863348108521814d6bf",
+      "newlineRestoration": {
+        "beforeSha256": "5ea53941fbf36375ea717a160c7d455eb530dd507170d74b4934c31e7c72b6a1",
+        "afterSha256": "3595912f3231fd5d463cddbe03ab5bfbc98997b22e2f8eed61adbc2981a6893c",
+        "crlfRemoved": 194,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Resource/VirtualGeometryCodec.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "e9cb1c9d729c640f66aae9a8690da54b363018f79b9f50f0749896102eda8915",
+      "currentDiffSha256": "4ee60e8c269ad4d3e385ca72a5c29b67b7015b371cf5812388dc31f0236c636d",
+      "newlineRestoration": {
+        "beforeSha256": "25b7d886fe54d537751c3ef7e4ef582ec8b15a6d031a012771015404b30e5803",
+        "afterSha256": "c1074b38935ee138cfdc76feb35116a53bfc390686ab266f41c28080f08615ae",
+        "crlfRemoved": 477,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Resource/VirtualGeometryCodecReviewAccess.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "1f93dfdab52901ff8e63d76c9c670285fb70ee24bfc0deba9ab9f08240491117",
+      "currentDiffSha256": "1f93dfdab52901ff8e63d76c9c670285fb70ee24bfc0deba9ab9f08240491117"
+    },
+    {
+      "path": "Engine/Resource/VirtualGeometryStreamingPolicy.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "f940cbdeb5d4355a39d5ce1c43172bc43d6a8ddcc0b31adfbd49486b73debb14",
+      "currentDiffSha256": "5028020922f80f1da52ece6e440ccc9ede15d0da89a3e3d3a3dab26ad49b22bf",
+      "newlineRestoration": {
+        "beforeSha256": "8c64a1d6acf1e1ac3d8b2c6b5f83e5161d9da399116d081fc91ada33e4cd671e",
+        "afterSha256": "3241f814215971dcfb656bd54b84b6ed3d4b45e7614d3b2e7ed5f73853058d25",
+        "crlfRemoved": 157,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Runtime/ContentMount/TerrainRuntimeProxyLoader.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d73bee8746adda6c0bc98dfb50fca75f9f37a92ff539c8bccb5bfe016b25a9ce",
+      "currentDiffSha256": "9dcda5e12639eb2b4ec9f565aec8444247084b0bb23cfc9625c38ebab7a3b038",
+      "newlineRestoration": {
+        "beforeSha256": "bfed49d8a806f6053c9091bb3a47ccc2c2a86a47035b6fe91b1f52e6fc49988c",
+        "afterSha256": "32eac317027c7b894e136d7966386e7bafb4478492162161a5abc6957951c2f2",
+        "crlfRemoved": 466,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scene/SceneManager.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "9eccb8accdead52ba531edd38f6bc286570a174bf9729dcf72b33fe0d12d252e",
+      "currentDiffSha256": "9eccb8accdead52ba531edd38f6bc286570a174bf9729dcf72b33fe0d12d252e"
+    },
+    {
+      "path": "Engine/Scene/SceneMutationQueue.cpp",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "b31fe4a8e43a64cbddd8ac1670bae4ef84e1c517aac9773d8f2a80221e736780",
+      "currentDiffSha256": "b31fe4a8e43a64cbddd8ac1670bae4ef84e1c517aac9773d8f2a80221e736780"
+    },
+    {
+      "path": "Engine/Scene/SceneMutationQueue.h",
+      "reviewer": "Sol 4",
+      "priorReviewedDiffSha256": "d5e39e81bf015ae83f1d38e81e2ac8668dc3e161066bafc9644ef24533c642a1",
+      "currentDiffSha256": "d5e39e81bf015ae83f1d38e81e2ac8668dc3e161066bafc9644ef24533c642a1"
+    },
+    {
+      "path": "Engine/Scene/Serializer.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "9ea8bcf02e25dc90628e75286416e5d3eb742af3fcfc3ab9dab8ab98d3a23774",
+      "currentDiffSha256": "3d160813e28303c92e701c73440a27ca451512329151198cf0428b0aaeb475c8",
+      "newlineRestoration": {
+        "beforeSha256": "f9bd951629b0730ae7513460f927f130636a363fe96b2147e6997261d90cb691",
+        "afterSha256": "6642482a8438cd00e42de345d42b59bcd0fd6569336ad927350ac3b26e3202f0",
+        "crlfRemoved": 1886,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scene/Serializer.h",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "d896761b0606bf6e94e0f72c11631a74f91ec9eb397a1e54a7d373b0d3624352",
+      "currentDiffSha256": "2a2d451987d84f3e4ab3bc76930f0fa28d1e6733a8b45dea8366a935f5ea4ed4",
+      "newlineRestoration": {
+        "beforeSha256": "91964b8e5114a6f6a76c50325acc2bb810ed2f6faac51491b7d624be90f8ca36",
+        "afterSha256": "dabed350acc6c7f95df03034f223641c9bec0a2e3f43bdd1223257e20e681438",
+        "crlfRemoved": 133,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scene/SpatialIndex.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "780ad51fa24b45ea5b7cfbcbae452425906b87d1fdd0c7533d1ed6f2548925e1",
+      "currentDiffSha256": "a3bd2dc0e7da00a60d611ad713bb73dfdeb764c7e1361d18b5b8703aeb300e7f",
+      "newlineRestoration": {
+        "beforeSha256": "c58a6a2f907c10ce4f36ace0f8b7b67d60db026e335097d28d8215f3fa6c6a91",
+        "afterSha256": "a43e6b22215268ab2513d3d22d30df0fbbeee08a0b303c9335de215b8a44222e",
+        "crlfRemoved": 1343,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scene/TransactionalMutation.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "6e4515bbaf96a2825dca57a829081c99a4e72b6a7b6c8deefcd3ae7d3d7e0e38",
+      "currentDiffSha256": "26644fb96b268217fc141befbd5b4eb2877f9291b91c4ff624f431d6d18291b2",
+      "newlineRestoration": {
+        "beforeSha256": "9e921f46936bdf53a8b5943d52b6fa5cac53404bebb08fb734ed403d64bb6d62",
+        "afterSha256": "4081617cccc46f86c3d70e39270f465fbe7995cc6802cb914d1e50c640c571f9",
+        "crlfRemoved": 2314,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scene/WorldStreamingSystem.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "4a4b631aa986eddb15b712457f65e65ec167c735f2f0665400e89175e46655a1",
+      "currentDiffSha256": "6459c57014a5ff7a0a02caa55a972130ee11431bbfc2e4a953f2e94fe79db918",
+      "newlineRestoration": {
+        "beforeSha256": "88a4e0ac9d6d4dd27b4d53f9fa97619d262590c1e50fc9287a48aed06a9f5bc6",
+        "afterSha256": "a5b08a94dab9fb65ea82a248fdd7d4a8df27eb20d7946479fbd273b393309e8e",
+        "crlfRemoved": 285,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scene/WorldStreamingSystem.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d4734b723f4cf98532dedd59b2a5099d246e43592a1b58e6fc6ab4c540ca113c",
+      "currentDiffSha256": "d1f37378694ae145d4047f90c1fd5a76b75e1e269bf5e98f733c9fbcf35cf8a2",
+      "newlineRestoration": {
+        "beforeSha256": "5173e896be777d5981d3c4c559e95c7407f191b44d884b9407882316aea594de",
+        "afterSha256": "2851a83c8ebda180984b677c4386f607020436a8aed165cfbbf934ff8a288f71",
+        "crlfRemoved": 143,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Scripting/ScriptGlue.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "7232b0d8548bba19def399ae027b0537d059de3a5dbdde2516d17f31df5673a5",
+      "currentDiffSha256": "7232b0d8548bba19def399ae027b0537d059de3a5dbdde2516d17f31df5673a5"
+    },
+    {
+      "path": "Engine/Shaders/Animation/AnimationBlend.comp.hlsl",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "448d1b2c9b1a02b90c032fbad8be8b7d60325008e343e13b57787e05663dd93a",
+      "currentDiffSha256": "79d8fe6c4f063c482a3c62d4805d4532546d2eb138ab34016e3a66a2c7a2fc55",
+      "formattingCleanup": {
+        "beforeSha256": "4ce04b72dad9d9376e79bea302d65f6eb7fd78672d36a7d22316330d731ff113",
+        "afterSha256": "2f118772103c75479e8a463d455f9478c238b26d8eb4c076c1a7cab294493dfb",
+        "crlfRemoved": 54,
+        "blankLineWhitespaceRemoved": false,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/Animation/AnimationSample.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "17dda99bc7e9c089cf1a6dad3b8305fa79b5c6403a287493d8ec4265f7ef8c39",
+      "currentDiffSha256": "befa6c000100c766e5f8ecd3d659748a1ed3f8d712d218472453fbeb8582e17e",
+      "formattingCleanup": {
+        "beforeSha256": "19e44b2b7baa5228543bca89b2986b2b5b83605f80d04ebce88330249893d827",
+        "afterSha256": "d1f170bdc7efc1892fe5e0d1323dd0db51704e7fc841947a563e055654a411f1",
+        "crlfRemoved": 37,
+        "blankLineWhitespaceRemoved": false,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/PostProcess/VRSGenerate.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "5593e53f952613051995a5dd5a8502b919e5e078aa0d937914764ea79dfcfce6",
+      "currentDiffSha256": "cbc152de49c3ea0330ba3708a199fb793461dd2eee5c45a99671b5ba14d5aaf1",
+      "formattingCleanup": {
+        "beforeSha256": "e0b037799c9b074367b83e5b3eb86c0086647e79bd00c663af4dcd88f2c4ab12",
+        "afterSha256": "2173369260485f7bcc59896081876b61fc31533ece8295206287c6732accd47d",
+        "crlfRemoved": 66,
+        "blankLineWhitespaceRemoved": true,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/Terrain/TerrainSurface.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "47e26de0d126f698675a63f4d7c721d767e0bb5759e80b755063be569c9be65f",
+      "currentDiffSha256": "119b34dd3d5421704ee8b8ea690686042a5170b1baa9638dbc04f2c9a7410afa",
+      "formattingCleanup": {
+        "beforeSha256": "89688e4cd7b2b05fa3bc70c8726b41560e35ef7fcd566439c7d102a173499601",
+        "afterSha256": "46f7d29920c2952e964eeb38cecd51ea1c0dd2e4b24790934e1769cd4d048409",
+        "crlfRemoved": 106,
+        "blankLineWhitespaceRemoved": false,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "2281dbb3140091a6c861c6559c5152b45c8b41af13b248c97d74fee4be0872cb",
+      "currentDiffSha256": "39ff2b33cb319873ce1d52fd724391accd832fcd3838b9650bd87f6682ce3840",
+      "formattingCleanup": {
+        "beforeSha256": "682d0c106e4e0e399cd1fa2e2b4e13cea6f602ff9713009adcd797ccdddd7832",
+        "afterSha256": "49f0627d7a0f9eb098a193c1f4c2bb7f5f00053cd26ca719250fd4e4396165bb",
+        "crlfRemoved": 106,
+        "blankLineWhitespaceRemoved": false,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/Tests/ReviewRemediation/ActualAnimatedVertexFetch.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "6edbacaed85903b593ba863b69cea25d0a83194acda7982076d35410eac801eb",
+      "currentDiffSha256": "6edbacaed85903b593ba863b69cea25d0a83194acda7982076d35410eac801eb"
+    },
+    {
+      "path": "Engine/Shaders/Tests/ReviewRemediation/TerrainVisibilityCoordinates.vert.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "d0023d18dcf58ac08c6778f35bd53999e68f8fbf43b39001ef92e284eb41bc56",
+      "currentDiffSha256": "d0023d18dcf58ac08c6778f35bd53999e68f8fbf43b39001ef92e284eb41bc56"
+    },
+    {
+      "path": "Engine/Shaders/Tests/ReviewRemediation/VirtualGeometryReconstruction.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "a8bdb82911d7cd25071a7f0a14bbb00c5caac21f5b61b5d87e95c07d14adb77c",
+      "currentDiffSha256": "a8bdb82911d7cd25071a7f0a14bbb00c5caac21f5b61b5d87e95c07d14adb77c"
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/AnimatedPageDeform.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "5fdef073aa5e4e5c516c9899e00d2baa837c19aaf7155df9820b7f456c695efb",
+      "currentDiffSha256": "f2d054bc446c82c2ddff26ff3f6c5e14ae0eb7f9e291fd8dfae2ab840c4d28ee",
+      "formattingCleanup": {
+        "beforeSha256": "7f8be9dc5d740b6d7e784fcaf4a44affdced9ce34a77366b612ceafa4aefd0d2",
+        "afterSha256": "eeace9c3dfeac0f700c9f749170195934ef94a7d85e7e437054912542b35c376",
+        "crlfRemoved": 49,
+        "blankLineWhitespaceRemoved": false,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/VirtualGeometryComposite.frag.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "9851751d41f92cca3a17b710f26e577ce6a91be17b03a32565011b64d5e7e6ac",
+      "currentDiffSha256": "9851751d41f92cca3a17b710f26e577ce6a91be17b03a32565011b64d5e7e6ac"
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "bced79d146e5121de18106da4fc3ab1384ee151bfab93dc1fab19d7991a65e2d",
+      "currentDiffSha256": "bced79d146e5121de18106da4fc3ab1384ee151bfab93dc1fab19d7991a65e2d"
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/VirtualGeometryReconstruction.hlsli",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "5be057cd3fd286b637bc46680a89413815768fa6e10c3f209a8360f104860e32",
+      "currentDiffSha256": "5be057cd3fd286b637bc46680a89413815768fa6e10c3f209a8360f104860e32"
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/VirtualGeometryShadingBins.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "531027b90612782cf80f0d2c8d37fa565ad17cf550253085564ffaca1eb23601",
+      "currentDiffSha256": "531027b90612782cf80f0d2c8d37fa565ad17cf550253085564ffaca1eb23601"
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/VirtualGeometryTraversal.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "8887029bf8d08db0e6705054299f4ad30ceebdecf8a6998f538957ba07e96626",
+      "currentDiffSha256": "c7aabf8c8395be3ad8f7d6e14c718a4dac6716ddc526085aa8cdcb4e2dfa618c",
+      "formattingCleanup": {
+        "beforeSha256": "1d33aa296eb879a26cdb66998f63a498a3cfbff292f838730bdaa59694ab8e36",
+        "afterSha256": "27d0175480c75f9ceea921c5c6b9b78563b053e55b899787512e3a937851fcc7",
+        "crlfRemoved": 13,
+        "blankLineWhitespaceRemoved": false,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Shaders/VirtualGeometry/VirtualGeometryVisibilityResolve.comp.hlsl",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "6b1fa300eaa5de145dc5cb123e6cbcc9110ca4b2b38aec3627050f46c245c099",
+      "currentDiffSha256": "6b1fa300eaa5de145dc5cb123e6cbcc9110ca4b2b38aec3627050f46c245c099"
+    },
+    {
+      "path": "Engine/Terrain/TerrainAreaCodec.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "8472004af9d860358b6071b9e77d44917765b6a4dea90bcda3e44d3be7978b03",
+      "currentDiffSha256": "8472004af9d860358b6071b9e77d44917765b6a4dea90bcda3e44d3be7978b03"
+    },
+    {
+      "path": "Engine/Terrain/TerrainAssetStore.cpp",
+      "reviewer": "Codex parent (implementer; focused repair review)",
+      "priorReviewedDiffSha256": "b9f63aafaa4a1e0607581236660dec69f9b5947cb3256d207c3c837fbfb4d7a4",
+      "currentDiffSha256": "e8b9002a71a713763ab57ec39c2ee0f3e3d0a069de62a588e5e21cd023475ec4",
+      "newlineRestoration": {
+        "beforeSha256": "34e1f1b5b2b978f4108e540ee60b0c1848660e1b946501f95e8d8c9c91b0c099",
+        "afterSha256": "7de7406895b2c7772fcd7227964dcd53aa334d3569dbf370acaf7157a23e2d71",
+        "crlfRemoved": 1020,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Terrain/TerrainAssetStore.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "0b366252a40d201a3840f65bbceae30c611995069f3ea7ad7a5f3cce5b1ecaf3",
+      "currentDiffSha256": "e447362d49e7956ef64ccd31966351cc84e7f59de928cfcd17d86f3f29dc5dcc",
+      "newlineRestoration": {
+        "beforeSha256": "b8d14b06c168fdcdea57c09b4501f44b61cafe062c4ecc3267d557d234f2beee",
+        "afterSha256": "c75f3ca110264fcaf8ca6e657ab64e6d8c289f10fec881288b980855958ce386",
+        "crlfRemoved": 275,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Terrain/TerrainDiagnostics.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "409b4924d87c3e58fd1a88c119e2d963f01e2c62a5e6bb0050dca7d85ae7c320",
+      "currentDiffSha256": "67492a3bd60145e7dbfee45329efa9c46069bdff414eb8ea032b7451a4480634",
+      "newlineRestoration": {
+        "beforeSha256": "cdfbac53bab6bf3fe0bbfe351ff1c38bda415294559c7ce466710d2a79ba8437",
+        "afterSha256": "7cff328e203f29444b1d51014cf1966a6add1576df1ee0d44595f6643b964aee",
+        "crlfRemoved": 236,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Terrain/TerrainPublication.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "5b6a2b1d2b884d3e42f8f18e5715fa6248422e050ac617d7e48bc6772316406b",
+      "currentDiffSha256": "d4284693ba259e34c16bd0a64dea191b4195b355f0e5b8352b46e1ab7a3dc51d",
+      "newlineRestoration": {
+        "beforeSha256": "fce484aef78b84553e1860cbe7ffe986ffa148f895cc852d8619e6655d15a86d",
+        "afterSha256": "d94aa490786610e640f9d9940a742f28fb279f5de7c52a3a17dd1d03327160bd",
+        "crlfRemoved": 144,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/ThreadPool/ThreadPool.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "9d9b395823215575a40301dd96b46ac68518d9a2af18f462cceb544238cca356",
+      "currentDiffSha256": "0ea26dcf25ad9c621b9e44949a6670387be9360cd8bcb7f2d5b5a474746550c4",
+      "newlineRestoration": {
+        "beforeSha256": "731792742b5b803c4764fef5e76116dc10228bd18c4ee753b7eaa4e3b3035e61",
+        "afterSha256": "ce471366102c72b8ca770ca8f5f15aab9eceaef36a6672a01cec40c290b39c74",
+        "crlfRemoved": 643,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/ThreadPool/ThreadPool.h",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "0decbe9b5a6053be30a9894f40e07174db9bb1a11cc91b78b79d04772199763a",
+      "currentDiffSha256": "45e60fa5b015a04807224a1c118b92c64ec73a6e5b0f5c4c90a6e81326948672",
+      "newlineRestoration": {
+        "beforeSha256": "85bafac193801145f9d22bc93a0e3dd41a946629a9bf5cb413aceff0b8c7b733",
+        "afterSha256": "29850317c20594c2e54a2c2a5892cc3d6d33445c9aec8b4d30f19849d990f156",
+        "crlfRemoved": 389,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/UI/UIElement.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "2f479bf4e61f9d43720a6b0eca7ef74f746827ea699f9f62150705c914e25632",
+      "currentDiffSha256": "43c8f087e50284bc896467dcf3f79aea2a154ff476f2264facc8c72cdee888f9",
+      "newlineRestoration": {
+        "beforeSha256": "5bc08cddbc1ebcb6b6846290d0b4edaeef6dc846a7a20ba17b97dffa7d3e8f0a",
+        "afterSha256": "2616f62863e75f0ceb09b305a3ee95a8403bce0aea6d28b49424181410687bd3",
+        "crlfRemoved": 410,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/UI/UIElement.h",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "d67a6d264e527bb127a3f3ce233c753423423299ffa595da2f411e2ce376eb80",
+      "currentDiffSha256": "1ee60741f3d35e3d6c2879d7f99cc6cef8a5ad19942d437cc08c1ad07680e47f",
+      "newlineRestoration": {
+        "beforeSha256": "690a64ba5ec4b5704f0855504314aa25de8837b8d09df09b234c6ab48c63f8aa",
+        "afterSha256": "e3f32efd9a705faf82d96730137e86431c96ba30cd4dbaa1de1426fb32e86b18",
+        "crlfRemoved": 87,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/UI/UIParser.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "4fd1ae0cd4d4eda03e2cad19788cdea3a8a75afa692caa317db9c251aa169a29",
+      "currentDiffSha256": "dd89147e3c5148e6e72ceed16c247fe8606160c0bd2f7440f43b4fa688ba0fe2",
+      "newlineRestoration": {
+        "beforeSha256": "b32bbdb5a6e2a104f8ef536721aba9865b40b6eaef1e8e6cfc65f6f8df54b362",
+        "afterSha256": "43c61b1c866bb744fa35e7954dfe52d6ff991298a90b691cbe731b8e768b3fe5",
+        "crlfRemoved": 1359,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Utilities/OwnedProcess.cpp",
+      "reviewer": "Codex parent (implementer; focused review)",
+      "priorReviewedDiffSha256": "1c587b82ef3e0be25d898d33e9e727a288b97abdc22e8ed9d312762ddac61f32",
+      "currentDiffSha256": "3890b8e1d6e420752064fe9bc02e8f89b1b847ad7f4fd3e1c6150e073d842d79",
+      "newlineRestoration": {
+        "beforeSha256": "da489627b59f3ed6335211c425c081ed58a03969c2ea79615761f509c2615cbf",
+        "afterSha256": "9d0e1d2233ecb8ea7491fb333fecebc8341e3763f2ff33a0ddd359210f32002e",
+        "crlfRemoved": 278,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Utilities/PlatformUtils.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "512fd5a026516ccaa44edca686c4a52503182c10905e3a3c84020a50302a7964",
+      "currentDiffSha256": "c3fad10bf7b1b29c129d56d1b0cd4d11ba28913b89fc37e4d8a41b55a5cf198c",
+      "newlineRestoration": {
+        "beforeSha256": "068df4dcac749471bbe4abfffc6cb9de3e9484a5294afb89a562d21a080bb653",
+        "afterSha256": "4e790bf1aa6c02adfa6fa71df6b6221114e7a95b7cca0dccd24b8ae792143db0",
+        "crlfRemoved": 554,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Engine/Window/WindowSystem.cpp",
+      "reviewer": "Sol 1",
+      "priorReviewedDiffSha256": "4dba72af2cdf580b670844bdd0a59b47f1cc1d3dddcee6b2c974558775f85598",
+      "currentDiffSha256": "628886e55fd81aaed0669b171599c34b2ea44b28019bcf2041de96606e679735",
+      "newlineRestoration": {
+        "beforeSha256": "df0a6bc87cd5cc47e8b0b22fe4b58123d0e3e31ab6f574103ab93d7f664eabc4",
+        "afterSha256": "51e541ba8c56d9be7ea1aa14f947abab33735dfd2934a1f2c0dc42b587117fe2",
+        "crlfRemoved": 299,
+        "comparison": "equivalent executable tokens"
+      }
+    },
+    {
+      "path": "Tools/HeadlessExport/Main.cpp",
+      "reviewer": "Sol 3",
+      "priorReviewedDiffSha256": "9b846b3f13099f479d8b6e2d53ffbe6da9cbfb7d11c375d3cf2b39aa983ac137",
+      "currentDiffSha256": "e81b99d1a2faa289b103c48f35a51a095ddf20f00b232721ee66fedcf5f90cab",
+      "newlineRestoration": {
+        "beforeSha256": "af8477ee83f80027d8f2bb7fac5bb96279b3c145faa6d4d957a696c29e341926",
+        "afterSha256": "a0b6df798d1237f0abe90e8a209f2a8bce048d05e1281bc2d2912bb850d55590",
+        "crlfRemoved": 132,
+        "comparison": "equivalent executable tokens"
+      }
+    }
+  ]
+}

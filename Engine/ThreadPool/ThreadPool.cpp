@@ -17,6 +17,9 @@ namespace {
 	// During drain, a running dependency may still release its parent into the
 	// same queue. External producers are closed; worker completion remains owned.
 	thread_local ThreadPool* executingPool = nullptr;
+	// The owning worker entry assigns this once. A query checks executingPool
+	// first, so the default value never masquerades as main-thread worker zero.
+	thread_local std::size_t executingWorkerIndex = 0;
 	std::atomic<bool> nestedHookEnabled{false};
 	std::atomic<std::shared_ptr<const TerraEngine::Tasks::NestedTaskHook>> nestedHook;
 
@@ -563,15 +566,28 @@ void ThreadPool::RecordWorkerTaskFinished(
 	++telemetryGeneration;
 }
 
+std::optional<std::size_t> ThreadPool::CurrentExecutingWorkerIndex() const noexcept
+{
+	if(executingPool != this) return std::nullopt;
+	return executingWorkerIndex;
+}
+
 void ThreadPool::workerThread(int threadNum)
 {
 	// Restore thread-local ownership even if a future implementation reuses a
 	// worker entry point. Queue callbacks finish before this owner joins the thread.
 	struct ExecutionOwner {
 		ThreadPool* previous = executingPool;
-		explicit ExecutionOwner(ThreadPool* pool) { executingPool = pool; }
-		~ExecutionOwner() { executingPool = previous; }
-	} executionOwner(this);
+		std::size_t previousIndex = executingWorkerIndex;
+		ExecutionOwner(ThreadPool* pool, std::size_t index) {
+			executingPool = pool;
+			executingWorkerIndex = index;
+		}
+		~ExecutionOwner() {
+			executingWorkerIndex = previousIndex;
+			executingPool = previous;
+		}
+	} executionOwner(this, static_cast<std::size_t>(threadNum));
 	// Log that the worker thread is live so we can trace thread lifecycle events.
 	ObserveTaskSafely([&] { TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running."); });
 	const std::size_t workerIndex = static_cast<std::size_t>(threadNum);

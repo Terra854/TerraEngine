@@ -17,12 +17,15 @@ namespace TerraEngine::EditorTests
 			std::ifstream file(sourcePath, std::ios::binary);
 			if (!file)
 			{
-				return {};
+				// Absence cannot satisfy the negative menu checks below.
+				throw TestFailure("Menu contract source could not be read: " + sourcePath.string());
 			}
 
 			std::ostringstream buffer;
 			buffer << file.rdbuf();
-			return buffer.str();
+			const std::string source = buffer.str();
+			if (source.empty()) throw TestFailure("Menu contract source is empty: " + sourcePath.string());
+			return source;
 		}
 
 		struct NativeWindowMenuContract

@@ -346,6 +346,9 @@ namespace
 			hashValue(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(mesh)));
 			if (mesh != nullptr)
 			{
+				// Addresses may be recycled after a reload; this publication stamp
+				// distinguishes same-sized replacement bytes even in that ABA case.
+				hashValue(mesh->publicationGeneration);
 				hashValue(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(mesh->storage.data())));
 				hashValue(mesh->storage.size());
 				hashValue(mesh->meshletRecords.size());

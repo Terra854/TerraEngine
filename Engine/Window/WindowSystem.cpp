@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
+#include <limits>
 #include <stdexcept>
 
 #include "Debug.h"
@@ -20,12 +21,22 @@
 #	endif
 #	include <Windows.h>
 #endif
+#if defined(_WIN32) && defined(TERRAENGINE_WINDOW_NATIVE_TITLE_TESTS)
+#	include "Tests/Support/WindowFatalDialogNativeTestSupport.h"
+#endif
 
 namespace
 {
 	constexpr const char* kWindowPollingClassification = "protected";
 	constexpr const char* kWindowPollingProtectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";
 	constexpr const char* kWindowPollingWorkerSafeSubwork = "Workers may consume immutable input/window snapshots after polling.";
+
+	// Native filesystem paths must join the report's explicitly UTF8 text.
+	std::string Utf8Path(const std::filesystem::path& path)
+	{
+		const auto bytes = path.u8string();
+		return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+	}
 
 	std::string FormatFatalDialogMessage(const TerraEngine::FatalErrorDialogReport& report)
 	{
@@ -37,15 +48,15 @@ namespace
 		}
 		if (!report.crashDumpPath.empty())
 		{
-			stream << "\n\nCrash dump: " << report.crashDumpPath.string();
+			stream << "\n\nCrash dump: " << Utf8Path(report.crashDumpPath);
 		}
 		if (!report.crashSummaryPath.empty())
 		{
-			stream << "\nReport: " << report.crashSummaryPath.string();
+			stream << "\nReport: " << Utf8Path(report.crashSummaryPath);
 		}
 		if (!report.logPath.empty())
 		{
-			stream << "\nLog: " << report.logPath.string();
+			stream << "\nLog: " << Utf8Path(report.logPath);
 		}
 		if (!report.crashDumpFailureReason.empty())
 		{
@@ -54,7 +65,66 @@ namespace
 		}
 		return stream.str();
 	}
+#ifdef _WIN32
+	using NativeFatalDialogSink = int (*)(void*, const wchar_t*, const wchar_t*, unsigned int);
+	struct NativeFatalText
+	{
+		std::wstring converted;
+		bool fallback = false;
+		const wchar_t* Data() const noexcept
+		{
+			// A bounded literal needs no allocation while reporting conversion
+			// failure, including failure to allocate the UTF16 output buffer.
+			return fallback ? L"Fatal error text unavailable (UTF-8 conversion failed)." : converted.c_str();
+		}
+	};
+	NativeFatalText ConvertFatalUtf8(const std::string& input) noexcept
+	{
+		NativeFatalText result;
+		if(input.empty()) return result;
+		if(input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+		{
+			result.fallback = true;
+			return result;
+		}
+		const int byteCount = static_cast<int>(input.size());
+		// Flags0 applies Windows' U+FFFD replacement policy for malformed UTF8.
+		// ANSI conversion or byte widening would corrupt valid multilingual text.
+		const int count = MultiByteToWideChar(CP_UTF8, 0, input.data(), byteCount, nullptr, 0);
+		if(count <= 0) { result.fallback = true; return result; }
+		try
+		{
+			result.converted.resize(static_cast<std::size_t>(count));
+			if(MultiByteToWideChar(CP_UTF8, 0, input.data(), byteCount, result.converted.data(), count) != count)
+				result.fallback = true;
+		}
+		catch(...) { result.fallback = true; }
+		return result;
+	}
+	// Production and owned-window tests share conversion and dispatch arguments.
+	int DispatchNativeFatalDialog(const std::string& message, const std::string& title,
+		NativeFatalDialogSink sink, void* context)
+	{
+		const NativeFatalText wideTitle = ConvertFatalUtf8(title);
+		const NativeFatalText wideMessage = ConvertFatalUtf8(message);
+		return sink(context, wideMessage.Data(), wideTitle.Data(), MB_OK | MB_ICONERROR | MB_TASKMODAL);
+	}
+	int PresentNativeFatalMessageBox(void*, const wchar_t* message, const wchar_t* title, unsigned int flags)
+	{
+		return MessageBoxW(nullptr, message, title, flags);
+	}
+#endif
 }
+
+#if defined(_WIN32) && defined(TERRAENGINE_WINDOW_NATIVE_TITLE_TESTS)
+namespace TerraEngine::WindowTestSupport {
+	int DispatchFatalDialogForTest(const FatalErrorDialogReport& report,
+		NativeFatalDialogSink sink, void* context)
+	{
+		return DispatchNativeFatalDialog(FormatFatalDialogMessage(report), report.title, sink, context);
+	}
+}
+#endif
 
 WindowSystem& WindowSystem::Instance()
 {
@@ -214,12 +284,10 @@ WindowSystem::WindowWorkerSnapshot WindowSystem::GetLatestWorkerSnapshot() const
 	const std::string message = FormatFatalDialogMessage(report);
 	TERRAENGINE_LOG(LogLevel::Critical, "Fatal error dialog: " << report.title << " - " << message);
 #ifdef _WIN32
-	const std::wstring wideTitle(report.title.begin(), report.title.end());
-	const std::wstring wideMessage(message.begin(), message.end());
 	// MessageBoxW is intentionally independent of the engine renderer. The
 	// owner handle may be null when the graphics backend failed during startup,
 	// which still gives Windows a process-modal crash reason dialog.
-	MessageBoxW(nullptr, wideMessage.c_str(), wideTitle.c_str(), MB_OK | MB_ICONERROR | MB_TASKMODAL);
+	(void)DispatchNativeFatalDialog(message, report.title, PresentNativeFatalMessageBox, nullptr);
 #else
 	(void)report;
 #endif

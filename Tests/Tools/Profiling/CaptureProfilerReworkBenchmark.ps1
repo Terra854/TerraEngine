@@ -249,6 +249,17 @@ if($RegenerateEvidenceFromRuns) {
 	if($DryRun) { $arguments.DryRun = $true }
 	& $runner @arguments
 	Require ($?) 'Canonical profiler benchmark runner failed.'
+	if($DryRun) {
+		# The canonical dry run validates the real inputs without collecting any
+		# run metrics. Preserve the identity sidecar, then stop before aggregation;
+		# an input-validation result must never look like measured performance.
+		[ordered]@{
+			status = 'validated-inputs-only'; dryRun = $true
+			identityPath = $identityPath; samplesCreated = 0
+			measurementsAvailable = $false
+		} | ConvertTo-Json -Depth 4 | Write-Output
+		return
+	}
 }
 
 # Validate every retained raw run before any aggregation, including normal live
@@ -403,7 +414,10 @@ if(-not $DryRun) {
 				Require $false "MatchedWindowOpen recording row requires measured windowMeasurement: $($_.FullName)"
 			}
 			$windowMeasurement.status = 'unavailable'
-			if($null -eq (Get-PropertyValue $windowMeasurement 'twoPercentGate')) { $windowMeasurement.twoPercentGate = $false }
+			if($null -eq (Get-PropertyValue $windowMeasurement 'twoPercentGate')) {
+				# JSON-deserialized PSCustomObject has no setter for a missing property.
+				$windowMeasurement | Add-Member -MemberType NoteProperty -Name twoPercentGate -Value $false -Force
+			}
 		}
 		$evidenceRuns.Add([ordered]@{
 			runId = "$($m.scenario)-$($m.run)"; runNumber = [int]$m.run; scenario = [string]$m.scenario; mode = if($null -ne $m.mode) { [string]$m.mode } elseif($Mode -eq 'MatchedWindowOpen') { 'recording-window-open' } else { 'recording-window-closed' }

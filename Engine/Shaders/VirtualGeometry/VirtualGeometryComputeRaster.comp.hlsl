@@ -3,6 +3,7 @@
 // which keeps large triangles correct instead of truncating them to one tile.
 #include "VirtualGeometryAbi.hlsli"
 #include "VirtualGeometryRasterTriangle.hlsli"
+#include "VirtualGeometryReconstruction.hlsli"
 
 struct RasterConstants
 {
@@ -44,12 +45,6 @@ uint PackUnorm2x16(float2 value)
 {
 	const uint2 quantized = uint2(round(saturate(value) * 65535.0f));
 	return quantized.x | (quantized.y << 16u);
-}
-
-uint PackSnorm2x16(float2 value)
-{
-	const int2 quantized = int2(round(clamp(value, -1.0f, 1.0f) * 32767.0f));
-	return (uint(quantized.x) & 0xffffu) | (uint(quantized.y) << 16u);
 }
 
 // Vulkan homogeneous clip distances cover positive W, X/Y side planes, and
@@ -147,11 +142,19 @@ void RasterizeTriangle(RasterVertex vertex0, RasterVertex vertex1, RasterVertex 
 			const uint pixel = y * width + x;
 			if(pixel >= Raster.pixelCount) continue;
 			const float3 screenBarycentrics = float3(edge12, edge20, edge01) * invArea;
-			const float3 sourceBarycentrics = vertex0.barycentrics * screenBarycentrics.x
-				+ vertex1.barycentrics * screenBarycentrics.y + vertex2.barycentrics * screenBarycentrics.z;
+			// Clipping interpolates canonical source weights in homogeneous space.
+			// Perspective-correct those generated vertices before packing direct
+			// source weights shared by resolve and composite's transient V2 ABI.
+			float3 sourceBarycentrics = vertex0.barycentrics * (screenBarycentrics.x / vertex0.clip.w)
+				+ vertex1.barycentrics * (screenBarycentrics.y / vertex1.clip.w)
+				+ vertex2.barycentrics * (screenBarycentrics.z / vertex2.clip.w);
+			sourceBarycentrics = EncodeVirtualGeometryReconstructionWeights(sourceBarycentrics);
 			const float depthNdc = vertex0.clip.z / vertex0.clip.w * screenBarycentrics.x
 				+ vertex1.clip.z / vertex1.clip.w * screenBarycentrics.y + vertex2.clip.z / vertex2.clip.w * screenBarycentrics.z;
-			const uint depthKey = uint(round(saturate(depthNdc) * 4294967295.0f));
+			// Float cannot represent UINT_MAX exactly: select the far-plane key
+			// explicitly instead of converting rounded 2^32 to an undefined uint.
+			const uint depthKey = depthNdc >= 1.0f ? 0xffffffffu
+				: uint(round(saturate(depthNdc) * 4294967295.0f));
 			if(Raster.phase == 0u) {
 				uint previousDepth;
 				InterlockedMin(depth[pixel], depthKey, previousDepth);
@@ -170,11 +173,10 @@ void RasterizeTriangle(RasterVertex vertex0, RasterVertex vertex1, RasterVertex 
 				// Only the final depth and stable-identity winner reaches this phase,
 				// so one lane owns every non-atomic companion field.
 				visibility[pixel].y = PackUnorm2x16(sourceBarycentrics.xy);
-				const float2 barycentricDerivative = float2(
-					(screen1.y - screen2.y) * invArea,
-					(screen2.x - screen1.x) * invArea);
-				visibility[pixel].z = PackSnorm2x16(barycentricDerivative);
-				visibility[pixel].w = source.identity.z;
+				visibility[pixel].z = depth[pixel];
+				// XOR preserves every generation bit and rejects a legacy producer
+				// against this generation under the new resolve encoding contract.
+				visibility[pixel].w = source.identity.z ^ TE_VIRTUAL_GEOMETRY_VISIBILITY_ENCODING_TOKEN;
 			}
 		}
 	}

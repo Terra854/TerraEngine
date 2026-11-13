@@ -317,11 +317,17 @@ namespace TerraEngine::Renderer {
 		const bool workerAllowed = capabilities.supportsParallelRecording && capabilities.maxRecordingWorkers > 1u;
 		for (const RenderFrameViewRequest& view : snapshot.viewRequests)
 		{
-			const std::string viewPrefix = "view-" + std::to_string(view.outputId);
-			const std::uint64_t collectedGeometryResource = view.outputId + 1u;
-			const std::uint64_t virtualGeometryMainResource = view.outputId + 200u;
-			const std::uint64_t depthResource = view.outputId + 100u;
-			const std::uint64_t virtualGeometryPostResource = view.outputId + 201u;
+			// The snapshot identity is (output kind, view type, full uint32 ID).
+			// Fixed disjoint bit lanes avoid hashing collisions and uint32 addition
+			// overflow. Four low bits identify resources; zero remains reserved.
+			const std::uint64_t viewIdentity = (std::uint64_t(view.outputKind) << 40u)
+				| (std::uint64_t(view.viewType) << 32u) | std::uint64_t(view.outputId);
+			const std::string viewPrefix = "view-" + std::to_string(viewIdentity);
+			const std::uint64_t resourceBase = viewIdentity << 4u;
+			const std::uint64_t collectedGeometryResource = resourceBase | 1u;
+			const std::uint64_t virtualGeometryMainResource = resourceBase | 2u;
+			const std::uint64_t depthResource = resourceBase | 3u;
+			const std::uint64_t virtualGeometryPostResource = resourceBase | 4u;
 
 			RenderPassNode collectPass;
 			collectPass.passId = viewPrefix + ".collect";
@@ -350,6 +356,9 @@ namespace TerraEngine::Renderer {
 			drawPass.passId = viewPrefix + ".draw";
 			drawPass.viewType = view.viewType;
 			drawPass.dependencies.push_back(passes.back().passId);
+			// The draw reads collect's resource directly. Declare that proof too;
+			// collect already precedes main, so this adds no execution boundary.
+			drawPass.dependencies.push_back(viewPrefix + ".collect");
 			drawPass.workPolicy = workerAllowed ? RenderWorkPolicy::WorkerEligible : RenderWorkPolicy::SerialRequired;
 			drawPass.fallbackReason = workerAllowed ? "" : "Backend capability profile disables parallel recording.";
 			drawPass.profilingLabel = "RenderGraph: Draw View";

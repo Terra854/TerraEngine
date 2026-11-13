@@ -526,8 +526,8 @@ def main():
 		result = compare(args)
 	except Mismatch as error:
 		result = {"status": "Different", "reason": str(error), "nativeAcceptance": False, "performanceAcceptance": False}
-	except (Unverified, KeyError, TypeError, ValueError, OSError) as error:
-		result = {"status": "Unverified", "reason": str(error), "nativeAcceptance": False, "performanceAcceptance": False}
+	except Exception as error:  # Malformed/unexpected evidence is never an observed difference.
+		result = {"status": "Unverified", "reason": type(error).__name__ + ": " + str(error), "nativeAcceptance": False, "performanceAcceptance": False}
 	result["comparator"] = pin(Path(__file__).absolute())[0]
 	(args.output / "comparison.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 	return 0 if result["status"] == "ComparedEqual" else 1 if result["status"] == "Different" else 2
@@ -536,6 +536,6 @@ def main():
 if __name__ == "__main__":
 	try:
 		sys.exit(main())
-	except (Unverified, OSError) as error:
-		print(str(error), file=sys.stderr)
+	except Exception as error:
+		print(type(error).__name__ + ": " + str(error), file=sys.stderr)
 		sys.exit(2)

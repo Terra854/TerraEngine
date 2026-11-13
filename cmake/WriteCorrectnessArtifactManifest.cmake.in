@@ -91,14 +91,50 @@ set(correctness_copies
 	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngine-EditorTests>"
 	"Tests/Engine/$<TARGET_FILE_NAME:TerraEngineCorrectnessProcessFixture>"
 	"Tests/Editor/$<TARGET_FILE_NAME:TerraEngineCorrectnessProcessFixture>")
+# Final per-configuration target declarations accompany the source/copy pairs.
+# The prefix preserves empty RPATH entries as list elements; bracket quoting
+# preserves literal $ORIGIN without interpreting it as install-script input.
+set(correctness_install_runpaths
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngineTextureUiFixtureGenerator,$<TARGET_PROPERTY:TerraEngineTextureUiFixtureGenerator,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:RenderPublicationAllocationFixture,$<TARGET_PROPERTY:RenderPublicationAllocationFixture,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngineModelPackageCompiler,$<TARGET_PROPERTY:TerraEngineModelPackageCompiler,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-Engine,$<TARGET_PROPERTY:TerraEngine-Engine,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-Editor,$<TARGET_PROPERTY:TerraEngine-Editor,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-Export,$<TARGET_PROPERTY:TerraEngine-Export,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-Launcher,$<TARGET_PROPERTY:TerraEngine-Launcher,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-Engine,$<TARGET_PROPERTY:TerraEngine-Engine,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-EngineTests,$<TARGET_PROPERTY:TerraEngine-EngineTests,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngine-EditorTests,$<TARGET_PROPERTY:TerraEngine-EditorTests,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngineCorrectnessProcessFixture,$<TARGET_PROPERTY:TerraEngineCorrectnessProcessFixture,INSTALL_RPATH>>,:>]==]
+	[==[rpath=$<JOIN:$<TARGET_GENEX_EVAL:TerraEngineCorrectnessProcessFixture,$<TARGET_PROPERTY:TerraEngineCorrectnessProcessFixture,INSTALL_RPATH>>,:>]==])
 list(LENGTH correctness_sources correctness_source_count)
+list(LENGTH correctness_copies correctness_copy_count)
+list(LENGTH correctness_install_runpaths correctness_runpath_count)
+if(NOT correctness_source_count EQUAL correctness_copy_count
+	OR NOT correctness_source_count EQUAL correctness_runpath_count)
+	message(FATAL_ERROR "Correctness source/copy/INSTALL_RPATH declarations must remain paired")
+endif()
+if("@CMAKE_SYSTEM_NAME@" STREQUAL "Linux")
+	include("@CMAKE_SOURCE_DIR@/cmake/CompareInstalledElf.cmake")
+endif()
 math(EXPR correctness_last "${correctness_source_count} - 1")
 foreach(correctness_index RANGE 0 ${correctness_last})
 	list(GET correctness_sources ${correctness_index} correctness_source)
 	list(GET correctness_copies ${correctness_index} correctness_relative)
 	file(SHA256 "${correctness_source}" correctness_expected_hash)
 	file(SHA256 "${correctness_root}/${correctness_relative}" correctness_installed_hash)
-	if(NOT correctness_expected_hash STREQUAL correctness_installed_hash)
+	if("@CMAKE_SYSTEM_NAME@" STREQUAL "Linux")
+		list(GET correctness_install_runpaths ${correctness_index} correctness_path_spec)
+		string(SUBSTRING "${correctness_path_spec}" 6 -1 correctness_install_runpath)
+		# Fresh private copies preserve every real build/install byte and raw hash.
+		string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef correctness_nonce)
+		set(correctness_private "@CMAKE_CURRENT_BINARY_DIR@/CMakeFiles/CorrectnessElfComparison/${correctness_nonce}")
+		if(EXISTS "${correctness_private}")
+			message(FATAL_ERROR "Private correctness ELF comparison directory already exists")
+		endif()
+		correctness_compare_elf("${correctness_source}" "${correctness_root}/${correctness_relative}"
+			"${correctness_install_runpath}" "@CMAKE_READELF@" "${correctness_private}")
+	elseif(NOT correctness_expected_hash STREQUAL correctness_installed_hash)
 		message(FATAL_ERROR "Installed correctness binary differs from its built target: ${correctness_relative}")
 	endif()
 endforeach()

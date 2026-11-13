@@ -1,6 +1,7 @@
 // ResourceManagerNavigation.cpp - checked navigation companion loading.
 
 #include "Resource/ResourceManager.h"
+#include "Runtime/ContentMount/ContentMount.h"
 
 #include "Navigation/Geometry/NavigationGeometryFormat.h"
 #include "Navigation/Geometry/NavigationGeometrySnapshot.h"
@@ -9,6 +10,7 @@
 #include <cctype>
 #include <cstddef>
 #include <limits>
+#include <fstream>
 #include <system_error>
 
 namespace {
@@ -60,6 +62,8 @@ NavigationGeometryLoadResult ResourceManager::LoadNavigationGeometryCompanion(
 	NavigationGeometryLoadResult result;
 	RequestPtr request;
 	RequestDeliveries deliveries;
+	std::string mountedLogicalPath;
+	bool mountedAuthority = false;
 	if(id == TerraEngine::EMPTY_UUID || path.empty() || maximumBytes == 0U) {
 		result.reason = "InvalidNavigationGeometryRequest";
 		return result;
@@ -77,6 +81,11 @@ NavigationGeometryLoadResult ResourceManager::LoadNavigationGeometryCompanion(
 				result.reason = "NavigationGeometryCompanionExtensionRejected";
 				return result;
 			}
+			// Capture logical mount addressing with the same root/request epoch.
+			// A packaged request has one authority even when its archive later misses
+			// or unmounts; a developer loose file can never become its fallback.
+			mountedLogicalPath = ContentMount::NormalizeLogicalPath(result.resolvedPath.lexically_relative(assetRoot).generic_string());
+			mountedAuthority = IsExportRuntime() || ContentMount::Instance().IsMounted();
 			const auto key = NormalizeKey(result.resolvedPath);
 			std::string previous;
 			{ std::shared_lock paths(navigationGeometryPaths.mutex);
@@ -91,20 +100,41 @@ NavigationGeometryLoadResult ResourceManager::LoadNavigationGeometryCompanion(
 		DeliverRequests(std::move(deliveries));
 		ScheduleRequestWork(request, [&] {
 		InvokeRequestHook(request->key, 0U);
-	std::error_code sizeError;
-	const std::uintmax_t fileBytes = std::filesystem::file_size(result.resolvedPath, sizeError);
-	if(sizeError) {
-		result.reason = "NavigationGeometryMissing";
-		FinishRequest(request, RequestOutcome::Failed, result.reason); return;
+	std::vector<std::uint8_t> rawBytes;
+	if(mountedAuthority) {
+		// ReadAllChecked holds mount metadata and IO under one shared owner, and
+		// applies the byte limit before allocating/decompressing the archive entry.
+		auto read = ContentMount::Instance().ReadAllChecked(mountedLogicalPath, maximumBytes);
+		result.sourceBytes = static_cast<std::size_t>(std::min<std::uint64_t>(read.entry.logicalSize, std::numeric_limits<std::size_t>::max()));
+		if(!read.Succeeded()) {
+			result.reason = read.status == ContentReadStatus::ReadLimitExceeded
+				? "NavigationGeometryByteLimitExceeded" : "NavigationGeometryMissing";
+			FinishRequest(request, RequestOutcome::Failed, result.reason); return;
+		}
+		rawBytes = std::move(read.bytes);
+	} else {
+		// Keep ordinary editor files bounded too. Read only the size observed on
+		// this opened stream, rather than sizing one path then doing an unbounded
+		// mount-aware reread that could observe a different file or authority.
+		std::ifstream file(result.resolvedPath, std::ios::binary | std::ios::ate);
+		const auto length = file ? file.tellg() : std::streampos(-1);
+		if(length <= std::streampos(0)) {
+			result.reason = "NavigationGeometryMissing";
+			FinishRequest(request, RequestOutcome::Failed, result.reason); return;
+		}
+		const auto fileBytes = static_cast<std::uintmax_t>(length);
+		result.sourceBytes = static_cast<std::size_t>(std::min<std::uintmax_t>(fileBytes, std::numeric_limits<std::size_t>::max()));
+		if(fileBytes > maximumBytes) {
+			result.reason = "NavigationGeometryByteLimitExceeded";
+			FinishRequest(request, RequestOutcome::Failed, result.reason); return;
+		}
+		rawBytes.resize(static_cast<std::size_t>(fileBytes));
+		file.seekg(0, std::ios::beg);
+		if(!file.read(reinterpret_cast<char*>(rawBytes.data()), static_cast<std::streamsize>(fileBytes))) {
+			result.reason = "NavigationGeometryReadFailed";
+			FinishRequest(request, RequestOutcome::Failed, result.reason); return;
+		}
 	}
-	if(fileBytes > maximumBytes) {
-		result.sourceBytes = static_cast<std::size_t>(std::min<std::uintmax_t>(
-			fileBytes, std::numeric_limits<std::size_t>::max()));
-		result.reason = "NavigationGeometryByteLimitExceeded";
-		FinishRequest(request, RequestOutcome::Failed, result.reason); return;
-	}
-
-	const std::vector<std::uint8_t> rawBytes = ReadFileBytes(result.resolvedPath);
 	result.sourceBytes = rawBytes.size();
 	if(rawBytes.empty()) {
 		result.reason = "NavigationGeometryMissing";

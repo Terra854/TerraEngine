@@ -58,8 +58,11 @@ namespace TerraEngine::Editor::Automation
 		}
 		if(receipts_.size() >= kCapacity)
 		{
+			// The 256-receipt window fails closed until an explicit session/project
+			// Reset. Eviction would let a delayed retry repeat already published work.
+			// Replay/conflict lookup above remains available even while admission is full.
 			result.error = ErrorCategory::QueueFull;
-			result.message = "Animation mutation receipt retention is full.";
+			result.message = "Animation mutation receipt retention is full (256 receipts in the current project/session scope); new admission requires an explicit scope reset.";
 			return result;
 		}
 		if(request.expectedGeneration != currentGeneration)

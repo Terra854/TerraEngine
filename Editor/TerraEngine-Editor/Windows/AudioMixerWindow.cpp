@@ -42,7 +42,11 @@ void AudioMixerWindow::OnGui() {
 	auto snapshot = system.LatestMixSnapshot();
 	float master = snapshot.master.volume;
 	bool masterMuted = snapshot.master.muted;
-	if(ImGui::SliderFloat("Master Volume", &master, 0.0F, 1.0F) || ImGui::Checkbox("Master Mute", &masterMuted)) {
+	// Submit both controls before combining their results: short-circuiting the
+	// draw calls would remove Mute whenever the volume slider changes.
+	const bool masterVolumeChanged = ImGui::SliderFloat("Master Volume", &master, 0.0F, 1.0F);
+	const bool masterMuteChanged = ImGui::Checkbox("Master Mute", &masterMuted);
+	if(masterVolumeChanged || masterMuteChanged) {
 		std::string diagnostic;
 		if(system.SetMasterMix(master, masterMuted, diagnostic)) persist();
 	}

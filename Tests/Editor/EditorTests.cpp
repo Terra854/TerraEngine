@@ -92,6 +92,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterProjectSettingsWindowTests(TestRegistry& registry);
 	void RegisterProjectSettingsMenuInventoryTests(TestRegistry& registry);
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry);
+	void RegisterWorkspaceLayoutSectionRestoreTests(TestRegistry& registry);
 	void RegisterManagedReadinessTests(TestRegistry& registry);
 	void RegisterProjectReadinessPerformanceTests(TestRegistry& registry);
 	void RegisterEditorCommandLineTests(TestRegistry& registry);
@@ -116,7 +117,9 @@ namespace TerraEngine::EditorTests {
 	void RegisterRendererEfficiencyShadowBatchFixtureTests(TestRegistry& registry);
 	void RegisterRendererEfficiencyStaticShadowFixtureTests(TestRegistry& registry);
 	void RegisterRendererEfficiencyLightingFixtureTests(TestRegistry& registry);
+#ifdef _WIN32
 	void RegisterRendererEfficiencyInstallIdentityTests(TestRegistry& registry);
+#endif
 	void RegisterRendererEfficiencyDeviceRecreationTests(TestRegistry& registry);
 	void RegisterEditorAutomationJobTests(TestRegistry& registry);
 	void RegisterEditorAutomationLogTests(TestRegistry& registry);
@@ -257,6 +260,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterTerrainAssetDatabaseTests(TestRegistry& registry);
 	void RegisterTerrainBrushPresetStoreTests(TestRegistry& registry);
 	void RegisterTerrainCreationImportTests(TestRegistry& registry);
+	void RegisterTerrainDescriptorFailureTests(TestRegistry& registry);
 	void RegisterTerrainSculptWorkflowTests(TestRegistry& registry);
 	void RegisterTerrainHistoryTests(TestRegistry& registry);
 	void RegisterTerrainSaveRecoveryTests(TestRegistry& registry);
@@ -318,6 +322,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterTerrainAssetDatabaseTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainBrushPresetStoreTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainCreationImportTests(registry);
+	TerraEngine::EditorTests::RegisterTerrainDescriptorFailureTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainSculptWorkflowTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainHistoryTests(registry);
 	TerraEngine::EditorTests::RegisterTerrainSaveRecoveryTests(registry);
@@ -399,6 +404,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterProjectSettingsWindowTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsMenuInventoryTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsPersistenceTests(registry);
+	TerraEngine::EditorTests::RegisterWorkspaceLayoutSectionRestoreTests(registry);
 	TerraEngine::EditorTests::RegisterManagedReadinessTests(registry);
 	TerraEngine::EditorTests::RegisterProjectReadinessPerformanceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorCommandLineTests(registry);
@@ -424,7 +430,9 @@ int main() {
 	TerraEngine::EditorTests::RegisterRendererEfficiencyShadowBatchFixtureTests(registry);
 	TerraEngine::EditorTests::RegisterRendererEfficiencyStaticShadowFixtureTests(registry);
 	TerraEngine::EditorTests::RegisterRendererEfficiencyLightingFixtureTests(registry);
+#ifdef _WIN32
 	TerraEngine::EditorTests::RegisterRendererEfficiencyInstallIdentityTests(registry);
+#endif
 	TerraEngine::EditorTests::RegisterRendererEfficiencyDeviceRecreationTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationJobTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationLogTests(registry);

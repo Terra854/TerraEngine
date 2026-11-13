@@ -9,11 +9,11 @@
 	"authority": {
 		"runtimeContract": {
 			"path": "Docs/Animation/README.md",
-			"sha256": "774c6c7a40da4ebb8fa67feb3649e956235669428d4c50ad43cdb2dceca1a801"
+			"sha256": "60bebb37e3e6dde8fbfb17614fd2c7403154fe172af2885b2262e452b1276ac4"
 		},
 		"performanceWorkloads": {
 			"path": "Tests/Tools/Animation/PerformanceWorkloads.json",
-			"sha256": "add34eb7debacbaddb03c07de115cf00f7935a3e62e849cf4b370f2cbf1bd707"
+			"sha256": "475c24d5bde5fff92b1b4454a2892748f40fa87f080f182376f4ff5a15b73a3b"
 		},
 		"baseline": {
 			"sourceCommit": "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9",

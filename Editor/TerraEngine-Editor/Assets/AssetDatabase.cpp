@@ -1,4 +1,4 @@
-﻿// AssetDatabase.cpp — Editor asset database implementation
+// AssetDatabase.cpp — Editor asset database implementation
 //
 // Implements the asset lifecycle management including automated project scanning, metadata persistence, and asynchronous asset compilation. It integrates with the filesystem watcher to detect external changes and syncs the database with the engine's resource manager.
 
@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <cstddef>
 #include <cstdlib>
 #include <regex>
 #include <set>
@@ -346,22 +347,26 @@ namespace {
 		const std::filesystem::path& assetRoot,
 		const std::filesystem::path& relative) {
 		if (relative.empty() || relative.is_absolute() || HasParentTraversal(relative)
-			|| relative.begin() == relative.end() || relative.begin()->generic_string() != "Assets"
-			|| relative.extension().empty()) {
+			|| relative.begin() == relative.end() || relative.begin()->generic_string() != "Assets") {
 			return std::nullopt;
 		}
 
-		std::error_code canonicalError;
-		const std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(assetRoot, canonicalError);
-		if (canonicalError) {
-			return std::nullopt;
-		}
 		const std::filesystem::path absolute = (projectRoot / relative).lexically_normal();
-		const std::filesystem::path canonical = std::filesystem::weakly_canonical(absolute, canonicalError);
-		if (canonicalError || !PathIsWithin(canonical, canonicalRoot)) {
+		std::filesystem::path canonical;
+		if (!AssetDatabase::ResolveContainedAssetIoPath(assetRoot, absolute, canonical)) {
 			return std::nullopt;
 		}
 		return std::pair(relative.lexically_normal().generic_string(), absolute);
+	}
+
+	// Organization source/destination policy requires an importable file spelling.
+	// Reference journals only require containment: extensionless authored files
+	// can legitimately reference an asset and need the same atomic repairs.
+	std::optional<std::pair<std::string, std::filesystem::path>> ResolveImportableProjectAsset(
+		const std::filesystem::path& projectRoot, const std::filesystem::path& assetRoot,
+		const std::filesystem::path& relative) {
+		if(relative.extension().empty()) return std::nullopt;
+		return ResolveContainedProjectAsset(projectRoot, assetRoot, relative);
 	}
 
 	struct AssetImportCancelledException : std::runtime_error {
@@ -486,6 +491,8 @@ namespace {
 		// Neither the watcher nor scan may create sidecars inside that transaction.
 		for(const std::filesystem::path& part : path) {
 			if(LowerPath(part.generic_string()).ends_with(".teterrain.data")) return true;
+			// Sibling reference replacement journals are private to organization.
+			if(part.generic_string().starts_with(".AssetOrganization-") && part.extension() == ".tmp") return true;
 		}
 		if(IsModelPackageTransactionPath(path)) {
 			return true;
@@ -1229,6 +1236,40 @@ AssetDatabase::GetAnimationReloadGenerationForTests(const TerraEngine::UUID& ass
 }
 #endif
 
+
+bool AssetDatabase::ResolveContainedAssetIoPath(const std::filesystem::path& root,
+	const std::filesystem::path& candidate, std::filesystem::path& canonical) {
+	canonical.clear();
+	if(root.empty() || candidate.empty() || HasParentTraversal(candidate)) return false;
+	std::error_code error;
+	const auto canonicalRoot = std::filesystem::canonical(root, error);
+	if(error) return false;
+	auto prefix = std::filesystem::absolute(candidate, error);
+	if(error) return false;
+	std::vector<std::filesystem::path> missing;
+	for(;;) {
+		const auto status = std::filesystem::symlink_status(prefix, error);
+		if(error && error != std::errc::no_such_file_or_directory) return false;
+		if(!error && status.type() != std::filesystem::file_type::not_found) break;
+		error.clear();
+		if(prefix.empty() || prefix == prefix.root_path()) return false;
+		missing.push_back(prefix.filename()); prefix = prefix.parent_path();
+	}
+	if(!missing.empty() && (!std::filesystem::is_directory(prefix, error) || error)) return false;
+	// weakly_canonical may leave a redirect lexical when its leaf does not yet
+	// exist. Canonicalize an existing prefix, including dangling-link rejection,
+	// then append only the already checked missing components.
+	auto resolved = std::filesystem::canonical(prefix, error);
+	if(error) return false;
+	for(auto part = missing.rbegin(); part != missing.rend(); ++part) resolved /= *part;
+	auto child = resolved.begin();
+	for(const auto& part : canonicalRoot) {
+		if(child == resolved.end() || part != *child) return false;
+		++child;
+	}
+	canonical = std::move(resolved);
+	return true;
+}
 
 void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	// Retire and physically settle the previous owner before changing roots used
@@ -2766,6 +2807,10 @@ void AssetDatabase::ProcessPendingProjectReconcile() {
 			AssetMetadata tempMeta;
 			std::filesystem::path sourcePath = metaPath;
 			sourcePath.replace_extension("");
+			// The worker's orphan list is only a snapshot. A source recreated before
+			// this protected owner boundary still owns its metadata and compiled output.
+			std::error_code existenceError;
+			if(std::filesystem::exists(sourcePath, existenceError) || existenceError) { ++processedCount; continue; }
 			if (LoadMetadata(metaPath, tempMeta) && !tempMeta.compiledPath.empty()) {
 				std::error_code removeCompiledError;
 				std::filesystem::remove(buildRoot / tempMeta.compiledPath, removeCompiledError);
@@ -3727,11 +3772,12 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 
 	HANDLE readPipe = nullptr;
 	HANDLE writePipe = nullptr;
+	HANDLE inputHandle = nullptr;
 	PROCESS_INFORMATION processInfo{};
 	// Own pipes and the native process even when line capture/progress parsing
 	// throws. A failed worker cannot release its import slot while this child lives.
 	struct CompilerOwnership {
-		HANDLE& read; HANDLE& write; PROCESS_INFORMATION& process;
+		HANDLE& read; HANDLE& write; HANDLE& input; PROCESS_INFORMATION& process;
 		const std::shared_ptr<AsyncImportProgressState>& progress;
 		bool settled = false;
 		~CompilerOwnership() noexcept {
@@ -3745,20 +3791,63 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 			}
 			if (read) CloseHandle(read);
 			if (write) CloseHandle(write);
+			if (input) CloseHandle(input);
 		}
-	} ownership{readPipe, writePipe, processInfo, progressState};
+	} ownership{readPipe, writePipe, inputHandle, processInfo, progressState};
 	if (!CreatePipe(&readPipe, &writePipe, &securityAttributes, 0u)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create compiler output pipe for " << compilerPath);
 		return false;
 	}
-	SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0u);
+	if (!SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0u)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to protect compiler output reader for " << compilerPath);
+		return false;
+	}
 
-	STARTUPINFOW startupInfo{};
-	startupInfo.cb = sizeof(startupInfo);
-	startupInfo.dwFlags = STARTF_USESTDHANDLES;
-	startupInfo.hStdOutput = writePipe;
-	startupInfo.hStdError = writePipe;
-	startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	// Compiler workers consume files, never interactive console input. Own a
+	// valid inheritable NUL reader instead of borrowing a possibly invalid or
+	// non-inheritable process standard handle from the editor's UI thread.
+	inputHandle = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		&securityAttributes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (inputHandle == INVALID_HANDLE_VALUE) {
+		inputHandle = nullptr;
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to open compiler input handle for " << compilerPath);
+		return false;
+	}
+
+	// Restrict inheritance per launch. Concurrent compilers must never borrow
+	// another job's writer, which would keep its capture reader waiting for EOF.
+	// Attribute storage and both handles remain owned through CreateProcessW.
+	struct AttributeOwnership {
+		std::vector<std::byte> storage;
+		LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
+		~AttributeOwnership() noexcept { if(list) DeleteProcThreadAttributeList(list); }
+	} attributes;
+	SIZE_T attributeBytes = 0;
+	InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+	if (attributeBytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to size compiler inheritance attributes for " << compilerPath);
+		return false;
+	}
+	attributes.storage.resize(attributeBytes);
+	auto* attributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.storage.data());
+	if (!InitializeProcThreadAttributeList(attributeList, 1, 0, &attributeBytes)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize compiler inheritance attributes for " << compilerPath);
+		return false;
+	}
+	attributes.list = attributeList;
+	std::array<HANDLE, 2> inheritedHandles{writePipe, inputHandle};
+	if (!UpdateProcThreadAttribute(attributes.list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+		inheritedHandles.data(), sizeof(inheritedHandles), nullptr, nullptr)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to restrict compiler inherited handles for " << compilerPath);
+		return false;
+	}
+	STARTUPINFOEXW startupInfo{};
+	startupInfo.StartupInfo.cb = sizeof(startupInfo);
+	startupInfo.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+	startupInfo.StartupInfo.hStdOutput = writePipe;
+	startupInfo.StartupInfo.hStdError = writePipe;
+	startupInfo.StartupInfo.hStdInput = inputHandle;
+	startupInfo.lpAttributeList = attributes.list;
 
 	std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
 	mutableCommandLine.push_back(L'\0');
@@ -3769,11 +3858,13 @@ bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath
 		nullptr,
 		nullptr,
 		TRUE,
-		CREATE_NO_WINDOW,
+		CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
 		nullptr,
 		workingDirectory.c_str(),
-		&startupInfo,
+		&startupInfo.StartupInfo,
 		&processInfo);
+	CloseHandle(inputHandle);
+	inputHandle = nullptr;
 	CloseHandle(writePipe);
 	writePipe = nullptr;
 
@@ -5662,7 +5753,7 @@ AssetOrganizationImpact AssetDatabase::PrepareAssetOrganization(
 	std::string_view operation,
 	const std::filesystem::path& destinationProjectRelative) const {
 	AssetOrganizationImpact impact;
-	const auto source = ResolveContainedProjectAsset(projectRoot, assetRoot, sourceProjectRelative);
+	const auto source = ResolveImportableProjectAsset(projectRoot, assetRoot, sourceProjectRelative);
 	if (!source || !std::filesystem::is_regular_file(source->second)) {
 		impact.errorCategory = "validation";
 		impact.error = "Asset source must identify an existing project-contained file.";
@@ -5671,7 +5762,7 @@ AssetOrganizationImpact AssetDatabase::PrepareAssetOrganization(
 
 	impact.source = source->first;
 	if (!destinationProjectRelative.empty()) {
-		const auto destination = ResolveContainedProjectAsset(projectRoot, assetRoot, destinationProjectRelative);
+		const auto destination = ResolveImportableProjectAsset(projectRoot, assetRoot, destinationProjectRelative);
 		if (!destination) {
 			impact.errorCategory = "validation";
 			impact.error = "Asset destination must remain canonically contained under Assets.";
@@ -5707,7 +5798,7 @@ AssetOrganizationImpact AssetDatabase::PrepareAssetOrganization(
 		if (contents.find(impact.source) != std::string::npos) {
 			const std::string dependent = std::filesystem::relative(iterator->path(), projectRoot).generic_string();
 			impact.dependents.push_back(dependent);
-			impact.repairPlan.push_back("replace " + impact.source + " in " + dependent);
+			if(operation != "duplicate") impact.repairPlan.push_back("replace " + impact.source + " in " + dependent);
 		}
 	}
 	impact.rollbackJournalEstimate = 1u + impact.generatedChildren.size() + impact.dependents.size();
@@ -5739,8 +5830,8 @@ AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
 		return result;
 	}
 
-	const auto source = ResolveContainedProjectAsset(projectRoot, assetRoot, impact.source);
-	const auto destination = ResolveContainedProjectAsset(projectRoot, assetRoot, impact.destination);
+	const auto source = ResolveImportableProjectAsset(projectRoot, assetRoot, impact.source);
+	const auto destination = ResolveImportableProjectAsset(projectRoot, assetRoot, impact.destination);
 	if (!source || !destination) {
 		result.errorCategory = "validation";
 		result.error = "Asset source and destination must remain under Assets.";
@@ -5750,6 +5841,14 @@ AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
 		result.errorCategory = "conflict";
 		result.error = "Asset destination already exists.";
 		return result;
+	}
+	// An unrelated sidecar is not ours to overwrite or remove during rollback.
+	std::error_code destinationMetaError;
+	const auto destinationMetaStatus = std::filesystem::symlink_status(destination->second.string() + ".meta", destinationMetaError);
+	// Inspect the directory entry itself: exists() follows dangling links and misses them.
+	if((destinationMetaError && destinationMetaError != std::errc::no_such_file_or_directory)
+		|| destinationMetaStatus.type() != std::filesystem::file_type::not_found) {
+		result.errorCategory = "conflict"; result.error = "Asset destination metadata already exists."; return result;
 	}
 
 	std::string stableId = StableAssetOrganizationFingerprint(impact.source);
@@ -5763,13 +5862,50 @@ AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
 	struct ReferenceJournalEntry {
 		std::filesystem::path path;
 		std::string original;
+		bool rewritten = false;
+		std::filesystem::file_time_type originalTime;
 	};
 	std::vector<ReferenceJournalEntry> references;
-	for (const std::string& dependent : impact.dependents) {
-		const std::filesystem::path path = projectRoot / dependent;
+	// Duplication creates a new identity without redirecting existing users.
+	// Only move/rename need a reference write journal.
+	if(!duplicate) for (const std::string& dependent : impact.dependents) {
+		const auto contained = ResolveContainedProjectAsset(projectRoot, assetRoot, dependent);
+		if(!contained) { result.errorCategory = "validation"; result.error = "Dependent reference escaped Assets."; return result; }
+		const std::filesystem::path path = contained->second;
 		std::ifstream input(path, std::ios::binary);
+		if(!input) { result.errorCategory = "internal"; result.error = "Cannot read dependent reference journal."; return result; }
 		references.push_back({path, std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>())});
+		if(input.bad()) { result.errorCategory = "internal"; result.error = "Cannot complete dependent reference journal."; return result; }
+		references.back().originalTime = std::filesystem::last_write_time(path);
 	}
+	// Reserve each replacement beside its dependent, including nested mounted
+	// filesystems. Atomic rename then cannot cross devices. These private staging
+	// directories live only for this protected organization/rollback operation.
+	struct ReferenceStagingDirectory {
+		std::vector<std::filesystem::path> paths;
+		~ReferenceStagingDirectory() { for(const auto& path : paths) { std::error_code ignored; std::filesystem::remove_all(path, ignored); } }
+	} referenceStaging;
+	const auto replaceReference = [&](const std::filesystem::path& path, const std::string& bytes, std::error_code& error) {
+		error.clear();
+		const auto directory = path.parent_path() / (".AssetOrganization-" + UuidToString(TerraEngine::GenerateUUID()) + ".tmp");
+		// Record cleanup ownership before reservation so allocation failure cannot
+		// strand a newly created directory; a refused reservation owns nothing.
+		referenceStaging.paths.push_back(directory);
+		if(!std::filesystem::create_directory(directory, error)) {
+			referenceStaging.paths.pop_back();
+			if(!error) error = std::make_error_code(std::errc::file_exists);
+			return;
+		}
+		const auto staged = directory / "reference.tmp";
+		{ std::ofstream output(staged, std::ios::binary | std::ios::trunc); output << bytes; output.close();
+			if(!output) { error = std::make_error_code(std::errc::io_error); return; } }
+#ifdef _WIN32
+		if(!MoveFileExW(staged.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+			error = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+#else
+		std::filesystem::rename(staged, path, error);
+#endif
+	};
 
 	const std::filesystem::path sourceMeta = source->second.string() + ".meta";
 	const std::filesystem::path destinationMeta = destination->second.string() + ".meta";
@@ -5778,6 +5914,7 @@ AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
 	bool primaryPublished = false;
 	bool metaPublished = false;
 	bool generatedPublished = false;
+	bool generatedCandidateOwned = false;
 	std::error_code fileError;
 	std::filesystem::create_directories(destination->second.parent_path(), fileError);
 	if (!fileError) {
@@ -5797,47 +5934,63 @@ AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
 			metaPublished = !fileError;
 		}
 	}
-	if (!fileError && std::filesystem::exists(sourceGenerated)) {
+	if (!fileError && sourceGenerated != destinationGenerated && std::filesystem::exists(sourceGenerated)) {
 		if (duplicate) {
-			std::filesystem::copy(sourceGenerated, destinationGenerated, std::filesystem::copy_options::recursive, fileError);
+			// Reserve an empty root exclusively, including rejection of dangling
+			// redirects. Reimport creates fresh children; copying their sidecars
+			// would alias GUIDs owned by the original source.
+			generatedCandidateOwned = std::filesystem::create_directory(destinationGenerated, fileError);
+			if(!generatedCandidateOwned && !fileError) fileError = std::make_error_code(std::errc::file_exists);
 		} else {
+			if(std::filesystem::exists(destinationGenerated)) fileError = std::make_error_code(std::errc::file_exists);
+			if(!fileError)
 			std::filesystem::rename(sourceGenerated, destinationGenerated, fileError);
 		}
 		generatedPublished = !fileError;
 	}
 	if (!fileError) {
 		for (ReferenceJournalEntry& entry : references) {
+			// Generated children moved with their parent before reference repair.
+			if(generatedPublished && !duplicate) {
+				const auto relative = entry.path.lexically_relative(sourceGenerated);
+				if(!relative.empty() && *relative.begin() != "..") entry.path = destinationGenerated / relative;
+			}
 			std::string updated = entry.original;
 			std::size_t cursor = 0u;
 			while ((cursor = updated.find(impact.source, cursor)) != std::string::npos) {
 				updated.replace(cursor, impact.source.size(), impact.destination);
 				cursor += impact.destination.size();
 			}
-			std::ofstream output(entry.path, std::ios::binary | std::ios::trunc);
-			output << updated;
-			if (!output.good()) {
-				fileError = std::make_error_code(std::errc::io_error);
-				break;
-			}
+			replaceReference(entry.path, updated, fileError);
+			if(fileError) break;
+			entry.rewritten = true;
 			result.repairedReferences.push_back(std::filesystem::relative(entry.path, projectRoot).generic_string());
 		}
 	}
 
 	if (fileError) {
-		for (const ReferenceJournalEntry& entry : references) {
-			std::ofstream output(entry.path, std::ios::binary | std::ios::trunc);
-			output << entry.original;
-		}
 		std::error_code rollbackError;
-		if (generatedPublished) {
-			if (duplicate) std::filesystem::remove_all(destinationGenerated, rollbackError);
-			else std::filesystem::rename(destinationGenerated, sourceGenerated, rollbackError);
+		// Keep the first failure: later successful filesystem operations clear
+		// their local error codes and must not falsely report complete rollback.
+		const auto rememberRollbackError = [&](const std::error_code& error) { if(error && !rollbackError) rollbackError = error; };
+		for(auto it = references.rbegin(); it != references.rend(); ++it) if(it->rewritten) {
+			std::error_code error; replaceReference(it->path, it->original, error); rememberRollbackError(error);
+			if(!error) { std::filesystem::last_write_time(it->path, it->originalTime, error); rememberRollbackError(error); }
 		}
-		if (metaPublished) std::filesystem::rename(destinationMeta, sourceMeta, rollbackError);
+		if (generatedPublished || generatedCandidateOwned) {
+			std::error_code error;
+			if (duplicate) std::filesystem::remove_all(destinationGenerated, error);
+			else std::filesystem::rename(destinationGenerated, sourceGenerated, error);
+			rememberRollbackError(error);
+		}
+		if (metaPublished) { std::error_code error; std::filesystem::rename(destinationMeta, sourceMeta, error); rememberRollbackError(error); }
 		if (primaryPublished) {
-			if (duplicate) std::filesystem::remove(destination->second, rollbackError);
-			else std::filesystem::rename(destination->second, source->second, rollbackError);
+			std::error_code error;
+			if (duplicate) std::filesystem::remove(destination->second, error);
+			else std::filesystem::rename(destination->second, source->second, error);
+			rememberRollbackError(error);
 		}
+		result.repairedReferences.clear();
 		result.errorCategory = "internal";
 		result.error = "Asset publication failed: " + fileError.message();
 		result.rollback = rollbackError ? "failed" : "completed";
@@ -5848,6 +6001,7 @@ AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
 	// refreshed, so observers never receive an index pointing at half-moved
 	// source/generated files.
 	ScanProject();
+	if(const auto metadata = assets.find(destination->second); metadata != assets.end()) stableId = UuidToString(metadata->second.guid);
 	result.published = true;
 	result.path = impact.destination;
 	result.assetId = stableId;

@@ -487,6 +487,9 @@ namespace TerraEngine::Animation {
 				if(staged.featureSchemaFingerprint != ComputeLegacySchemaFingerprint(staged)) {
 					return AnimationStatus::ContentHashMismatch;
 				}
+				// Verify the original legacy schema first, then hash resident blocks
+				// from the canonical order that subsequent validation exposes.
+				Canonicalize(staged);
 				if(const AnimationStatus layoutStatus =
 					RebuildMotionDatabaseStorageMetadata(staged);
 					layoutStatus != AnimationStatus::Ok) {

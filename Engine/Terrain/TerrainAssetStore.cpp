@@ -11,9 +11,11 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <new>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -32,6 +34,11 @@ namespace TerraEngine::Terrain
 		bool IsCancelled(const std::atomic_bool* cancellation) noexcept
 		{
 			return cancellation != nullptr && cancellation->load(std::memory_order_acquire);
+		}
+
+		void IncrementLazyCacheCounter(std::uint64_t& counter) noexcept
+		{
+			if (counter != (std::numeric_limits<std::uint64_t>::max)()) ++counter;
 		}
 
 		bool WriteDurableTextFile(const std::filesystem::path& path, const std::string& text)
@@ -423,6 +430,49 @@ namespace TerraEngine::Terrain
 		return std::nullopt;
 	}
 
+	std::size_t TerrainAssetStore::LazyHeightCacheKeyHasher::operator()(const LazyHeightCacheKey& key) const noexcept
+	{
+		std::size_t hash = ContentHashHasher{}(key.hash);
+		const auto mix = [&](std::size_t value) { hash ^= value + 0x9e3779b9U + (hash << 6U) + (hash >> 2U); };
+		mix(std::hash<TerraEngine::UUID>{}(key.assetId));
+		mix(std::hash<std::int64_t>{}(key.area.x));
+		mix(std::hash<std::int64_t>{}(key.area.z));
+		return hash;
+	}
+
+	void TerrainAssetStore::EvictOldestLazyHeightLocked()
+	{
+		const auto oldest = lazyHeightCache.find(lazyHeightRecency.back());
+		lazyHeightCacheStats.retainedBytes -= oldest->second.retainedBytes;
+		lazyHeightCache.erase(oldest);
+		lazyHeightRecency.pop_back();
+		lazyHeightCacheStats.retainedEntries = lazyHeightCache.size();
+		IncrementLazyCacheCounter(lazyHeightCacheStats.evictions);
+	}
+
+	void TerrainAssetStore::SetLazyHeightCachePolicy(TerrainLazyHeightCachePolicy policy)
+	{
+		std::scoped_lock lock(lazyCacheMutex);
+		lazyHeightCachePolicy = policy;
+		// No decode or blob IO is performed while trimming. Work is bounded by
+		// the entries already owned under the previous explicit cache policy.
+		while (!lazyHeightCache.empty() && (policy.maximumEntries == 0U || policy.maximumBytes == 0U
+			|| lazyHeightCache.size() > policy.maximumEntries || lazyHeightCacheStats.retainedBytes > policy.maximumBytes))
+			EvictOldestLazyHeightLocked();
+	}
+
+	TerrainLazyHeightCachePolicy TerrainAssetStore::GetLazyHeightCachePolicy() const
+	{
+		std::scoped_lock lock(lazyCacheMutex);
+		return lazyHeightCachePolicy;
+	}
+
+	TerrainLazyHeightCacheStats TerrainAssetStore::GetLazyHeightCacheStats() const
+	{
+		std::scoped_lock lock(lazyCacheMutex);
+		return lazyHeightCacheStats;
+	}
+
 	TerrainLazyAreaLoadReceipt TerrainAssetStore::LoadHeightAreaLazy(
 		const TerrainRootCapture& capture,
 		TerrainAreaCoordinate coordinate,
@@ -451,18 +501,27 @@ namespace TerraEngine::Terrain
 			return receipt;
 		}
 		receipt.sourceHash = *descriptor->channels.heightHash;
+		const LazyHeightCacheKey cacheKey{receipt.sourceHash, capture.root->assetUuid, coordinate};
 		{
 			std::scoped_lock lock(lazyCacheMutex);
-			const auto cached = lazyHeightCache.find(receipt.sourceHash);
+			if (IsCancelled(cancellation)) {
+				receipt.code = TerrainResultCode::Cancelled;
+				receipt.message = "Lazy terrain loading was cancelled before cache lookup.";
+				return receipt;
+			}
+			const auto cached = lazyHeightCache.find(cacheKey);
 			if (cached != lazyHeightCache.end())
 			{
-				receipt.decodedHeight = cached->second;
+				lazyHeightRecency.splice(lazyHeightRecency.begin(), lazyHeightRecency, cached->second.recency);
+				IncrementLazyCacheCounter(lazyHeightCacheStats.hits);
+				receipt.decodedHeight = cached->second.decoded;
 				receipt.fromCache = true;
 				receipt.message = "Resolved a verified terrain height channel from the bounded lazy cache.";
 				return receipt;
 			}
+			IncrementLazyCacheCounter(lazyHeightCacheStats.misses);
 		}
-		const auto encoded = blobResolver.Resolve(receipt.sourceHash);
+		auto encoded = blobResolver.Resolve(receipt.sourceHash);
 		if (!encoded.has_value())
 		{
 			receipt.code = TerrainResultCode::Failed;
@@ -473,12 +532,27 @@ namespace TerraEngine::Terrain
 		const TerrainCodecResult decodedResult = DecodeTerrainArea(*encoded, decoded);
 		if (!decodedResult.Succeeded())
 		{
-			receipt.code = decodedResult.code;
-			receipt.message = decodedResult.message;
-			return receipt;
+			// Live typed edits retain canonical raw samples before persistence adds
+			// the TEAREA envelope. A malformed envelope can never become raw fallback.
+			const bool claimsEnvelope = encoded->size() >= Format::kTerrainAreaMagic.size()
+				&& std::equal(Format::kTerrainAreaMagic.begin(), Format::kTerrainAreaMagic.end(), encoded->begin());
+			const std::size_t expectedBytes = kTerrainAreaSampleCount * sizeof(std::int32_t);
+			if (claimsEnvelope || encoded->size() != expectedBytes || HashTerrainBytes(*encoded) != receipt.sourceHash) {
+				receipt.code = claimsEnvelope ? decodedResult.code : TerrainResultCode::CorruptData;
+				receipt.message = claimsEnvelope ? decodedResult.message : "Live terrain height bytes are not a verified canonical raw channel.";
+				return receipt;
+			}
+			decoded.header.assetUuid = capture.root->assetUuid;
+			decoded.header.area = coordinate;
+			decoded.header.channelKind = TerrainChannelKind::Height;
+			decoded.header.compression = Format::TerrainAreaCompression::None;
+			decoded.header.uncompressedBytes = expectedBytes;
+			decoded.header.compressedBytes = expectedBytes;
+			decoded.header.payloadHash = receipt.sourceHash;
+			decoded.canonicalPayload = std::move(*encoded);
 		}
 		if (decoded.header.channelKind != TerrainChannelKind::Height
-			|| decoded.header.area != coordinate || decoded.header.assetUuid != capture.root->assetUuid)
+			|| decoded.header.weightGroup != 0U || decoded.header.area != coordinate || decoded.header.assetUuid != capture.root->assetUuid)
 		{
 			receipt.code = TerrainResultCode::CorruptData;
 			receipt.message = "Decoded terrain height metadata does not match the captured root and requested area.";
@@ -491,15 +565,57 @@ namespace TerraEngine::Terrain
 			return receipt;
 		}
 		auto immutable = std::make_shared<const DecodedTerrainArea>(std::move(decoded));
+		receipt.decodedHeight = immutable;
 		{
 			std::scoped_lock lock(lazyCacheMutex);
-			// A concurrent worker may have populated the same immutable content. In
-			// that case reuse its value rather than retaining duplicate decode bytes.
-			const auto [iterator, inserted] = lazyHeightCache.emplace(receipt.sourceHash, immutable);
-			receipt.decodedHeight = iterator->second;
-			receipt.fromCache = !inserted;
+			if (IsCancelled(cancellation)) {
+				receipt.decodedHeight.reset();
+				receipt.code = TerrainResultCode::Cancelled;
+				receipt.message = "Lazy terrain loading was cancelled before cache admission.";
+				return receipt;
+			}
+			// Another worker may have admitted the same captured identity while this
+			// worker decoded. Reuse its immutable object without duplicate ownership.
+			if (const auto cached = lazyHeightCache.find(cacheKey); cached != lazyHeightCache.end()) {
+				lazyHeightRecency.splice(lazyHeightRecency.begin(), lazyHeightRecency, cached->second.recency);
+				receipt.decodedHeight = cached->second.decoded;
+				receipt.fromCache = true;
+			} else {
+				const auto policy = lazyHeightCachePolicy;
+				const std::size_t capacity = immutable->canonicalPayload.capacity();
+				const bool sizeFits = capacity <= (std::numeric_limits<std::size_t>::max)() - sizeof(DecodedTerrainArea);
+				const std::size_t retainedBytes = sizeFits ? capacity + sizeof(DecodedTerrainArea) : 0U;
+				if (policy.maximumEntries != 0U && policy.maximumBytes != 0U && sizeFits && retainedBytes <= policy.maximumBytes) {
+					// Allocate both bookkeeping nodes before evicting anything. A failed
+					// map insertion rolls back its list node and returns a valid uncached
+					// reader, leaving ownership/accounting internally consistent.
+					bool listInserted = false;
+					try {
+						lazyHeightRecency.push_front(cacheKey);
+						listInserted = true;
+						lazyHeightCache.emplace(cacheKey, LazyHeightCacheEntry{immutable, lazyHeightRecency.begin(), retainedBytes});
+					} catch (const std::bad_alloc&) {
+						if (listInserted) lazyHeightRecency.pop_front();
+						// Optional cache failure must return the already decoded height.
+						// Do not allocate another diagnostic while handling exhaustion.
+						return receipt;
+					} catch (...) {
+						// Preserve consistency for other container exceptions as well;
+						// only optional allocation exhaustion is converted to a receipt.
+						if (listInserted) lazyHeightRecency.pop_front();
+						throw;
+					}
+					// The new entry is newest, so only prior owners can be evicted here.
+					// Subtraction avoids overflow even for a caller's SIZE_MAX byte cap.
+					while (lazyHeightCache.size() > policy.maximumEntries
+						|| lazyHeightCacheStats.retainedBytes > policy.maximumBytes - retainedBytes)
+						EvictOldestLazyHeightLocked();
+					lazyHeightCacheStats.retainedBytes += retainedBytes;
+					lazyHeightCacheStats.retainedEntries = lazyHeightCache.size();
+				}
+			}
 		}
-		receipt.message = "Decoded and cached one verified terrain height channel.";
+		receipt.message = "Decoded one verified terrain height channel under the bounded lazy retention policy.";
 		return receipt;
 	}
 
@@ -993,6 +1109,9 @@ namespace TerraEngine::Terrain
 		auto candidate = std::make_shared<TerrainAssetRoot>(base);
 		candidate->authoredBounds = proposedBounds;
 		candidate->publicationGeneration = base.publicationGeneration + 1u;
+		// A fresh live root has not been saved yet. Its first resize must still
+		// produce an encodable candidate without modifying the observed base.
+		if (candidate->persistedRootGeneration == 0u) candidate->persistedRootGeneration = 1u;
 		if (candidate->publicationGeneration == 0u)
 			return {TerrainResultCode::Overflow, "Terrain resize overflowed the publication generation."};
 		candidate->directoryShards.clear();

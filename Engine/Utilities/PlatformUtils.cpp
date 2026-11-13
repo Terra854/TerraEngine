@@ -12,6 +12,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <cerrno>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -37,6 +39,9 @@
 #	include <unistd.h>
 #else
 #	include <spawn.h>
+#	include <fcntl.h>
+#	include <sys/stat.h>
+#	include <sys/wait.h>
 #	include <unistd.h>
 
 extern char** environ;
@@ -49,6 +54,82 @@ namespace
 	constexpr std::string_view kDiagnosticsFolderName = "Diagnostics";
 	constexpr std::string_view kCrashDumpsFolderName = "CrashDumps";
 
+
+#if defined(__linux__)
+	// Resolve PATH while the ordinary caller may allocate. The forked child
+	// receives only stable native pointers and never invokes filesystem/string APIs.
+	bool ResolveExternalOpenExecutable(std::string& executable,int& error) {
+		// ARG_MAX bounds the complete exec argument/environment envelope. Use
+		// that OS limit for parent-side PATH scanning rather than inventing a
+		// smaller entry/byte limit that could reject a legitimate search path.
+		const long argumentLimit=sysconf(_SC_ARG_MAX);
+		if(argumentLimit<=0){error=EINVAL;return false;}
+		const auto maximumPathBytes=static_cast<std::size_t>(argumentLimit);
+		std::string search;
+		if(const char* value=std::getenv("PATH")) {
+			const auto length=strnlen(value,maximumPathBytes+1U);
+			if(length>maximumPathBytes){error=E2BIG;return false;}
+			search.assign(value,length);
+		} else {
+			const auto length=confstr(_CS_PATH,nullptr,0U);
+			if(length==0U || length>maximumPathBytes){error=ENOENT;return false;}
+			search.resize(length);if(confstr(_CS_PATH,search.data(),search.size())!=length){error=ENOENT;return false;}search.pop_back();
+		}
+		error=ENOENT;
+		for(std::size_t start=0U;start<=search.size();) {
+			const auto end=search.find(':',start);const auto segment=search.substr(start,end==std::string::npos?std::string::npos:end-start);
+			std::error_code pathError;
+			const auto candidate=std::filesystem::absolute(std::filesystem::path(segment)/"xdg-open",pathError);
+			if(!pathError) {
+				const auto native=candidate.string();struct stat status{};
+				if(stat(native.c_str(),&status)==0 && S_ISREG(status.st_mode) && access(native.c_str(),X_OK)==0){executable=native;return true;}
+			}
+			if(end==std::string::npos)break;start=end+1U;
+		}
+		return false;
+	}
+	// Called only after fork: write/_exit are async-signal-safe, and no C++
+	// cleanup runs. A successful exec closes this O_CLOEXEC status descriptor.
+	[[noreturn]] void ReportExternalOpenFailure(int descriptor,int error) noexcept {
+		const auto* bytes=reinterpret_cast<const char*>(&error);std::size_t written=0U;
+		while(written<sizeof(error)) {
+			const auto count=write(descriptor,bytes+written,sizeof(error)-written);
+			if(count>0){written+=static_cast<std::size_t>(count);continue;}
+			if(count<0 && errno==EINTR)continue;break;
+		}
+		_exit(127);
+	}
+	bool LaunchDetachedExternalOpen(std::string_view url,int& error) {
+		std::string executable;if(!ResolveExternalOpenExecutable(executable,error))return false;
+		std::string ownedUrl(url);char* const arguments[]={executable.data(),ownedUrl.data(),nullptr};
+		const char* const nativeExecutable=executable.c_str();char* const* const environment=environ;
+		int statusPipe[2];if(pipe2(statusPipe,O_CLOEXEC)!=0){error=errno;return false;}
+		const pid_t intermediate=fork();
+		if(intermediate<0){error=errno;close(statusPipe[0]);close(statusPipe[1]);return false;}
+		if(intermediate==0) {
+			close(statusPipe[0]);const pid_t application=fork();
+			if(application<0)ReportExternalOpenFailure(statusPipe[1],errno);
+			if(application>0)_exit(0);
+			execve(nativeExecutable,arguments,environment);ReportExternalOpenFailure(statusPipe[1],errno);
+		}
+		close(statusPipe[1]);int status=0;pid_t waited;
+		// This rare launch boundary is sequential only through the short launcher
+		// and exec receipt. Never wait for, signal, or own the browser lifetime.
+		do {waited=waitpid(intermediate,&status,0);}while(waited<0 && errno==EINTR);
+		if(waited<0){error=errno;close(statusPipe[0]);return false;}
+		int launchError=0;std::size_t received=0U;
+		while(received<sizeof(launchError)) {
+			const auto count=read(statusPipe[0],reinterpret_cast<char*>(&launchError)+received,sizeof(launchError)-received);
+			if(count>0){received+=static_cast<std::size_t>(count);continue;}
+			if(count<0 && errno==EINTR)continue;
+			if(count<0){error=errno;close(statusPipe[0]);return false;}break;
+		}
+		close(statusPipe[0]);
+		if(received!=0U){error=received==sizeof(launchError)?launchError:EIO;return false;}
+		if(!WIFEXITED(status) || WEXITSTATUS(status)!=0){error=ECHILD;return false;}
+		return true;
+	}
+#endif
 
 	std::string SanitizeProductName(std::string_view productName)
 	{
@@ -443,6 +524,13 @@ bool TerraEngine::PlatformUtils::OpenUrl(std::string_view url)
 		return false;
 	}
 
+	return true;
+#elif defined(__linux__)
+	int launchError=0;
+	if(!LaunchDetachedExternalOpen(url,launchError)) {
+		TERRAENGINE_LOG(LogLevel::Warning,"Application.OpenURL could not launch xdg-open (error "<<launchError<<").");
+		return false;
+	}
 	return true;
 #else
 	std::string ownedUrl(url);

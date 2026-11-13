@@ -236,3 +236,184 @@
 # The final disposition ledger and acceptance contract are also raw-hash pinned.
 "/Tests/Tools/CodeQuality/Baseline/comment-dispositions.json" -text
 "/Tests/Tools/CodeQuality/acceptance-contract.json" -text
+
+# These frozen common-ABI headers are verified by size, SHA-256 and Git blob.
+# Preserve their exact authored bytes across Windows and Unix checkouts.
+/Tests/Tools/RuntimeMemorySafety/Parity/support/Renderer/*.h -text
+
+# Animation authority hashes cover raw bytes, including their authored endings.
+/Docs/Animation/README.md -text
+/Tests/Tools/Animation/PerformanceCoverageMatrix.json -text
+/Tests/Fixtures/Animation/stress/soak-result.schema.json -text
+/Tests/Tools/RuntimeMemorySafety/Parity/support-pins.json -text
+
+# Preserve the exact reviewed functional-continuation source bytes.
+"/Editor/AssetCompilers/VirtualGeometryAssemblyBuilder.cpp" -text
+"/Editor/AssetCompilers/VirtualGeometrySplineCurveBuilder.cpp" -text
+"/Editor/AssetCompilers/VirtualGeometrySplineCurveBuilder.h" -text
+"/Editor/Export/ExportOutputTransaction.cpp" -text
+"/Editor/Export/ExportOutputTransaction.h" -text
+"/Editor/Export/ExportTypes.h" -text
+"/Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp" -text
+"/Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp" -text
+"/Editor/TerraEngine-Editor/Automation/Providers/EditorDiagnosticsAutomationProvider.cpp" -text
+"/Editor/TerraEngine-Editor/Subsystems/EditorClosePolicy.cpp" -text
+"/Editor/TerraEngine-Editor/Subsystems/EditorClosePolicy.h" -text
+"/Editor/TerraEngine-Editor/Subsystems/PrefabInstanceReset.cpp" -text
+"/Editor/TerraEngine-Editor/Terrain/TerrainCreationService.cpp" -text
+"/Editor/TerraEngine-Editor/Terrain/TerrainProceduralJobs.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp" -text
+"/Engine/Audio/Backend/MiniaudioBackend.cpp" -text
+"/Engine/Audio/Backend/MiniaudioBackend.h" -text
+"/Engine/Core/Scheduling/FrameWorkload.cpp" -text
+"/Engine/Core/Scheduling/SystemScheduler.cpp" -text
+"/Engine/Input/InputSystem.cpp" -text
+"/Engine/Input/InputSystem.h" -text
+"/Engine/Navigation/Dynamic/NavigationPreparation.cpp" -text
+"/Engine/Navigation/Ground/GroundRouteQuery.h" -text
+"/Engine/Physics/Backend/IPhysicsBackend.h" -text
+"/Engine/Physics/Backend/JoltPhysicsBackend.h" -text
+"/Engine/Physics/PhysicsReviewTestAccess.h" -text
+"/Engine/Physics/PhysicsSystem.cpp" -text
+"/Engine/Physics/PhysicsSystem.h" -text
+"/Engine/Physics/PhysicsTypes.h" -text
+"/Engine/Physics/PhysicsWorld.cpp" -text
+"/Engine/Physics/PhysicsWorld.h" -text
+"/Engine/Physics/Terrain/TerrainCollisionSeamPreparation.h" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanContext.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanEmptyFramePolicy.h" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanFrameRendering.cpp" -text
+"/Engine/Renderer/Terrain/TerrainSurfaceCache.cpp" -text
+"/Engine/Resource/ResourceManagerNavigation.cpp" -text
+"/Engine/Resource/VirtualGeometryCodec.cpp" -text
+"/Engine/Scene/SceneMutationQueue.cpp" -text
+"/Engine/Scene/SceneMutationQueue.h" -text
+"/Engine/Shaders/Tests/ReviewRemediation/TerrainVisibilityCoordinates.vert.hlsl" -text
+"/Engine/Shaders/Tests/ReviewRemediation/VirtualGeometryReconstruction.comp.hlsl" -text
+"/Engine/Shaders/VirtualGeometry/AnimatedPageDeform.comp.hlsl" -text
+"/Engine/Shaders/VirtualGeometry/VirtualGeometryComposite.frag.hlsl" -text
+"/Engine/Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.hlsl" -text
+"/Engine/Shaders/VirtualGeometry/VirtualGeometryReconstruction.hlsli" -text
+"/Engine/Shaders/VirtualGeometry/VirtualGeometryShadingBins.comp.hlsl" -text
+"/Engine/Shaders/VirtualGeometry/VirtualGeometryTraversal.comp.hlsl" -text
+"/Engine/Shaders/VirtualGeometry/VirtualGeometryVisibilityResolve.comp.hlsl" -text
+"/Engine/Terrain/TerrainAreaCodec.cpp" -text
+"/Engine/Terrain/TerrainAssetStore.cpp" -text
+"/Engine/Terrain/TerrainAssetStore.h" -text
+"/Engine/Terrain/TerrainDiagnostics.cpp" -text
+"/Engine/Terrain/TerrainPublication.cpp" -text
+"/Engine/Utilities/OwnedProcess.cpp" -text
+
+# Keep continuation review decisions and exact diff artifacts byte-stable.
+/Tests/Tools/CodeQuality/Baseline/Continuation/** -text
+
+# Preserve the reviewed shared layout decoder bytes on both checkout modes.
+/Editor/TerraEngine-Editor/Core/WorkspaceLayoutDecode.h -text
+
+# Preserve the two newly reviewed header deltas on every checkout mode.
+/Editor/TerraEngine-Editor/Terrain/TerrainPrecommitJob.h -text
+/Engine/Animation/AnimationPresentationSystem.h -text
+
+# Preserve exact bytes of the November 11 reviewed production deltas.
+/Engine/Animation/Graph/LayerEvaluator.cpp -text
+/Engine/Components/Physics/RigidBodyComponent.cpp -text
+/Engine/Physics/Backend/PhysicsAllocatorAdapter.cpp -text
+/Engine/Physics/Backend/PhysicsAllocatorAdapter.h -text
+/Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h -text
+/Engine/Renderer/RenderSystem.cpp -text
+"/Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/TerrainWindow.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.cpp" -text
+
+"/Engine/Scene/TransactionalMutation.cpp" -text
+
+"/Engine/UI/UIElement.cpp" -text
+
+"/Engine/UI/UIElement.h" -text
+
+# Current review hashes pin raw source bytes. Preserve them across
+# checkout newline modes so formatting cleanup and portable proofs stay stable.
+"/Editor/AssetCompilers/MotionDatabaseCompiler.cpp" -text
+"/Editor/Export/BuildProfile.cpp" -text
+"/Editor/TerraEngine-Editor/Animation/AnimationControllerAuthoringService.cpp" -text
+"/Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.cpp" -text
+"/Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.h" -text
+"/Editor/TerraEngine-Editor/Automation/AnimationAutomationTransactions.cpp" -text
+"/Editor/TerraEngine-Editor/Automation/AnimationRuntimeOperations.cpp" -text
+"/Editor/TerraEngine-Editor/Automation/Providers/AssetPrefabAutomationProvider.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/AnimationClipEditorWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/AnimationClipEditorWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/AudioMixerWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/TerrainWindow.h" -text
+"/Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp" -text
+"/Editor/TerraEngine-Editor/Windows/UIBuilderWindow.h" -text
+"/Editor/TerraEngineShaderCompiler.cpp" -text
+"/Engine/Animation/AnimationPresentationSystem.cpp" -text
+"/Engine/Animation/AnimationSystemLifecycle.cpp" -text
+"/Engine/Animation/Assets/AnimationClipAsset.cpp" -text
+"/Engine/Animation/Assets/MotionDatabaseAsset.cpp" -text
+"/Engine/Animation/Diagnostics/AnimationDiagnostics.h" -text
+"/Engine/Animation/Evaluation/CpuDeterministicEvaluator.cpp" -text
+"/Engine/Animation/Gpu/GpuAnimationPlan.cpp" -text
+"/Engine/Animation/Gpu/GpuAnimationPlanner.cpp" -text
+"/Engine/Animation/Graph/ProceduralNodeEvaluator.cpp" -text
+"/Engine/Animation/Ragdoll/PhysicsPoseSnapshot.h" -text
+"/Engine/Animation/Ragdoll/RagdollProfileValidator.cpp" -text
+"/Engine/Animation/Ragdoll/RagdollState.cpp" -text
+"/Engine/Animation/Streaming/AnimationHotReload.cpp" -text
+"/Engine/Audio/Backend/Detail/MiniaudioOfflineProbe.h" -text
+"/Engine/Components/PrefabLinkComponent.h" -text
+"/Engine/Core/Object/Component.h" -text
+"/Engine/Core/Scheduling/FrameWorkloadProfiling.h" -text
+"/Engine/DotNet/DotNetHost.cpp" -text
+"/Engine/DotNet/DotNetHost.h" -text
+"/Engine/Navigation/Dynamic/NavigationPreparation.h" -text
+"/Engine/Navigation/Ground/GroundPortalGraph.cpp" -text
+"/Engine/Navigation/Ground/GroundRouteQuery.cpp" -text
+"/Engine/Navigation/Integration/NavigationRuntimeSceneCapture.cpp" -text
+"/Engine/Navigation/NavigationBudget.cpp" -text
+"/Engine/Navigation/NavigationStores.h" -text
+"/Engine/Navigation/Persistence/SavedNavigationCache.cpp" -text
+"/Engine/Navigation/Streaming/NavigationStreamingCoordinator.cpp" -text
+"/Engine/Navigation/Streaming/NavigationStreamingCoordinator.h" -text
+"/Engine/Physics/Backend/JoltPhysicsBackend.cpp" -text
+"/Engine/Physics/Terrain/TerrainCollisionSeamPreparation.cpp" -text
+"/Engine/Physics/Terrain/TerrainCollisionSystem.cpp" -text
+"/Engine/Physics/Terrain/TerrainCollisionSystem.h" -text
+"/Engine/Renderer/Frame/RenderFrameCaches.h" -text
+"/Engine/Renderer/Frame/RenderTopologyPreparation.cpp" -text
+"/Engine/Renderer/Frame/RenderViewBuilders.cpp" -text
+"/Engine/Renderer/Graph/RenderGraph.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanAnimationResources.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanFrameSubmission.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanResourceSource.h" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.h" -text
+"/Engine/Renderer/RHI/Vulkan/VulkanVRS.cpp" -text
+"/Engine/Renderer/RenderSystem.h" -text
+"/Engine/Renderer/RenderSystemSettings.cpp" -text
+"/Engine/Renderer/SyntheticCapture.cpp" -text
+"/Engine/Resource/VirtualGeometryCodecReviewAccess.h" -text
+"/Engine/Resource/VirtualGeometryStreamingPolicy.cpp" -text
+"/Engine/Runtime/ContentMount/TerrainRuntimeProxyLoader.cpp" -text
+"/Engine/Scene/Serializer.cpp" -text
+"/Engine/Scene/Serializer.h" -text
+"/Engine/Scene/SpatialIndex.cpp" -text
+"/Engine/Scene/WorldStreamingSystem.cpp" -text
+"/Engine/Scene/WorldStreamingSystem.h" -text
+"/Engine/Shaders/Animation/AnimationBlend.comp.hlsl" -text
+"/Engine/Shaders/Animation/AnimationSample.comp.hlsl" -text
+"/Engine/Shaders/PostProcess/VRSGenerate.comp.hlsl" -text
+"/Engine/Shaders/Terrain/TerrainSurface.comp.hlsl" -text
+"/Engine/Shaders/Terrain/TerrainVisibility.frag.hlsl" -text
+"/Engine/Shaders/Tests/ReviewRemediation/ActualAnimatedVertexFetch.comp.hlsl" -text
+"/Engine/ThreadPool/ThreadPool.cpp" -text
+"/Engine/ThreadPool/ThreadPool.h" -text
+"/Engine/UI/UIParser.cpp" -text
+"/Engine/Utilities/PlatformUtils.cpp" -text
+"/Engine/Window/WindowSystem.cpp" -text
+"/Tools/HeadlessExport/Main.cpp" -text

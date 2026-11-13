@@ -47,10 +47,10 @@ $script:ExitToolFailure = 4
 $script:ExpectedBaselineSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f"
 $script:ExpectedEvidenceLockSha256 = "0605b4d4241bda8ba3fd4743b2ba7a6c6b217aaf1c9d83fe669125493ddb4e41"
 $script:ExpectedEvidenceAggregateSha256 = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5"
-$script:ExpectedContractSha256 = "774c6c7a40da4ebb8fa67feb3649e956235669428d4c50ad43cdb2dceca1a801"
-$script:ExpectedRendererManifestSha256 = "3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c"
-$script:ExpectedWorkloadsSha256 = "add34eb7debacbaddb03c07de115cf00f7935a3e62e849cf4b370f2cbf1bd707"
-$script:ExpectedCoverageMatrixSha256 = "e9a861037edf63207368d9e31b3a85a32bdf3723cdfb28eeaa7b5223c5a64670"
+$script:ExpectedContractSha256 = "60bebb37e3e6dde8fbfb17614fd2c7403154fe172af2885b2262e452b1276ac4"
+$script:ExpectedRendererManifestSha256 = "3fdc740497d6185406d7f05f57d364c1b21ebf0363bfd40db7df6ad525f5955b"
+$script:ExpectedWorkloadsSha256 = "475c24d5bde5fff92b1b4454a2892748f40fa87f080f182376f4ff5a15b73a3b"
+$script:ExpectedCoverageMatrixSha256 = "9a7b05347b1ca4b22876f3e39c605ab2cef016eafdc03b1a1a188ac1c757026e"
 $script:BaselineInventoryCache = $null
 
 $script:RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../../.."))

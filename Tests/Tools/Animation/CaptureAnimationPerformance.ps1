@@ -397,16 +397,16 @@ function Convert-PhysicsRun {
 	$facts = [ordered]@{
 		determinismHash = [string](Get-RequiredProperty $summary 'determinismHash' 'Physics summary')
 		normalShutdown = -not [bool]$summary.forcedTermination
-		profilerMetricGatePassed = [bool](Get-RequiredProperty $summary.gameplay-animation-validationProfiler.metricAvailability 'gatePassed' 'Physics profiler gates')
-		profilerDurationGatePassed = [bool](Get-RequiredProperty $summary.gameplay-animation-validationProfiler 'durationGatePassed' 'Physics profiler gates')
-		profilerSizeGatePassed = [bool](Get-RequiredProperty $summary.gameplay-animation-validationProfiler 'sizeGatePassed' 'Physics profiler gates')
+		profilerMetricGatePassed = [bool](Get-RequiredProperty $summary.profilerEvidence.metricAvailability 'gatePassed' 'Physics profiler gates')
+		profilerDurationGatePassed = [bool](Get-RequiredProperty $summary.profilerEvidence 'durationGatePassed' 'Physics profiler gates')
+		profilerSizeGatePassed = [bool](Get-RequiredProperty $summary.profilerEvidence 'sizeGatePassed' 'Physics profiler gates')
 	}
 	$metrics = [ordered]@{
 		durationMs = New-Metric 'milliseconds' ([double](Get-RequiredProperty $summary 'monotonicDurationMs' 'Physics summary'))
 		frameMedianMs = New-Metric 'milliseconds' $normalizedProfiler.frameMedianMs; frameP95Ms = New-Metric 'milliseconds' $normalizedProfiler.frameP95Ms; frameP99Ms = New-Metric 'milliseconds' $normalizedProfiler.frameP99Ms; frameWorstMs = New-Metric 'milliseconds' $normalizedProfiler.frameWorstMs
 		engineMeanMs = New-Metric 'milliseconds' $normalizedProfiler.engineMeanMs; viewportCpuP95Ms = New-Metric 'milliseconds' $normalizedProfiler.viewportCpuP95Ms; viewportGpuP95Ms = New-Metric 'milliseconds' $normalizedProfiler.viewportGpuP95Ms
 		stepMedianMs = New-Metric 'milliseconds' (Get-Percentile $steps 0.50); stepP95Ms = New-Metric 'milliseconds' (Get-Percentile $steps 0.95); stepP99Ms = New-Metric 'milliseconds' (Get-Percentile $steps 0.99); stepWorstMs = New-Metric 'milliseconds' ((@($steps | Measure-Object -Maximum).Maximum))
-		profilerBytes = New-Metric 'bytes' ([double](Get-RequiredProperty $summary.gameplay-animation-validationProfiler 'artifactBytes' 'Physics profiler gates'))
+		profilerBytes = New-Metric 'bytes' ([double](Get-RequiredProperty $summary.profilerEvidence 'artifactBytes' 'Physics profiler gates'))
 		maxWorkingSetBytes = New-Metric 'bytes' ([double](@($memory | Measure-Object workingSetBytes -Maximum).Maximum)); maxPrivateBytes = New-Metric 'bytes' ([double](@($memory | Measure-Object privateBytes -Maximum).Maximum))
 	}
 	$record = [ordered]@{ schemaVersion = 1; workloadId = $Control.id; runKind = $RunKind; runIndex = $RunIndex; succeeded = $true; settingsHash = $Control.settingsHash; sourceResultPaths = @((Get-RelativeRepoPath $summaryPath), (Get-RelativeRepoPath $metricsPath), (Get-RelativeRepoPath $artifactPath)); facts = $facts; metrics = $metrics }

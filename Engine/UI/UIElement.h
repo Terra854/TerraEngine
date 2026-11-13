@@ -63,6 +63,8 @@ public:
 	std::string text;
 	std::string source;
 	std::vector<std::string> styleSheetSources;
+	// An explicit empty list opts out of legacy sibling stylesheet inference.
+	bool hasExplicitStyleSheetSources = false;
 	std::unordered_map<std::string, std::string> attributes;
 	UIStyle inlineStyle;
 	UIStyle computedStyle;

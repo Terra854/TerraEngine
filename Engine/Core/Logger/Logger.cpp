@@ -135,11 +135,25 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 		}
 	}
 
+	bool queued = false;
 	{
+		// Queue admission and terminal publication use one linearization lock.
+		// Shutdown never leaves a newly accepted message without a consumer.
 		std::lock_guard<std::mutex> lock(m);
-		q.push(std::move(entry));
+		if (!done.load(std::memory_order_relaxed))
+		{
+			q.push(std::move(entry));
+			queued = true;
+		}
 	}
-	cv.notify_one();
+	if (queued) cv.notify_one();
+	else
+	{
+		// Terminal reuse is synchronous and bounded by this caller's entry, not
+		// a restarted/detached worker or an orphan queue. Sink callbacks already
+		// received this entry once; never invoke them again from console output.
+		PublishConsoleEntry(entry);
+	}
 }
 
 Logger::SinkId Logger::AddSink(Sink sink)
@@ -168,11 +182,16 @@ LogContext Logger::GetCurrentContext()
 
 void Logger::Shutdown()
 {
-	done = true;
+	// Only one caller may inspect/join the std::thread at a time. The consumer
+	// never invokes user sinks, so a synchronous sink may call Shutdown without
+	// joining a worker that needs sinkMutex. Queue ownership is released first.
+	std::lock_guard<std::mutex> shutdownLock(shutdownMutex);
+	{
+		std::lock_guard<std::mutex> queueLock(m);
+		done.store(true, std::memory_order_relaxed);
+	}
 	cv.notify_one();
-
-	if (t.joinable())
-		t.join();
+	if (t.joinable()) t.join();
 }
 
 Logger::Logger() : done(false)
@@ -201,36 +220,45 @@ void Logger::ProcessEntries()
 			q.pop();
 		}
 
-		// Format the timestamp.
-		std::time_t timeT = std::chrono::system_clock::to_time_t(entry.timestamp);
-		std::tm tm_time;
-#if defined(_WIN32) || defined(_WIN64)
-		localtime_s(&tm_time, &timeT);
-#else
-		localtime_r(&timeT, &tm_time);
-#endif
-		std::stringstream timeStream;
-		timeStream << std::put_time(&tm_time, "%Y-%m-%d %H:%M:%S");
-
-		// Build the final log message with the originating file and line for quick debugging.
-		std::stringstream logStream;
-		if (entry.isManaged) {
-			logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "][C#]["
-				<< entry.functionSignature << ":" << entry.line << "] "
-				<< entry.message;
-		}
-		else {
-			logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "]["
-				<< entry.functionSignature << ":" << entry.line << "] "
-				<< entry.message;
-		}
-
-		// Get the appropriate color code and then output the message.
-		std::string color = GetColorCode(entry.level);
-		std::string resetColor = "\033[0m";  // ANSI reset code
-
-		std::cout << color << logStream.str() << resetColor << std::endl;
+		PublishConsoleEntry(entry);
 	}
+}
+
+void Logger::PublishConsoleEntry(const LogEntry& entry)
+{
+	// Format the timestamp.
+	std::time_t timeT = std::chrono::system_clock::to_time_t(entry.timestamp);
+	std::tm tm_time;
+#if defined(_WIN32) || defined(_WIN64)
+	localtime_s(&tm_time, &timeT);
+#else
+	localtime_r(&timeT, &tm_time);
+#endif
+	std::stringstream timeStream;
+	timeStream << std::put_time(&tm_time, "%Y-%m-%d %H:%M:%S");
+
+	// Build the final log message with the originating file and line for quick debugging.
+	std::stringstream logStream;
+	if (entry.isManaged) {
+		logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "][C#]["
+			<< entry.functionSignature << ":" << entry.line << "] "
+			<< entry.message;
+	}
+	else {
+		logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "]["
+			<< entry.functionSignature << ":" << entry.line << "] "
+			<< entry.message;
+	}
+
+	// Get the appropriate color code and then output the message.
+	std::string color = GetColorCode(entry.level);
+	std::string resetColor = "\033[0m";  // ANSI reset code
+
+	// Serialize only final console emission, after formatting and outside queue
+	// and sink locks. A standard mutex also works on C++20 libraries that still
+	// require experimental flags for syncstream; terminal callers use this lock too.
+	std::lock_guard<std::mutex> consoleLock(consoleMutex);
+	std::cout << color << logStream.str() << resetColor << std::endl;
 }
 
 // Convert LogLevel to string.

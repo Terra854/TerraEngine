@@ -78,9 +78,15 @@ When sky setup is incomplete or invalid, the engine does not stop rendering.
 
 ## Shader Outputs
 
-The install step compiles the sky shaders into the editor build tree:
+The `RelWithDebInfo` install compiles the maintained task, mesh and fragment
+stages into TSPF containers beside the editor:
 
-- `out/build_gemini/Build/Debug/Editor/Shaders/Sky/SkyBackground.vert.spv`
-- `out/build_gemini/Build/Debug/Editor/Shaders/Sky/SkyBackground.frag.spv`
+- `out/build/RelWithDebInfo/Build/Editor/Shaders/Sky/SkyBackground.task.tspf`
+- `out/build/RelWithDebInfo/Build/Editor/Shaders/Sky/SkyBackground.mesh.tspf`
+- `out/build/RelWithDebInfo/Build/Editor/Shaders/Sky/SkyBackground.frag.tspf`
 
-These shader files are required for the seamless background pass and should be verified after each install-capable build.
+Run `cmake --preset RelWithDebInfo` and
+`cmake --build --preset RelWithDebInfo --target install`, then verify all three
+files. These are TSPF containers holding compiled stage bytecode and reflection;
+they are not loose `.vert.spv`/`.frag.spv` outputs. Source shaders remain under
+[`Engine/Shaders/Sky`](../../Engine/Shaders/Sky).

@@ -1414,7 +1414,15 @@ namespace TerraEngine::Editor::Automation
 				return Fail(ErrorCategory::Unavailable,
 					"Recording start requires the editor-owned durable animation job store.");
 			}
-			return StartRecording(arguments, *recordingJobs, recordingAssetRoot);
+			// Reserve one bounded receipt before creating a recorder or durable job.
+			// Transport retries replay the same job without rebinding a newer pose;
+			// stale expected generations reject before the start callback executes.
+			return transactions.ExecuteWithCommit({"animation.recording.start",
+				arguments.value("idempotencyKey", std::string{}), arguments.value("correlationId", std::string{}),
+				arguments.value("expectedGeneration", 0ULL), false, arguments}, generation,
+				[&arguments, recordingJobs, &recordingAssetRoot]() {
+					return StartRecording(arguments, *recordingJobs, recordingAssetRoot);
+				});
 		}
 		if(operation == "animation.recording.stop")
 		{

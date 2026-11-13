@@ -1,8 +1,17 @@
 // Full native readbacks become portable evidence only after their real queue
 // receipt completes. Files and JSON are written on detached CPU export jobs.
 #include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.h"
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "Tests/Editor/TestSha256.h"
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sstream>
+#endif
 #include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyArtifacts.h"
 #include "Renderer/RenderCaptureEncoding.h"
 #include "Renderer/RHI/Vulkan/VulkanReadbackConversion.h"
@@ -19,6 +28,7 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace TerraEngine::Editor::Automation
 {
@@ -55,10 +65,16 @@ namespace TerraEngine::Editor::Automation
 				{"staticShadowCacheBudgetBytes", value.staticShadowCacheBudgetBytes},
 				{"validationPreparation", value.validationPreparation == RendererEfficiencyPreparation::Concurrent ? "Concurrent" : "Serial"}};
 		}
-		std::wstring PathKey(const std::filesystem::path& path)
+		std::filesystem::path::string_type PathKey(const std::filesystem::path& path)
 		{
+#ifdef _WIN32
 			auto value = path.lexically_normal().generic_wstring();
 			std::transform(value.begin(), value.end(), value.begin(), [](auto character) { return std::towlower(character); }); return value;
+#else
+			// Linux path components are case-sensitive native bytes. A locale-wide
+			// conversion would reject otherwise valid UTF8 fixture directory names.
+			return path.lexically_normal().native();
+#endif
 		}
 		bool Within(const std::filesystem::path& path, const std::filesystem::path& root)
 		{
@@ -66,14 +82,18 @@ namespace TerraEngine::Editor::Automation
 			for(const auto& expected : root) { if(part == path.end() || PathKey(*part) != PathKey(expected)) return false; ++part; }
 			return true;
 		}
-		std::wstring NativePath(const std::filesystem::path& path)
+		std::filesystem::path NativePath(const std::filesystem::path& path)
 		{
+#ifdef _WIN32
 			// Content-addressed names can exceed MAX_PATH in disposable evidence
 			// roots. The extended spelling is IO-only; receipts retain portable paths.
 			auto value = path.native();
 			if(!path.is_absolute() || value.starts_with(L"\\\\?\\")) return value;
 			if(value.starts_with(L"\\\\")) return L"\\\\?\\UNC\\" + value.substr(2);
 			return L"\\\\?\\" + value;
+#else
+			return path;
+#endif
 		}
 		void NoRedirects(const std::filesystem::path& path)
 		{
@@ -81,11 +101,19 @@ namespace TerraEngine::Editor::Automation
 			for(const auto& part : path)
 			{
 				current /= part;
+#ifdef _WIN32
 				const auto attributes = GetFileAttributesW(NativePath(current).c_str());
 				if(attributes == INVALID_FILE_ATTRIBUTES) { Require(!std::filesystem::exists(current), "Evidence path attributes unavailable."); continue; }
 				Require((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0, "Evidence path redirects through a symlink/junction.");
+#else
+				std::error_code error; const auto status = std::filesystem::symlink_status(current, error);
+				if (status.type() == std::filesystem::file_type::not_found || error == std::errc::no_such_file_or_directory) continue;
+				Require(!error, "Evidence path attributes unavailable.");
+				Require(!std::filesystem::is_symlink(status), "Evidence path redirects through a symlink/junction.");
+#endif
 			}
 		}
+#ifdef _WIN32
 		struct Algorithm
 		{
 			BCRYPT_ALG_HANDLE value = nullptr;
@@ -111,12 +139,163 @@ namespace TerraEngine::Editor::Automation
 			constexpr std::string_view alphabet = "0123456789abcdef"; std::string result;
 			for(auto byte : digest) { result += alphabet[byte >> 4]; result += alphabet[byte & 15]; } return result;
 		}
+#else
+		std::string Sha256(std::span<const std::uint8_t> bytes)
+		{
+			Require(bytes.size() <= kMaximumArtifactBytes, "Evidence artifact exceeds bounded CPU export size.");
+			return TerraEngine::EditorTests::ComputeTestSha256(std::string_view(
+				reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+		}
+
+		// These small owners anchor all POSIX IO to directory descriptors. No
+		// parent/final symlink is followed, and cleanup owns only its private name.
+		struct OwnedDescriptor
+		{
+			int value = -1;
+			explicit OwnedDescriptor(int descriptor = -1) noexcept : value(descriptor) {}
+			OwnedDescriptor(const OwnedDescriptor&) = delete;
+			OwnedDescriptor& operator=(const OwnedDescriptor&) = delete;
+			OwnedDescriptor(OwnedDescriptor&& other) noexcept : value(std::exchange(other.value, -1)) {}
+			~OwnedDescriptor() { if(value >= 0) ::close(value); }
+		};
+		int OpenAt(int parent, const char* name, int flags, mode_t mode = 0)
+		{
+			int descriptor;
+			do { descriptor = ::openat(parent, name, flags, mode); } while(descriptor < 0 && errno == EINTR);
+			return descriptor;
+		}
+		OwnedDescriptor OpenDirectoryNoFollow(const std::filesystem::path& path, bool create = false)
+		{
+			Require(path.is_absolute(), "Evidence directory must have an absolute owned path.");
+			OwnedDescriptor directory(OpenAt(AT_FDCWD, "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+			Require(directory.value >= 0, "Cannot anchor the evidence filesystem root.");
+			for(const auto& component : path.relative_path())
+			{
+				const auto name = component.native();
+				if(name.empty() || name == ".") continue;
+				Require(name != "..", "Evidence directory cannot traverse its parent.");
+				int next = OpenAt(directory.value, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+				if(next < 0 && errno == ENOENT && create)
+				{
+					int made; do { made = ::mkdirat(directory.value, name.c_str(), 0700); } while(made < 0 && errno == EINTR);
+					Require(made == 0 || errno == EEXIST, "Cannot create an owned evidence directory.");
+					next = OpenAt(directory.value, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+				}
+				Require(next >= 0, "Evidence directory is redirected or unavailable.");
+				::close(directory.value); directory.value = next;
+			}
+			return directory;
+		}
+		std::vector<std::uint8_t> ReadBytesAt(int directory, const std::string& name, std::size_t maximumBytes)
+		{
+			OwnedDescriptor file(OpenAt(directory, name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+			Require(file.value >= 0, "Existing evidence file cannot be opened without redirects.");
+			struct stat status{};
+			Require(::fstat(file.value, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 0
+				&& static_cast<std::uintmax_t>(status.st_size) <= maximumBytes, "Existing evidence file is nonregular or oversized.");
+			// The bound is checked before allocating. Reads stay on the opened inode,
+			// reject truncation/growth and never follow a replacement pathname.
+			std::vector<std::uint8_t> bytes(static_cast<std::size_t>(status.st_size));
+			std::size_t offset = 0;
+			while(offset < bytes.size())
+			{
+				ssize_t count;
+				do { count = ::read(file.value, bytes.data() + offset, std::min<std::size_t>(bytes.size() - offset, 1024u * 1024u)); } while(count < 0 && errno == EINTR);
+				Require(count > 0, "Existing evidence file cannot be read fully."); offset += static_cast<std::size_t>(count);
+			}
+			std::uint8_t extra; ssize_t count;
+			do { count = ::read(file.value, &extra, 1); } while(count < 0 && errno == EINTR);
+			Require(count == 0, "Existing evidence file changed while reading.");
+			return bytes;
+		}
+		void FlushDescriptor(int descriptor, const char* reason)
+		{
+			int result; do { result = ::fsync(descriptor); } while(result < 0 && errno == EINTR);
+			Require(result == 0, reason);
+		}
+		void PublishArtifactPosix(const std::filesystem::path& root, const std::string& name,
+			std::span<const std::uint8_t> bytes, const std::string& digest)
+		{
+			auto directory = OpenDirectoryNoFollow(root);
+			struct stat existing{};
+			if(::fstatat(directory.value, name.c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0)
+			{
+				Require(S_ISREG(existing.st_mode) && Sha256(ReadBytesAt(directory.value, name, kMaximumArtifactBytes)) == digest,
+					"Content-addressed artifact was altered."); return;
+			}
+			Require(errno == ENOENT, "Cannot inspect content-addressed evidence destination.");
+			static std::atomic_uint64_t sequence{0};
+			struct OwnedStage
+			{
+				int parent; std::string name; bool created = false;
+				~OwnedStage() { if(created) ::unlinkat(parent, name.c_str(), 0); }
+			} stage{directory.value, {}};
+			OwnedDescriptor file;
+			for(unsigned attempt = 0; attempt < 100; ++attempt)
+			{
+				// Assign all throwing name storage before creating any owned file.
+				stage.name = digest + ".tmp-" + std::to_string(::getpid()) + "-" + std::to_string(++sequence);
+				file.value = OpenAt(directory.value, stage.name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+				if(file.value >= 0) { stage.created = true; break; }
+				Require(errno == EEXIST, "Cannot exclusively create owned evidence staging file.");
+			}
+			Require(file.value >= 0, "Cannot reserve a fresh evidence staging file.");
+			std::size_t offset = 0;
+			while(offset < bytes.size())
+			{
+				ssize_t count;
+				do { count = ::write(file.value, bytes.data() + offset, std::min<std::size_t>(bytes.size() - offset, 1024u * 1024u)); } while(count < 0 && errno == EINTR);
+				Require(count > 0, "Owned evidence staging write failed."); offset += static_cast<std::size_t>(count);
+			}
+			FlushDescriptor(file.value, "Cannot flush owned evidence staging bytes.");
+			const int descriptor = std::exchange(file.value, -1);
+			Require(::close(descriptor) == 0, "Cannot close owned evidence staging file.");
+			// linkat publishes the complete same-directory inode without replacing
+			// any existing name. A concurrent identical winner is verified by bytes.
+			if(::linkat(directory.value, stage.name.c_str(), directory.value, name.c_str(), 0) != 0)
+			{
+				Require(errno == EEXIST && Sha256(ReadBytesAt(directory.value, name, kMaximumArtifactBytes)) == digest,
+					"Atomic evidence publication failed.");
+			}
+			Require(::unlinkat(directory.value, stage.name.c_str(), 0) == 0, "Cannot retire owned evidence staging name.");
+			stage.created = false;
+			FlushDescriptor(directory.value, "Cannot flush evidence publication directory.");
+		}
+#endif
 		std::vector<std::uint8_t> ReadBytes(const std::filesystem::path& path)
 		{
+#ifdef _WIN32
 			NoRedirects(path); const std::filesystem::path ioPath = NativePath(path); const auto size = std::filesystem::file_size(ioPath);
 			Require(size <= kMaximumArtifactBytes, "Existing evidence file is oversized.");
 			std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size)); std::ifstream input(ioPath, std::ios::binary);
 			input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); Require(input.good(), "Existing evidence file cannot be read fully."); return bytes;
+#else
+			NoRedirects(path); auto parent = OpenDirectoryNoFollow(path.parent_path());
+			return ReadBytesAt(parent.value, path.filename().native(), kMaximumArtifactBytes);
+#endif
+		}
+		void PrepareEvidenceRoot(const std::filesystem::path& root)
+		{
+#ifdef _WIN32
+			std::filesystem::create_directories(root); NoRedirects(root);
+#else
+			// Create missing directories through pinned, no-follow parent handles.
+			// Directory creation never escapes through a swapped symlink component.
+			(void)OpenDirectoryNoFollow(root, true);
+#endif
+		}
+		Json ReadOwnershipMarker(const std::filesystem::path& markerPath)
+		{
+#ifdef _WIN32
+			Require(std::filesystem::file_size(markerPath) <= 4 * 1024 * 1024, "Ownership marker exceeds bounded export input.");
+			Json marker; std::ifstream(markerPath) >> marker; return marker;
+#else
+			auto parent = OpenDirectoryNoFollow(markerPath.parent_path());
+			const auto bytes = ReadBytesAt(parent.value, markerPath.filename().native(), 4u * 1024u * 1024u);
+			// Preserve the existing one-value stream parser. This bounded marker
+			// buffer is separate from large artifact hashing, which copies no input.
+			std::istringstream input(std::string(bytes.begin(), bytes.end())); Json marker; input >> marker; return marker;
+#endif
 		}
 		Json WriteArtifact(const std::filesystem::path& project, const std::filesystem::path& root,
 			std::string kind, std::string extension, std::span<const std::uint8_t> bytes)
@@ -124,6 +303,7 @@ namespace TerraEngine::Editor::Automation
 			const auto digest = Sha256(bytes);
 			const auto destination = root / (digest + extension);
 			NoRedirects(root); NoRedirects(destination);
+#ifdef _WIN32
 			if(std::filesystem::exists(std::filesystem::path(NativePath(destination)))) Require(Sha256(ReadBytes(destination)) == digest, "Content-addressed artifact was altered.");
 			else
 			{
@@ -146,6 +326,9 @@ namespace TerraEngine::Editor::Automation
 					DeleteFileW(NativePath(temporary).c_str()); Require(existingMatches, "Atomic evidence publication failed.");
 				}
 			}
+#else
+			PublishArtifactPosix(root, destination.filename().native(), bytes, digest);
+#endif
 			return {{"kind", kind}, {"status", "Valid"}, {"path", std::filesystem::relative(destination, project).generic_string()}, {"sha256", digest}, {"reason", ""}};
 		}
 		Json Origin(const ShadowCanonicalOrigin& value)
@@ -811,8 +994,7 @@ namespace TerraEngine::Editor::Automation
 			const auto root = std::filesystem::absolute(context.outputDirectory).lexically_normal();
 			Require(Within(root, project / "renderer-efficiency-evidence" / context.operationId), "Evidence output must stay in the owned operation directory."); NoRedirects(root);
 			const auto markerPath = project / "renderer-efficiency-project.json"; NoRedirects(markerPath);
-			Require(std::filesystem::file_size(markerPath) <= 4 * 1024 * 1024, "Ownership marker exceeds bounded export input.");
-			Json marker; std::ifstream(markerPath) >> marker;
+			const Json marker = ReadOwnershipMarker(markerPath);
 			Require(marker.at("schemaVersion") == 1 && marker.at("kind") == "RendererEfficiencyValidationProject" && marker.at("fixtureId") == context.fixtureId
 				&& marker.at("fixtureHash") == context.fixtureHash && PathKey(marker.at("projectRoot").get<std::string>()) == PathKey(project), "Export ownership marker differs from captured fixture/project.");
 			std::map<std::pair<RenderViewType, std::uint32_t>, unsigned> lightingPurposes;
@@ -855,7 +1037,7 @@ namespace TerraEngine::Editor::Automation
 			}
 			for(const auto& [view, purposes] : lightingPurposes) Require(purposes == 3, "Partial native lighting purpose bundle cannot publish evidence.");
 			for(const auto& [key, faces] : cubeFaces) Require(faces == 0x3f, "Partial point cube cannot publish an evidence bundle.");
-			std::filesystem::create_directories(root); NoRedirects(root);
+			PrepareEvidenceRoot(root);
 			RendererEfficiencyEvidenceExportResult result;
 			// Every row has already passed the complete native bundle gates above.
 			// Keep only this job's last immutable color owner and encoded bytes. A

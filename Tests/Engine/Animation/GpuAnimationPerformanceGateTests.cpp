@@ -31,9 +31,9 @@ namespace TerraEngine::Tests {
 
 	namespace {
 		inline constexpr std::string_view kFrozenWorkloadHash =
-			"add34eb7debacbaddb03c07de115cf00f7935a3e62e849cf4b370f2cbf1bd707";
+			"475c24d5bde5fff92b1b4454a2892748f40fa87f080f182376f4ff5a15b73a3b";
 		inline constexpr std::string_view kFrozenRuntimeContractHash =
-			"774c6c7a40da4ebb8fa67feb3649e956235669428d4c50ad43cdb2dceca1a801";
+			"60bebb37e3e6dde8fbfb17614fd2c7403154fe172af2885b2262e452b1276ac4";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{

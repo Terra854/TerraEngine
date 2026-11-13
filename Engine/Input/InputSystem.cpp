@@ -48,6 +48,7 @@ void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 		pressedThisFrame = false;
 	}
 	
+	pendingScrollDelta = {0.0, 0.0};
 	scrollDelta = {0.0, 0.0};
 }
 
@@ -118,6 +119,11 @@ void InputSystem::Update(float deltaTime)
 		observedMouseButtonPressGenerations[index] = mouseButtonPressGenerations[index];
 	}
 
+	// Consume after both Window polling and this backend's callback ingestion.
+	// The public frame value persists until the next publication; only pending
+	// input resets here, so retained worker snapshots remain immutable copies.
+	scrollDelta = pendingScrollDelta;
+	pendingScrollDelta = {0.0, 0.0};
 	latestSnapshot.frameRevision = nextSnapshotRevision++;
 	latestSnapshot.keyStates = keyStates;
 	latestSnapshot.mouseButtonStates = mouseButtonStates;
@@ -221,7 +227,7 @@ InputSystem::InputSnapshot InputSystem::GetLatestWorkerSnapshot() const
 
 std::string InputSystem::GetPollingBoundarySummary() const
 {
-	return "Window/input polling is protected; workers may read immutable input snapshots after backend polling and callback ingestion complete.";
+	return "Phase=Input; reads=Window; writes=Input; worker-safe preparation=immutable post-poll snapshots; protected boundary=backend polling, callback/scroll ingestion and one-frame snapshot publication.";
 }
 
 
@@ -262,5 +268,7 @@ void InputSystem::HandleCursorMove(double x, double y)
 
 void InputSystem::HandleScroll(double xOffset, double yOffset)
 {
-	scrollDelta = {xOffset, yOffset};
+	// Several callbacks from the same platform poll contribute to one frame.
+	pendingScrollDelta.first += xOffset;
+	pendingScrollDelta.second += yOffset;
 }

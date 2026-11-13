@@ -1,6 +1,7 @@
 // VirtualGeometryCodec.cpp - Bounded compact-block validation and reference decode.
 
 #include "VirtualGeometryCodec.h"
+#include "VirtualGeometryCodecReviewAccess.h"
 
 #include "meshoptimizer.h"
 
@@ -15,6 +16,19 @@ namespace TerraEngine::Resource
 {
 	namespace
 	{
+		thread_local Review::DecodeBoundaryObserver decodeBoundaryObserver{};
+		// Vendor decoders have stricter fixed-buffer and triangle contracts than
+		// a generic byte stream. Check them at file and direct-decode boundaries.
+		bool HasValidProductionCodecShape(const TemfBlockDescriptor& block) {
+			if(block.decodedElementCount==0U || block.decodedStride==0U
+				|| static_cast<std::uint64_t>(block.decodedElementCount)*block.decodedStride!=block.decodedBytes) return false;
+			const auto profile=static_cast<TemfCodecProfile>(block.codecProfileId);
+			if(profile==TemfCodecProfile::ExpandedProduction) return true;
+			if(profile!=TemfCodecProfile::MeshoptimizerProductionStatic && profile!=TemfCodecProfile::MeshoptimizerProductionUpdateable) return false;
+			if(static_cast<TemfStreamKind>(block.streamKind)==TemfStreamKind::Topology)
+				return (block.decodedStride==2U || block.decodedStride==4U) && block.decodedElementCount%3U==0U;
+			return block.decodedStride<=256U && block.decodedStride%4U==0U;
+		}
 		bool IsRangeInside(std::size_t offset, std::size_t size, std::size_t total) { return offset <= total && size <= total - offset; }
 
 		bool IsPowerOfTwo(std::uint32_t value)
@@ -92,6 +106,12 @@ namespace TerraEngine::Resource
 			return inputOffset == payload.size() && output.size() == decodedSize;
 		}
 	} // namespace
+
+	Review::DecodeBoundaryObserver Review::SetDecodeBoundaryObserver(DecodeBoundaryObserver observer) noexcept {
+		const auto previous = decodeBoundaryObserver;
+		decodeBoundaryObserver = observer;
+		return previous;
+	}
 
 	TemfProductionValidationResult ValidateTemfProductionFile(
 		std::span<const std::uint8_t> fileBytes,
@@ -263,6 +283,10 @@ namespace TerraEngine::Resource
 					"TEMFPRD1 block metadata is malformed or exceeds a declared limit.");
 				return result;
 			}
+			if(!HasValidProductionCodecShape(block)) {
+				SetProductionError(result,TemfProductionValidationCode::ProfileMismatch,"TEMFPRD1 codec element counts or strides are invalid.");
+				return result;
+			}
 			if((block.flags & kTemfBlockFlagDirectResident) != 0u
 				&& (block.logicalPageId != kTemfDirectResidentPageId
 					|| block.codecProfileId != static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction)))
@@ -416,6 +440,19 @@ namespace TerraEngine::Resource
 				"TEMFPRD1 block bytes, capability requirements, or encoded integrity are invalid.");
 			return result;
 		}
+		// Reject unsafe direct requests before the review observer, allocation or
+		// vendor dispatch; ordinary ExpandedProduction strides remain unrestricted.
+		if(!HasValidProductionCodecShape(block)
+			|| (block.codecProfileId==static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction) && block.encodedBytes!=block.decodedBytes)) {
+			SetProductionDecodeError(result,TemfProductionValidationCode::ProfileMismatch,"TEMFPRD1 codec element counts or strides are invalid.");
+			return result;
+		}
+		// Default-null observation never changes ordinary production decode. Review
+		// cases may stop before allocation/vendor dispatch to qualify an unsafe
+		// pre-fix shape without executing it. This is NOT a validation result;
+		// tests must prove the boundary was never reached before accepting rejection.
+		if(decodeBoundaryObserver.beforeAllocation
+			&& !decodeBoundaryObserver.beforeAllocation(block, decodeBoundaryObserver.user)) return result;
 		result.bytes.resize(static_cast<std::size_t>(block.decodedBytes));
 		const TemfCodecProfile profile = static_cast<TemfCodecProfile>(block.codecProfileId);
 		if(profile == TemfCodecProfile::ExpandedProduction)

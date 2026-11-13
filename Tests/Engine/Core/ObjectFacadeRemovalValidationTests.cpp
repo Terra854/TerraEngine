@@ -10,27 +10,9 @@ namespace TerraEngine::Tests {
 	namespace {
 		std::filesystem::path RepositoryRoot()
 		{
-			std::filesystem::path current = std::filesystem::current_path();
-			while (!current.empty())
-			{
-				// CTest may launch from the binary tree. Object.h is the maintained
-				// source-level contract; historical feature-spec folders are not required
-				// in a clean checkout after their implementation has been integrated.
-				if (std::filesystem::exists(current / "Engine/Core/Object/Object.h"))
-				{
-					return current;
-				}
-				// Windows drive roots are their own parent (for example, C:\\ maps
-				// back to C:\\). Stop there so a missing contract reports a normal
-				// assertion failure instead of making the unfiltered CTest process spin.
-				const std::filesystem::path parent = current.parent_path();
-				if (parent == current)
-				{
-					break;
-				}
-				current = parent;
-			}
-			return std::filesystem::current_path();
+			// CMake records the checkout independently of the process working directory.
+			// This also finds the contract when the build tree is outside the checkout.
+			return std::filesystem::path(TERRAENGINE_SOURCE_DIR);
 		}
 
 		std::string ReadTextFile(const std::filesystem::path& path)

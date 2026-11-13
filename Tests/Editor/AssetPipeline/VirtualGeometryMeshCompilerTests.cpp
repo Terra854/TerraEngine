@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <iterator>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -536,7 +537,7 @@ namespace
 			context.Expect(CompileMeshFromRaw("VirtualGeometry/ConeSafetyGrid.obj", output, fixture.vertices, fixture.indices, true, &report), "Cone safety fixture should compile.");
 			context.Expect(report.virtualGeometry.coneSafetyRecordCount > 0u, "Cook report should count cone safety records.");
 			context.ExpectEqual(report.virtualGeometry.coneSafetyRecordCount, report.virtualGeometry.clusters.size(), "Cooker should emit one cone safety record per cluster.");
-			context.ExpectEqual(report.virtualGeometry.coneSafetyRecordCount, report.virtualGeometry.coneEligibleClusterCount, "Direct raw one-sided opaque fixtures should be eligible for cone culling.");
+			context.Expect(report.virtualGeometry.coneEligibleClusterCount > 0u, "The curved raw fixture must retain known eligible clusters.");
 
 			Mesh* mesh = LoadCompiledMeshForInspection(output);
 			context.Expect(mesh != nullptr, "Cone safety fixture should load for TEMF inspection.");
@@ -544,15 +545,52 @@ namespace
 			context.Expect(mesh != nullptr && (mesh->virtualGeometryHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) != 0u, "TEMF header should publish the cone safety validation flag.");
 			if (mesh != nullptr)
 			{
-				context.Expect(std::all_of(mesh->virtualGeometryConeSafety.begin(), mesh->virtualGeometryConeSafety.end(), [](const VirtualGeometryConeSafetyRecord& record) {
-					return (record.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u
-						&& (record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u
-						&& record.materialSidedness == 0u
-						&& record.windingState == 0u
-						&& record.alphaRisk == 0u
-						&& record.thinShellRisk == 0u;
-				}), "Raw mesh cone safety records should prove one-sided opaque low-risk culling.");
+				std::uint32_t geometricallyEligible = 0u;
+				for(const VirtualGeometryConeSafetyRecord& record : mesh->virtualGeometryConeSafety) {
+					context.Expect(record.groupCount > 0u && record.groupOffset < mesh->virtualGeometryCullableGroups.size()
+						&& record.groupCount <= mesh->virtualGeometryCullableGroups.size() - record.groupOffset,
+						"Every cone safety record must refer to a complete owned group range.");
+					// A one-sided material cannot prove a geometric cone. Full-precision
+					// curved-grid LODs may span opposing normals, for which meshoptimizer
+					// returns a zero axis. Such groups must remain conservatively disabled.
+					const auto begin = mesh->virtualGeometryCullableGroups.begin() + record.groupOffset;
+					const bool validBounds = std::all_of(begin, begin + record.groupCount, [](const VirtualGeometryCullableGroupRecord& group) {
+						const float axisSquared = group.coneAxis[0] * group.coneAxis[0]
+							+ group.coneAxis[1] * group.coneAxis[1] + group.coneAxis[2] * group.coneAxis[2];
+						return std::all_of(std::begin(group.coneApex), std::end(group.coneApex), [](float value) { return std::isfinite(value); })
+							&& std::all_of(std::begin(group.coneAxis), std::end(group.coneAxis), [](float value) { return std::isfinite(value); })
+							&& axisSquared >= 1e-6f && std::isfinite(group.coneCutoff)
+							&& group.coneCutoff >= -1.0f && group.coneCutoff <= 1.0f && std::isfinite(group.coneApexOffset);
+					});
+					context.Expect(((record.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u) == validBounds
+						&& ((record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u) == validBounds,
+						"Raw one-sided clusters are eligible exactly when every owned geometric cone is valid.");
+					if(validBounds) {
+						++geometricallyEligible;
+						context.Expect(record.materialSidedness == 0u && record.windingState == 0u && record.alphaRisk == 0u && record.thinShellRisk == 0u,
+							"Eligible raw clusters must retain their one-sided opaque low-risk proof.");
+					}
+				}
+				context.ExpectEqual(report.virtualGeometry.coneEligibleClusterCount, geometricallyEligible,
+					"Reported eligibility must match the decoded geometric safety evidence.");
 			}
+		});
+
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.PlanarOneSidedConesRemainEligible", [](TestContext& context) {
+			RawMeshFixture fixture = MakeGridMesh(48u);
+			// An explicitly planar surface supplies a strong all-eligible control;
+			// curved simplified geometry is not a proof of a nondegenerate cone.
+			for(auto& vertex : fixture.vertices) vertex.position[2] = 0.0f;
+			const auto output = MakeTempOutputPath("ConeSafetyPlanarGrid");
+			MeshCompileReport report{};
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/ConeSafetyPlanarGrid.obj", output, fixture.vertices, fixture.indices, true, &report), "The planar cone control must compile.");
+			context.Expect(report.virtualGeometry.coneSafetyRecordCount > 0u, "The planar control must emit actual cone safety records.");
+			context.ExpectEqual(report.virtualGeometry.coneSafetyRecordCount, report.virtualGeometry.coneEligibleClusterCount, "All one-sided planar cluster cones must remain eligible.");
+			const Mesh* mesh = LoadCompiledMeshForInspection(output);
+			context.Expect(mesh != nullptr && mesh->virtualGeometryConeSafety.size() == report.virtualGeometry.coneSafetyRecordCount, "Planar safety records must survive the production decoder.");
+			context.Expect(std::all_of(mesh->virtualGeometryConeSafety.begin(), mesh->virtualGeometryConeSafety.end(), [](const VirtualGeometryConeSafetyRecord& record) {
+				return (record.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u && (record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u;
+			}), "Decoded planar records must retain valid and eligible cone flags.");
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.ConservativeCookDisablesConeSafety", [](TestContext& context) {

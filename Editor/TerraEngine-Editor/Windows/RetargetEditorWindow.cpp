@@ -1504,6 +1504,7 @@ namespace TerraEngine::Editor::Animation {
 			history_.Clear();
 			editing_ = false;
 			diagnostic_ = "Retarget profile opened as a detached transaction candidate.";
+			bindSelectedSkeletons_ = bindSelectedSkeletons;
 			return AnimationAuthoringStatus::Ok;
 		} catch(...) {
 			diagnostic_ = "Retarget authoring could not allocate or decode the selected profile.";
@@ -1674,20 +1675,26 @@ namespace TerraEngine::Editor::Animation {
 	}
 
 	AnimationAuthoringStatus RetargetAuthoringService::Cancel() noexcept {
-		const AnimationAuthoringStatus status = transaction_.Cancel();
-		if(status != AnimationAuthoringStatus::Canceled) {
+		try {
+			// Prepare restoration before cancelling the transaction, so a failed
+			// decode cannot leave the model editing a terminal transaction.
+			RetargetProfileAsset decoded;
+			RetargetEditorModel restored;
+			if(DeserializeAnimationAssetForAuthoring(
+				StringBytes(published_.bytes), decoded, DeserializeRetargetProfileAsset)
+				!= AnimationStatus::Ok
+				|| !restored.Begin(decoded, model_.SourceSkeleton(), model_.TargetSkeleton(), generation_, bindSelectedSkeletons_)) {
+				return AnimationAuthoringStatus::ValidationFailed;
+			}
+			const AnimationAuthoringStatus status = transaction_.Cancel();
+			if(status != AnimationAuthoringStatus::Canceled) return status;
+			model_ = std::move(restored);
+			editing_ = false;
+			diagnostic_ = "Grouped retarget edits canceled; the exact published revision was restored.";
 			return status;
-		}
-		RetargetProfileAsset decoded;
-		if(DeserializeAnimationAssetForAuthoring(
-			StringBytes(published_.bytes), decoded, DeserializeRetargetProfileAsset)
-			!= AnimationStatus::Ok
-			|| !model_.Begin(decoded, model_.SourceSkeleton(), model_.TargetSkeleton(), generation_)) {
+		} catch(...) {
 			return AnimationAuthoringStatus::ValidationFailed;
 		}
-		editing_ = false;
-		diagnostic_ = "Grouped retarget edits canceled; the exact published revision was restored.";
-		return status;
 	}
 
 	AnimationAuthoringStatus RetargetAuthoringService::Undo(
@@ -1781,6 +1788,7 @@ namespace TerraEngine::Editor::Animation {
 			published_ = std::move(revision);
 			generation_ = nextGeneration;
 			editing_ = false;
+			bindSelectedSkeletons_ = false;
 			return AnimationAuthoringStatus::Ok;
 		} catch(...) {
 			return AnimationAuthoringStatus::ValidationFailed;
@@ -2077,8 +2085,11 @@ void RetargetEditorWindow::OnGui() {
 	ImGui::SameLine();
 	ImGui::BeginDisabled(!state_->authoring.HasCandidate());
 	if(ImGui::Button("Cancel edit")) {
-		static_cast<void>(state_->authoring.Cancel());
-		state_->message = state_->authoring.Diagnostic();
+		// Failure may preserve the previous service diagnostic. Report the actual
+		// cancel result rather than presenting an earlier successful action.
+		const auto status = state_->authoring.Cancel();
+		state_->message = status == TerraEngine::Editor::Animation::AnimationAuthoringStatus::Canceled
+			? state_->authoring.Diagnostic() : "The grouped retarget edit could not be canceled; the candidate remains available.";
 	}
 	ImGui::EndDisabled();
 	ImGui::SameLine();

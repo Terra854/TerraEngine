@@ -29,9 +29,13 @@
 #include <vector>
 
 class MainEditorSubsystem;
+namespace TerraEngine::EditorTests { struct SceneViewGenerationTestAccess; }
 
 
 class SceneViewWindow : public EditorWindow {
+	// Tests observe the real frame's generation/cache without a different class
+	// definition or alternate rendering path in production and test binaries.
+	friend struct TerraEngine::EditorTests::SceneViewGenerationTestAccess;
 public:
 	SceneViewWindow(MainEditorSubsystem* owner);
 
@@ -89,6 +93,7 @@ private:
 	void LoadOverlayPreferencesIfNeeded();
 	void PersistOverlayPreferences();
 	void DrawSceneToolbar();
+	void UpdateSceneViewGeneration(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void BuildSceneObjectMarkers(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void DrawSceneObjectMarkers();
 	bool DrawOrientationWidget(glm::mat4& view, const glm::mat4& projection, const ImVec2& viewportPos, const ImVec2& viewportSize);
@@ -192,6 +197,7 @@ private:
 	std::size_t m_LastMarkerPreferenceHash = 0u;
 	glm::mat4 m_LastMarkerViewProjection = glm::mat4(0.0f);
 	glm::ivec4 m_LastMarkerViewport = glm::ivec4(0);
+	TerraEngine::Scene::WorldPosition m_LastMarkerCameraPosition{};
 	// Marker source data changes with scene structure, transforms, metadata,
 	// selection, or icon preferences. Projection still runs per frame so camera
 	// movement and viewport resize remain immediately visible without rescanning.

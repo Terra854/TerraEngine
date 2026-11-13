@@ -60,9 +60,11 @@ TerraEngine::Physics::RigidBodyValidationResult RigidBodyComponent::Validate() c
 		if(!initialLinearVelocity.IsFinite() || !initialAngularVelocity.IsFinite())
 			return Reject(RigidBodyValidationCode::NonfiniteVelocity, "Initial linear and angular velocities must be finite.");
 		if(!std::isfinite(maxLinearVelocity) || !std::isfinite(maxAngularVelocity)
-			|| maxLinearVelocity < 0.0F || maxAngularVelocity < 0.0F
+			|| maxLinearVelocity <= 0.0F || maxAngularVelocity <= 0.0F
 			|| maxLinearVelocity > 100000.0F || maxAngularVelocity > 100000.0F)
-			return Reject(RigidBodyValidationCode::InvalidVelocityLimit, "Maximum velocities must be finite, nonnegative, and within calibrated bounds.");
+			// Native body admission requires positive caps. Reject unsupported zero
+			// values here so an apparently valid component cannot poison a body batch.
+			return Reject(RigidBodyValidationCode::InvalidVelocityLimit, "Maximum velocities must be finite, positive, and within calibrated bounds.");
 		if((allowedDegreesOfFreedom & ~kPhysicsAllDegreesOfFreedom) != 0U)
 			return Reject(RigidBodyValidationCode::InvalidDegreesOfFreedom, "Allowed degrees of freedom contains unsupported axis bits.");
 		if(!IsKnown(interpolationMode))

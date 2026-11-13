@@ -41,7 +41,7 @@ $script:RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../..
 $script:OutRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out"))
 $script:BaselineRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out/validation/animation/baseline"))
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$script:ExpectedManifestSha256 = "b5c78e9f01dc0036db4fb4674f632ebf06a736e4a7c010ec56e1f3804b92131d"
+$script:ExpectedManifestSha256 = "fa9678871297579e074b9dfa1961ff44bf85509738948b35d8d40c23d60c9019"
 $script:ExpectedResultSchemaSha256 = "daa3318a1b2b105ee05a740135ff0724fb1cec46a2467c414f7859a866b87514"
 $script:PrivateGrowthLimitBytes = [UInt64]268435456
 $script:GpuGrowthLimitBytes = [UInt64]134217728
@@ -402,9 +402,10 @@ try {
 		}
 		$result = Read-Json $resultPath
 		$validated = Assert-IterationResult $result $state.runId $iteration ([UInt64]$state.lastHeartbeatSequence)
-		if ($null -eq $state.baselineResources) { $state.baselineResources = $validated.resources }
+		# Keep the starting values independent while later iterations update maxima.
+		if ($null -eq $state.baselineResources) { $state.baselineResources = [ordered]@{}; foreach ($name in $validated.resources.Keys) { $state.baselineResources[$name] = [UInt64]$validated.resources[$name] } }
 		else { Assert-BoundedGrowth $state.baselineResources $validated.resources $iteration }
-		if ($null -eq $state.highWaterResources) { $state.highWaterResources = $validated.resources }
+		if ($null -eq $state.highWaterResources) { $state.highWaterResources = [ordered]@{}; foreach ($name in $validated.resources.Keys) { $state.highWaterResources[$name] = [UInt64]$validated.resources[$name] } }
 		else {
 			foreach ($name in @("privateBytes", "gpuResidentBytes", "handleCount", "threadCount", "retainedHistoryRecords")) {
 				$currentHighWater = Get-RequiredUInt64 $state.highWaterResources $name "Soak high-water resources"

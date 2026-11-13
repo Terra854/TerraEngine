@@ -23,12 +23,23 @@
 #endif
 
 namespace TerraEngine::Physics::Backend {
+	// Only failure attribution is scoped. Actual allocation/free accounting and
+	// Jolt's callback installation remain process-wide and retain their old owner.
+	struct PhysicsProviderDiagnosticState {
+		std::mutex mutex;
+		std::atomic<std::uint64_t> allocationFailures = 0U;
+		std::atomic<std::uint64_t> traceMessages = 0U;
+		std::atomic<std::uint64_t> assertionFailures = 0U;
+		std::atomic<std::uint64_t> suppressedLogMessages = 0U;
+		std::atomic<std::uint64_t> reportedCallbackMessages = 0U;
+		PhysicsProviderError lastError;
+		bool isolated = false;
+	};
 	namespace {
 		constexpr std::uint64_t kMaximumReportedCallbackMessages = 8U;
 		constexpr std::size_t kCallbackMessageCapacity = 1024U;
 
-		struct HookState {
-			std::mutex mutex;
+		struct HookState : PhysicsProviderDiagnosticState {
 			std::uint32_t installationCount = 0U;
 			JPH::AllocateFunction previousAllocate = nullptr;
 			JPH::ReallocateFunction previousReallocate = nullptr;
@@ -43,15 +54,10 @@ namespace TerraEngine::Physics::Backend {
 			std::atomic<std::uint64_t> reallocationRequests = 0U;
 			std::atomic<std::uint64_t> alignedAllocationRequests = 0U;
 			std::atomic<std::uint64_t> freeRequests = 0U;
-			std::atomic<std::uint64_t> allocationFailures = 0U;
 			std::atomic<std::uint64_t> outstandingAllocations = 0U;
 			std::atomic<std::uint64_t> highWaterOutstandingAllocations = 0U;
-			std::atomic<std::uint64_t> traceMessages = 0U;
-			std::atomic<std::uint64_t> assertionFailures = 0U;
-			std::atomic<std::uint64_t> suppressedLogMessages = 0U;
-			std::atomic<std::uint64_t> reportedCallbackMessages = 0U;
-			PhysicsProviderError lastError;
 		};
+		thread_local std::shared_ptr<PhysicsProviderDiagnosticState> currentFailureDomain;
 
 		HookState& State() {
 			// The process-global provider callbacks can run during late static teardown.
@@ -59,6 +65,9 @@ namespace TerraEngine::Physics::Backend {
 			// use-after-free while final adapter destruction still restores the callbacks.
 			static HookState* state = new HookState();
 			return *state;
+		}
+		PhysicsProviderDiagnosticState& CallbackDiagnostics() noexcept {
+			return currentFailureDomain ? *currentFailureDomain : State();
 		}
 
 		void ResetDiagnostics(HookState& state) noexcept {
@@ -103,7 +112,7 @@ namespace TerraEngine::Physics::Backend {
 
 		void RecordProviderError(PhysicsProviderErrorCode code, const char* message, const char* sourceFile = nullptr, std::uint32_t sourceLine = 0U) noexcept {
 			try {
-				HookState& state = State();
+				PhysicsProviderDiagnosticState& state = CallbackDiagnostics();
 				const std::uint64_t messageIndex = state.reportedCallbackMessages.fetch_add(1U, std::memory_order_relaxed);
 				PhysicsProviderError error;
 				error.code = code;
@@ -125,17 +134,17 @@ namespace TerraEngine::Physics::Backend {
 				// bounded diagnostic through the engine logger. They never throw across
 				// the Jolt C callback boundary or allocate a per-allocation log record.
 				const LogLevel level = code == PhysicsProviderErrorCode::TraceMessage ? LogLevel::Warning : LogLevel::Error;
-				TERRAENGINE_LOG(level, "Physics provider: " << error.message
+				TERRAENGINE_LOG(level, (state.isolated ? "Physics cooking provider: " : "Physics provider: ") << error.message
 					<< (error.sourceFile.empty() ? "" : " (" + error.sourceFile + ":" + std::to_string(error.sourceLine) + ")"));
 			} catch(...) {
 				// A diagnostics failure must never escape the provider callback. Counters
 				// remain available even when memory is too constrained to format a string.
-				State().suppressedLogMessages.fetch_add(1U, std::memory_order_relaxed);
+				CallbackDiagnostics().suppressedLogMessages.fetch_add(1U, std::memory_order_relaxed);
 			}
 		}
 
 		void RecordAllocationFailure(std::size_t requestedBytes) noexcept {
-			HookState& state = State();
+			PhysicsProviderDiagnosticState& state = CallbackDiagnostics();
 			state.allocationFailures.fetch_add(1U, std::memory_order_relaxed);
 			char message[kCallbackMessageCapacity]{};
 			std::snprintf(message, sizeof(message), "Jolt allocation failed for %zu bytes.", requestedBytes);
@@ -236,7 +245,7 @@ namespace TerraEngine::Physics::Backend {
 		}
 
 		void JoltTrace(const char* format, ...) noexcept {
-			HookState& state = State();
+			PhysicsProviderDiagnosticState& state = CallbackDiagnostics();
 			state.traceMessages.fetch_add(1U, std::memory_order_relaxed);
 			char message[kCallbackMessageCapacity]{};
 			va_list arguments;
@@ -248,7 +257,7 @@ namespace TerraEngine::Physics::Backend {
 
 #if defined(JPH_ENABLE_ASSERTS)
 		bool JoltAssertFailed(const char* expression, const char* message, const char* sourceFile, JPH::uint sourceLine) noexcept {
-			HookState& state = State();
+			PhysicsProviderDiagnosticState& state = CallbackDiagnostics();
 			state.assertionFailures.fetch_add(1U, std::memory_order_relaxed);
 			char combinedMessage[kCallbackMessageCapacity]{};
 			std::snprintf(combinedMessage, sizeof(combinedMessage), "Jolt assertion failed: %s%s%s",
@@ -262,20 +271,30 @@ namespace TerraEngine::Physics::Backend {
 		}
 #endif
 
-		PhysicsAllocationDiagnostics SnapshotDiagnostics(const HookState& state) noexcept {
+		PhysicsAllocationDiagnostics SnapshotDiagnostics(const HookState& state, const PhysicsProviderDiagnosticState& failures) noexcept {
 			return {
 				.allocationRequests = state.allocationRequests.load(std::memory_order_relaxed),
 				.reallocationRequests = state.reallocationRequests.load(std::memory_order_relaxed),
 				.alignedAllocationRequests = state.alignedAllocationRequests.load(std::memory_order_relaxed),
 				.freeRequests = state.freeRequests.load(std::memory_order_relaxed),
-				.allocationFailures = state.allocationFailures.load(std::memory_order_relaxed),
+				.allocationFailures = failures.allocationFailures.load(std::memory_order_relaxed),
 				.outstandingAllocations = state.outstandingAllocations.load(std::memory_order_relaxed),
 				.highWaterOutstandingAllocations = state.highWaterOutstandingAllocations.load(std::memory_order_relaxed),
-				.traceMessages = state.traceMessages.load(std::memory_order_relaxed),
-				.assertionFailures = state.assertionFailures.load(std::memory_order_relaxed),
-				.suppressedLogMessages = state.suppressedLogMessages.load(std::memory_order_relaxed)
+				.traceMessages = failures.traceMessages.load(std::memory_order_relaxed),
+				.assertionFailures = failures.assertionFailures.load(std::memory_order_relaxed),
+				.suppressedLogMessages = failures.suppressedLogMessages.load(std::memory_order_relaxed)
 			};
 		}
+	}
+
+	ScopedPhysicsProviderFailureIsolation::ScopedPhysicsProviderFailureIsolation()
+		: previous(currentFailureDomain) {
+		auto domain = std::make_shared<PhysicsProviderDiagnosticState>();
+		domain->isolated = true;
+		currentFailureDomain = std::move(domain);
+	}
+	ScopedPhysicsProviderFailureIsolation::~ScopedPhysicsProviderFailureIsolation() {
+		currentFailureDomain = std::move(previous);
 	}
 
 	PhysicsBackendProfileScope::PhysicsBackendProfileScope(const char* name) noexcept {
@@ -303,6 +322,7 @@ namespace TerraEngine::Physics::Backend {
 	}
 
 	PhysicsAllocatorAdapter::PhysicsAllocatorAdapter() noexcept {
+		isolatedDiagnostics = currentFailureDomain;
 		HookState& state = State();
 		std::lock_guard<std::mutex> lock(state.mutex);
 		if(state.installationCount == 0U) {
@@ -377,16 +397,21 @@ namespace TerraEngine::Physics::Backend {
 	}
 
 	PhysicsAllocationDiagnostics PhysicsAllocatorAdapter::Diagnostics() const noexcept {
-		return SnapshotDiagnostics(State());
+		return SnapshotDiagnostics(State(), isolatedDiagnostics ? *isolatedDiagnostics : State());
 	}
 
 	PhysicsProviderError PhysicsAllocatorAdapter::LastError() const {
-		HookState& state = State();
+		PhysicsProviderDiagnosticState& state = isolatedDiagnostics ? *isolatedDiagnostics : State();
 		std::lock_guard<std::mutex> lock(state.mutex);
 		return state.lastError;
 	}
 
 	void PhysicsAllocatorAdapter::ReportAllocationFailureForValidation(std::size_t requestedBytes) noexcept {
+		// Injection names its receiving adapter, even if the calling thread is
+		// temporarily inside another domain. Restore that thread's prior owner.
+		auto previous = std::move(currentFailureDomain);
+		currentFailureDomain = isolatedDiagnostics;
 		RecordAllocationFailure(requestedBytes);
+		currentFailureDomain = std::move(previous);
 	}
 }

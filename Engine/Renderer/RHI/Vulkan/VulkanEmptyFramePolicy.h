@@ -170,6 +170,8 @@ namespace TerraEngine::Renderer::Vulkan
 		std::uint64_t validationErrorsBefore = 0, validationErrorsAfter = 0;
 		bool initialized = false, validationActuallyEnabled = false, acquired = false;
 		bool forcedEmpty = false, acquireWaitConsumedBefore = false;
+		// Copied only at an actual accepted native-operation ledger checkpoint.
+		bool acquireWaitConsumedAfter = false, acquireWaitConsumedAfterObserved = false;
 		bool recordEnded = false, fenceResetAccepted = false, submitAccepted = false, presentAttempted = false;
 		bool acquisitionDrainSubmitted = false, acquisitionDrainCompleted = false, recoverySuspended = false;
 		bool ordinarySubmitAccepted = false, ordinaryCompletionObserved = false, candidateRejected = false;

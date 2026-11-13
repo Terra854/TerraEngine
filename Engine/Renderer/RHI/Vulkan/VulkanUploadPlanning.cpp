@@ -4,9 +4,23 @@
 #include <functional>
 #include <limits>
 #include <utility>
+#include <unordered_set>
 
 namespace
 {
+	// Priority sorting is independent of page identity. Validate the full typed
+	// owner key so duplicates cannot hide in different pinned-fallback groups.
+	struct PersistentPageIdentity {
+		TerraEngine::UUID meshId;
+		std::uint32_t pageId;
+		bool operator==(const PersistentPageIdentity&) const = default;
+	};
+	struct PersistentPageIdentityHash {
+		std::size_t operator()(const PersistentPageIdentity& key) const noexcept {
+			return std::hash<TerraEngine::UUID>{}(key.meshId)
+				^ (std::hash<std::uint32_t>{}(key.pageId) + std::size_t{0x9e3779b9u});
+		}
+	};
 	VirtualGeometryEmittedPageSource ResolveUploadPlanningEmittedSource(VirtualGeometryPagePayloadSource source)
 	{
 		switch (source)
@@ -36,6 +50,69 @@ namespace
 }
 
 namespace TerraEngine::Renderer::Vulkan {
+	CpuAnimationUploadLayout BuildCpuAnimationUploadLayout(const CpuAnimationDeformationPlan& plan)
+	{
+		CpuAnimationUploadLayout result;
+		static_cast<void>(BuildCpuAnimationUploadLayout(plan, result));
+		return result;
+	}
+	bool BuildCpuAnimationUploadLayout(const CpuAnimationDeformationPlan& plan, CpuAnimationUploadLayout& result)
+	{
+		// Reset all observable facts while retaining worker-local storage capacity.
+		result.valid = false; result.paletteBytes = result.morphBytes = 0;
+		result.byContent.clear(); result.slices.clear(); result.recordSliceIndices.clear();
+		if (!plan.IsComplete()) return false;
+		try
+		{
+			result.slices.reserve(plan.records.size()); result.recordSliceIndices.reserve(plan.records.size()); result.byContent.reserve(plan.records.size());
+			for (std::size_t index = 0; index < plan.records.size(); ++index)
+			{
+				const auto& data = *plan.records[index].data;
+				const CpuAnimationContentIdentity key{data.contentIdLow, data.contentIdHigh};
+				if (const auto found = result.byContent.find(key); found != result.byContent.end())
+				{
+					result.recordSliceIndices.push_back(found->second); continue;
+				}
+				const auto palette = data.paletteMatrices.size() * sizeof(Animation::GpuAnimationPaletteRecord);
+				const auto morph = data.morphWeights.size() * sizeof(float);
+				if (palette > UINT64_MAX - result.paletteBytes || morph > UINT64_MAX - result.morphBytes) return false;
+				result.byContent.emplace(key, result.slices.size()); result.recordSliceIndices.push_back(result.slices.size());
+				result.slices.push_back({index, result.paletteBytes, result.morphBytes});
+				result.paletteBytes += palette; result.morphBytes += morph;
+			}
+		}
+		catch (const std::bad_alloc&) { return false; }
+		result.valid = result.paletteBytes != 0; return result.valid;
+	}
+	CpuAnimationDeformationOffsetLayout BuildCpuAnimationDeformationOffsets(const CpuAnimationDeformationPlan& plan)
+	{
+		CpuAnimationDeformationOffsetLayout result;
+		static_cast<void>(BuildCpuAnimationDeformationOffsets(plan, result));
+		return result;
+	}
+	bool BuildCpuAnimationDeformationOffsets(const CpuAnimationDeformationPlan& plan, CpuAnimationDeformationOffsetLayout& result)
+	{
+		// Work records reference the exact shared-content slices used by upload,
+		// rather than advancing offsets again for repeated instances of one pose.
+		result.valid = false; result.byInstanceMesh.clear();
+		if (!BuildCpuAnimationUploadLayout(plan, result.uploadScratch)) return false;
+		try
+		{
+			result.byInstanceMesh.reserve(plan.records.size());
+			for (std::size_t index = 0; index < plan.records.size(); ++index)
+			{
+				const auto& slice = result.uploadScratch.slices[result.uploadScratch.recordSliceIndices[index]];
+				const CpuAnimationByteOffsets offsets{slice.paletteOffsetBytes, slice.morphOffsetBytes};
+				const auto& record = plan.records[index];
+				const auto [found, inserted] = result.byInstanceMesh.try_emplace(
+					CpuAnimationDeformationOffsetLayout::Identity{record.stableInstanceId, record.meshId}, offsets);
+				if (!inserted && (found->second.paletteOffsetBytes != offsets.paletteOffsetBytes
+					|| found->second.morphOffsetBytes != offsets.morphOffsetBytes)) { result.byInstanceMesh.clear(); return false; }
+			}
+		}
+		catch (const std::bad_alloc&) { result.byInstanceMesh.clear(); return false; }
+		result.valid = true; return true;
+	}
 
 	std::uint64_t BuildVirtualGeometryPagePayloadReuseSignature(const std::vector<GpuVirtualGeometryPacketRecord>& packets)
 	{
@@ -74,119 +151,114 @@ namespace TerraEngine::Renderer::Vulkan {
 		return cacheValid && bufferAvailable && cachedSignature == currentSignature;
 	}
 
-	PersistentPhysicalPageUploadPlan
-	BuildPersistentPhysicalPageUploadPlan(
-		std::vector<PersistentPhysicalPageUploadInput> inputs,
-		std::uint64_t poolCapacityBytes,
-		std::uint64_t uploadBudgetBytes,
-		std::uint64_t allocationGeneration)
+	PersistentPhysicalPageUploadPlan BuildPersistentPhysicalPageUploadPlan(
+		std::vector<PersistentPhysicalPageUploadInput>, std::uint64_t,
+		std::uint64_t, std::uint64_t)
+	{
+		// Keep the legacy symbol for existing binaries, but require source callers
+		// to migrate: an ephemeral generation/page hash cannot establish ownership.
+		PersistentPhysicalPageUploadPlan plan;
+		plan.rejectionReason = "Legacy stateless overload is unsupported; pass persistent pool-owner allocator state and commit the stateful candidate at the protected publication boundary.";
+		return plan;
+	}
+	PersistentPhysicalPageUploadPlan BuildPersistentPhysicalPageUploadPlan(
+		std::vector<PersistentPhysicalPageUploadInput> inputs, std::uint64_t poolCapacityBytes,
+		std::uint64_t uploadBudgetBytes, std::uint64_t allocationGeneration,
+		const PersistentPhysicalPageAllocationState& observedAllocator,
+		std::span<const std::uint64_t> retirementAllocations, std::uint64_t completedFence)
 	{
 		PersistentPhysicalPageUploadPlan plan;
-		if(allocationGeneration == 0u)
+		const auto reject = [&](const char* reason)
 		{
-			plan.rejectionReason =
-				"Persistent page allocation generation is missing.";
-			return plan;
-		}
-		std::sort(inputs.begin(), inputs.end(),
-			[](const PersistentPhysicalPageUploadInput& left,
-				const PersistentPhysicalPageUploadInput& right)
+			plan.valid = false; plan.uploads.clear(); plan.candidateAllocator.owners.clear();
+			plan.requestedBytes = plan.committedBytes = plan.reusedPages = 0;
+			plan.rejectionReason = reason; return std::move(plan);
+		};
+		if (!allocationGeneration || !observedAllocator.revision || observedAllocator.revision == UINT64_MAX)
+			return reject("Persistent allocator generation/revision is missing or exhausted.");
+		try
+		{
+			// Preparation never mutates the observed owner. The protected commit
+			// compares its revision before adopting this complete candidate.
+			for (const auto& [id, owner] : observedAllocator.owners)
+				if (!id || (observedAllocator.nextAllocationId && id >= observedAllocator.nextAllocationId)
+					|| owner.meshId == TerraEngine::EMPTY_UUID || owner.pageId == UINT32_MAX
+					|| !owner.contentGeneration || !owner.residencyGeneration || !owner.byteSize || !owner.allocationGeneration)
+					return reject("Persistent allocator owner/counter evidence is invalid.");
+			plan.observedAllocatorRevision = observedAllocator.revision;
+			plan.candidateAllocator = observedAllocator;
+			plan.candidateAllocator.revision = observedAllocator.revision + 1;
+			for (auto id : retirementAllocations)
 			{
-				if(left.pinnedFallback != right.pinnedFallback)
-				{
-					return left.pinnedFallback;
-				}
-				if(left.meshId != right.meshId)
-				{
-					return std::lexicographical_compare(
-						left.meshId.begin(), left.meshId.end(),
-						right.meshId.begin(), right.meshId.end());
-				}
-				if(left.pageId != right.pageId)
-				{
-					return left.pageId < right.pageId;
-				}
-				return left.contentGeneration
-					< right.contentGeneration;
+				const auto owner = plan.candidateAllocator.owners.find(id);
+				if (owner == plan.candidateAllocator.owners.end() || owner->second.lastUseFence > completedFence)
+					return reject("Retirement has no recorded owner or its last use is still pending.");
+				plan.candidateAllocator.owners.erase(owner);
+			}
+			std::sort(inputs.begin(), inputs.end(), [](const auto& left, const auto& right)
+			{
+				if (left.pinnedFallback != right.pinnedFallback) return left.pinnedFallback;
+				if (left.meshId != right.meshId) return std::lexicographical_compare(left.meshId.begin(), left.meshId.end(), right.meshId.begin(), right.meshId.end());
+				if (left.pageId != right.pageId) return left.pageId < right.pageId;
+				if (left.contentGeneration != right.contentGeneration) return left.contentGeneration < right.contentGeneration;
+				return left.residencyGeneration < right.residencyGeneration;
 			});
-		std::uint64_t cursor = 0u;
-		std::uint64_t uploadedBytes = 0u;
-		for(const PersistentPhysicalPageUploadInput& input : inputs)
-		{
-			if(input.meshId == TerraEngine::EMPTY_UUID
-				|| input.pageId == 0xffffffffu
-				|| input.contentGeneration == 0u
-				|| input.residencyGeneration == 0u
-				|| input.byteSize == 0u)
+			std::uint64_t cursor = 0, uploadedBytes = 0;
+			std::unordered_set<PersistentPageIdentity, PersistentPageIdentityHash> seenPages;
+			seenPages.reserve(inputs.size());
+			for (const auto& input : inputs)
 			{
-				plan.uploads.clear();
-				plan.rejectionReason =
-					"Persistent page upload input is incomplete.";
-				return plan;
-			}
-			if(!input.eligibleForNewWork && !input.pinnedFallback)
-			{
-				// Eviction first removes eligibility. Such a page may remain
-				// alive for old fences but cannot enter this generation's plan.
-				continue;
-			}
-			PersistentPhysicalPageUpload upload;
-			upload.input = input;
-			upload.reuseExisting =
-				input.existingAllocationId != 0u;
-			upload.allocationId =
-				upload.reuseExisting
-					? input.existingAllocationId
-					: (allocationGeneration << 32u)
-						^ static_cast<std::uint64_t>(
-							input.pageId + 1u);
-			if(upload.reuseExisting)
-			{
-				++plan.reusedPages;
+				if (input.meshId == TerraEngine::EMPTY_UUID || input.pageId == UINT32_MAX
+					|| !input.contentGeneration || !input.residencyGeneration || !input.byteSize)
+					return reject("Persistent page upload input is incomplete.");
+				if (!seenPages.emplace(PersistentPageIdentity{input.meshId, input.pageId}).second)
+					return reject("Persistent page upload inputs repeat a page identity.");
+				if (!input.eligibleForNewWork && !input.pinnedFallback) continue;
+				PersistentPhysicalPageUpload upload; upload.input = input;
+				upload.reuseExisting = input.existingAllocationId != 0;
+				if (upload.reuseExisting)
+				{
+					const auto found = plan.candidateAllocator.owners.find(input.existingAllocationId);
+					if (found == plan.candidateAllocator.owners.end()) return reject("Reused allocation has no recorded live owner.");
+					auto& owner = found->second;
+					if (owner.meshId != input.meshId || owner.pageId != input.pageId || owner.contentGeneration != input.contentGeneration
+						|| owner.residencyGeneration != input.residencyGeneration || owner.byteSize != input.byteSize)
+						return reject("Reused allocation identity does not match its recorded owner.");
+					owner.lastUseFence = std::max(owner.lastUseFence, input.completionFence);
+					upload.allocationId = input.existingAllocationId; ++plan.reusedPages;
+				}
+				else
+				{
+					if (!plan.candidateAllocator.nextAllocationId) return reject("Persistent allocation ID space is exhausted.");
+					if (cursor > UINT64_MAX - 255u) return reject("Persistent page alignment overflowed.");
+					cursor = (cursor + 255u) & ~std::uint64_t{255u};
+					if (input.byteSize > UINT64_MAX - cursor || input.byteSize > UINT64_MAX - uploadedBytes)
+						return reject("Persistent page byte interval overflowed.");
+					upload.poolByteOffset = cursor; cursor += input.byteSize; uploadedBytes += input.byteSize;
+					if ((poolCapacityBytes && cursor > poolCapacityBytes) || (uploadBudgetBytes && uploadedBytes > uploadBudgetBytes))
+						return reject("Persistent page upload exceeds its pool or frame budget.");
+					upload.allocationId = plan.candidateAllocator.nextAllocationId++;
+					plan.candidateAllocator.owners.emplace(upload.allocationId, PersistentPhysicalPageAllocationOwner{
+						input.meshId, input.pageId, input.contentGeneration, input.residencyGeneration,
+						input.byteSize, allocationGeneration, input.completionFence});
+				}
 				plan.uploads.push_back(upload);
-				continue;
 			}
-			if(cursor > std::numeric_limits<std::uint64_t>::max()
-					- 255u)
-			{
-				plan.uploads.clear();
-				plan.rejectionReason =
-					"Persistent page pool alignment overflowed.";
-				return plan;
-			}
-			cursor = (cursor + 255u) & ~std::uint64_t{255u};
-			if(input.byteSize
-					> std::numeric_limits<std::uint64_t>::max()
-						- cursor
-				|| input.byteSize
-					> std::numeric_limits<std::uint64_t>::max()
-						- uploadedBytes)
-			{
-				plan.uploads.clear();
-				plan.rejectionReason =
-					"Persistent page pool byte range overflowed.";
-				return plan;
-			}
-			upload.poolByteOffset = cursor;
-			cursor += input.byteSize;
-			uploadedBytes += input.byteSize;
-			plan.requestedBytes = cursor;
-			if((poolCapacityBytes != 0u
-					&& cursor > poolCapacityBytes)
-				|| (uploadBudgetBytes != 0u
-					&& uploadedBytes > uploadBudgetBytes))
-			{
-				plan.uploads.clear();
-				plan.rejectionReason =
-					"Persistent page upload exceeds the configured "
-					"pool or per-frame upload budget.";
-				return plan;
-			}
-			plan.uploads.push_back(upload);
+			plan.requestedBytes = plan.committedBytes = cursor; plan.valid = true;
 		}
-		plan.committedBytes = cursor;
-		plan.valid = true;
+		catch (const std::bad_alloc&) { return reject("Persistent allocation candidate storage is unavailable."); }
 		return plan;
+	}
+	bool CommitPersistentPhysicalPageUploadPlan(PersistentPhysicalPageUploadPlan& plan, PersistentPhysicalPageAllocationState& allocator)
+	{
+		// The caller already owns the pool's protected publication boundary. A
+		// stale parallel candidate cannot partially publish IDs or retire owners.
+		if (!plan.valid || plan.observedAllocatorRevision != allocator.revision
+			|| allocator.revision == UINT64_MAX || plan.candidateAllocator.revision != allocator.revision + 1) return false;
+		allocator.owners.swap(plan.candidateAllocator.owners);
+		std::swap(allocator.nextAllocationId, plan.candidateAllocator.nextAllocationId);
+		std::swap(allocator.revision, plan.candidateAllocator.revision);
+		plan.valid = false; return true;
 	}
 
 	VirtualGeometryUploadIntentPlan BuildVirtualGeometryUploadIntentPlan(

@@ -10,6 +10,19 @@ target_include_directories(TerraEngineCaptureDecodeAssertions PRIVATE
 	${CMAKE_SOURCE_DIR}/External/basisu)
 target_link_libraries(TerraEngineCaptureDecodeAssertions PRIVATE basisu)
 
+# Exercise the actual dynamic-loader ABI with a real sibling library. The same
+# filename/layout is used by build-tree and installed native test processes.
+add_library(TerraEngineDotNetHostFixture SHARED
+	${CMAKE_SOURCE_DIR}/Tests/Fixtures/DotNetHost/ExportVTableFixture.cpp)
+target_compile_features(TerraEngineDotNetHostFixture PRIVATE cxx_std_20)
+target_include_directories(TerraEngineDotNetHostFixture PRIVATE ${CMAKE_SOURCE_DIR}/Engine)
+set_target_properties(TerraEngineDotNetHostFixture PROPERTIES
+	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+	LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+install(TARGETS TerraEngineDotNetHostFixture
+	RUNTIME DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Engine
+	LIBRARY DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Engine)
+
 # This child has no engine dependency: the watchdog can terminate a deliberately
 # blocked test without loading providers, managed assemblies or GPU resources.
 add_executable(TerraEngineCorrectnessProcessFixture
@@ -554,6 +567,12 @@ set_target_properties(TerraEngineTextureUiFixtureGenerator PROPERTIES
 set_target_properties(TerraEngine-EngineTests PROPERTIES
 	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	# Installed tests resolve their bundled native owners relative to this
+	# Tests category, so clean runs never depend on build-tree loader paths.
+	set_target_properties(TerraEngine-EngineTests PROPERTIES
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../Engine")
+endif()
 
 if(MSVC)
 	target_compile_options(TerraEngine-EngineTests PRIVATE /FS)
@@ -1088,6 +1107,182 @@ function(terraengine_add_correctness_slice name target filter minimum_cases)
 		ENVIRONMENT "TERRAENGINE_TEST_FILTER=${filter};TERRAENGINE_THREADPOOL_WORKERS=${worker_count}")
 endfunction()
 terraengine_add_correctness_slice(Engine.SceneMutationFailureSafety TerraEngine-EngineTests Engine.SceneMutationFailureSafety 52)
+
+# Admission tests deliberately reproduce pre-fix defects before the repair wave.
+# Their stable registry names also provide the final nonempty acceptance slice.
+target_sources(TerraEngine-EngineTests PRIVATE
+	Scripting/ManagedTransactionRejectionTests.cpp
+	Scripting/HostInitializationContractTests.cpp
+	Scene/MutationSubmissionOrderTests.cpp
+	UI/MarkupReferenceRoundTripTests.cpp)
+# Simulation review cases call the real preparation/publication APIs. Keep
+# registration explicit so newly authored files cannot become empty evidence.
+target_sources(TerraEngine-EngineTests PRIVATE
+	Audio/SpatialDecoderChannelTests.cpp
+	Input/ScrollFramePublicationTests.cpp
+	Resource/PackagedNavigationCompanionTests.cpp
+	Renderer/ViewPublicationIdentityTests.cpp
+	Renderer/AnimationUploadIdentityTests.cpp
+	Renderer/ShaderViewContractTests.cpp
+	Navigation/NavigationSnapshotIdentityTests.cpp
+	Navigation/PortalResidencyLifecycleTests.cpp
+	Physics/FrameQueryAuthoringTests.cpp
+	Physics/TerrainSeamOwnershipTests.cpp
+	Terrain/SurfaceAllocationCanonicalityTests.cpp
+	Terrain/LazyHeightLifecycleTests.cpp
+	Terrain/TerrainSurfaceCoordinateTests.cpp
+	Scene/SpatialStreamingProgressTests.cpp
+	Terrain/DiagnosticStableOrderTests.cpp)
+# Native review cases are registered only under an explicit runtime opt-in. The
+# ordinary engine runner therefore remains headless, including unfiltered runs.
+# VMA's implementation is local to this support translation unit; owned handles
+# cross the test boundary, while its allocator implementation stays private.
+add_library(TerraEngineReviewVulkanFixture STATIC
+	${CMAKE_SOURCE_DIR}/Tests/Support/ReviewRemediation/VulkanReviewFixture.cpp
+	${CMAKE_SOURCE_DIR}/Tests/Support/ReviewRemediation/TerrainSurfaceCoordinateInputs.cpp)
+target_compile_features(TerraEngineReviewVulkanFixture PRIVATE cxx_std_20)
+target_include_directories(TerraEngineReviewVulkanFixture
+	PRIVATE ${CMAKE_SOURCE_DIR}/External/VMA/include ${CMAKE_SOURCE_DIR}/External/volk
+	${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine)
+target_compile_definitions(TerraEngineReviewVulkanFixture PRIVATE
+	VK_NO_PROTOTYPES TERRAENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(TerraEngineReviewVulkanFixture
+	PRIVATE Vulkan::Headers TerraEngine-Engine Threads::Threads ${CMAKE_DL_LIBS})
+if(MSVC)
+	target_compile_options(TerraEngineReviewVulkanFixture PRIVATE /FS /bigobj)
+endif()
+target_link_libraries(TerraEngine-EngineTests PRIVATE TerraEngineReviewVulkanFixture)
+# The controlled vertex producer is validation-only shader source. Keeping it
+# under the engine shader tree preserves the dedicated shader-file contract.
+install(FILES
+	${CMAKE_SOURCE_DIR}/Engine/Shaders/Tests/ReviewRemediation/TerrainVisibilityCoordinates.vert.hlsl
+	${CMAKE_SOURCE_DIR}/Engine/Shaders/Tests/ReviewRemediation/VirtualGeometryReconstruction.comp.hlsl
+	DESTINATION ${CMAKE_BINARY_DIR}/Build/Engine/Shaders/Tests/ReviewRemediation
+	COMPONENT ReviewRemediation)
+# Validation shader sources retain the same relative include tree as checkout.
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/Engine/Shaders/
+	DESTINATION ${CMAKE_BINARY_DIR}/Build/Engine/Shaders
+	COMPONENT ReviewRemediation FILES_MATCHING PATTERN "*.hlsli")
+# Only native domain units include Vulkan/VMA. Source-local settings preserve
+# unrelated test commands instead of rebuilding every headless test for a fixture.
+set_property(SOURCE
+	Animation/ProceduralGpuPoseParityTests.cpp
+	Renderer/AnimationUploadIdentityTests.cpp
+	Renderer/ShaderViewContractTests.cpp
+	Terrain/TerrainSurfaceCoordinateTests.cpp
+	APPEND PROPERTY INCLUDE_DIRECTORIES
+	${CMAKE_SOURCE_DIR}/External/VMA/include
+	${CMAKE_SOURCE_DIR}/External/volk
+	$<TARGET_PROPERTY:Vulkan::Headers,INTERFACE_INCLUDE_DIRECTORIES>)
+set_property(SOURCE
+	Animation/ProceduralGpuPoseParityTests.cpp
+	Renderer/AnimationUploadIdentityTests.cpp
+	Renderer/ShaderViewContractTests.cpp
+	Terrain/TerrainSurfaceCoordinateTests.cpp
+	APPEND PROPERTY COMPILE_DEFINITIONS VK_NO_PROTOTYPES)
+add_dependencies(TerraEngine-EngineTests TerraEngineDotNetHostFixture)
+# Only the loader test needs this filename. Keeping it source-local avoids
+# invalidating every unrelated engine test object when the fixture changes.
+set_property(SOURCE Scripting/HostInitializationContractTests.cpp APPEND PROPERTY
+	COMPILE_DEFINITIONS TERRAENGINE_DOTNET_HOST_FIXTURE_PATH="$<TARGET_FILE_NAME:TerraEngineDotNetHostFixture>")
+terraengine_add_correctness_slice(Engine.ReviewRemediation TerraEngine-EngineTests
+	"Engine.Review.MutationOrder,Scripting.TransactionRejection,Scripting.HostInitialization,Engine.UIParser.AttributeEntitiesSurviveSerialization,Engine.UIParser.SingleAndMultipleStyleReferencesSurviveEntities" 18)
+# A coherent simulation group retains per-case evidence without adding a CTest
+# for every finding. Native GPU work is a separate explicit acceptance lane.
+set(review_simulation_cpu_filter "Audio.SpatialDecoder,Engine.Input.ScrollFrame,Resource.NavigationCompanion,Renderer.Review.ViewPublication,Renderer.Review.AnimationUpload,Animation.Review,Navigation.SnapshotIdentity,Navigation.PortalResidency,Physics.FrameQuery,Physics.FramePublication,Physics.TerrainSeam,Terrain.SurfaceAllocation,Terrain.WeightCanonicality,Terrain.LazyHeight,Engine.SpatialProgress,Engine.StreamingProgress,Terrain.Diagnostics.EqualCategoriesPreserveProducerOrder,Terrain.Diagnostics.AppendedConflictFactsFollowExistingFacts,Terrain.SurfaceCoordinates")
+# Keep the admitted simulation cohort stable as later safety regressions arrive.
+string(REPLACE "Animation.Review," "Animation.Review.Refresh,Animation.Review.AssetRollback,Animation.Review.AssetCodec,Animation.Review.Procedural,Animation.Review.HotReload," review_simulation_cpu_filter "${review_simulation_cpu_filter}")
+terraengine_add_correctness_slice(Engine.ReviewSimulation TerraEngine-EngineTests
+	"${review_simulation_cpu_filter}" 99)
+option(TERRAENGINE_ENABLE_NATIVE_REVIEW_TESTS "Register watched native GPU review acceptance" OFF)
+if(TERRAENGINE_ENABLE_NATIVE_REVIEW_TESTS)
+	terraengine_add_correctness_slice(Engine.ReviewSimulationNative TerraEngine-EngineTests
+		"Native.ReviewSimulation.AnimationUpload.,Native.ReviewSimulation.ShaderView.,Native.ReviewSimulation.Animation.,Native.ReviewSimulation.TerrainCoordinateInstruction." 10)
+	set_property(TEST Engine.ReviewSimulationNative APPEND PROPERTY ENVIRONMENT
+		TERRAENGINE_VULKAN_REVIEW_ENABLE=1
+		"TERRAENGINE_REVIEW_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build"
+		"TERRAENGINE_REVIEW_TERRAIN_SHADER_PACKAGES=${CMAKE_BINARY_DIR}/Build/Engine/Shaders/Terrain")
+	set_tests_properties(Engine.ReviewSimulationNative PROPERTIES
+		LABELS "Correctness;Native;GPU;OptIn" RUN_SERIAL TRUE TIMEOUT 300)
+endif()
+
+# Safety regressions use real ownership paths. Pre-narrowing observers stop
+# malformed inputs before undefined conversion or vendor decoder calls.
+include(${CMAKE_SOURCE_DIR}/Tests/Tools/CodeQuality/Fixtures/ProductionShape/ReviewFixtureTargets.cmake)
+target_sources(TerraEngine-EngineTests PRIVATE
+	Resource/MalformedProductionShapeTests.cpp
+	Resource/ProductionHierarchyCycleQualificationTests.cpp
+	Resource/OptionalFallbackPlanningTests.cpp
+	Utilities/ProcessCaptureLifecycleTests.cpp
+	Renderer/RetirementSignalTests.cpp
+	Renderer/DeformationTraversalFailureTests.cpp
+	Renderer/SettingsPersistenceFailureTests.cpp
+	Renderer/CompositePipelineRetirementTests.cpp
+	Renderer/TextureUploadFailureOwnershipTests.cpp
+	Renderer/DiscardedPrimaryRecoveryTests.cpp
+	Navigation/NavigationOwnershipBoundsTests.cpp
+	Physics/TerrainShapeRetirementTests.cpp
+	Scene/PlanningNumericBoundsTests.cpp
+	Terrain/CandidateRetentionRollbackTests.cpp
+	Core/LoggerLifecycleTests.cpp
+	Profiling/JournalAllocationBoundsTests.cpp
+	Profiling/JournalEvidenceRoundTripTests.cpp
+	Core/FrameWorkloadProfilingPublicationTests.cpp)
+# Windows tests call the exact production fatal-dialog conversion through a
+# synchronous borrowed sink; they own hidden windows and never open a modal UI.
+target_sources(TerraEngine-EngineTests PRIVATE Platform/WindowTitleEncodingTests.cpp)
+if(WIN32)
+	set_property(SOURCE "${CMAKE_SOURCE_DIR}/Engine/Window/WindowSystem.cpp"
+		TARGET_DIRECTORY TerraEngine-Engine APPEND PROPERTY COMPILE_DEFINITIONS
+		TERRAENGINE_WINDOW_NATIVE_TITLE_TESTS=1)
+	target_link_libraries(TerraEngine-EngineTests PRIVATE user32)
+	terraengine_add_correctness_slice(Engine.ReviewPortability TerraEngine-EngineTests
+		Engine.WindowTitleEncoding 8)
+endif()
+set_property(SOURCE Renderer/DeformationTraversalFailureTests.cpp
+	Renderer/CompositePipelineRetirementTests.cpp
+	Renderer/TextureUploadFailureOwnershipTests.cpp
+	Renderer/DiscardedPrimaryRecoveryTests.cpp APPEND PROPERTY
+	INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/External/VMA/include
+	${CMAKE_SOURCE_DIR}/External/volk $<TARGET_PROPERTY:Vulkan::Headers,INTERFACE_INCLUDE_DIRECTORIES>)
+set_property(SOURCE Renderer/DeformationTraversalFailureTests.cpp
+	Renderer/CompositePipelineRetirementTests.cpp
+	Renderer/TextureUploadFailureOwnershipTests.cpp
+	Renderer/DiscardedPrimaryRecoveryTests.cpp APPEND PROPERTY
+	COMPILE_DEFINITIONS VK_NO_PROTOTYPES)
+# These three friends inspect Impl, whose validation-only fields are compiled
+# into the BUILD_TESTING Engine DLL. Match both definitions source-locally so
+# offsets agree; a different layout must fail compilation rather than touch GPU.
+set_property(SOURCE
+	Renderer/CompositePipelineRetirementTests.cpp
+	Renderer/TextureUploadFailureOwnershipTests.cpp
+	Renderer/DiscardedPrimaryRecoveryTests.cpp APPEND PROPERTY
+	COMPILE_DEFINITIONS TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION=1
+	TERRAENGINE_RENDERER_EFFICIENCY_VALIDATION=1)
+install(FILES ${CMAKE_SOURCE_DIR}/Engine/Shaders/Tests/ReviewRemediation/ActualAnimatedVertexFetch.comp.hlsl
+	DESTINATION ${CMAKE_BINARY_DIR}/Build/Engine/Shaders/Tests/ReviewRemediation COMPONENT ReviewRemediation)
+set(review_lifetime_cpu_filter "Resource.MalformedProductionShape,Resource.ProductionHierarchy,Resource.OptionalFallback,Utilities.ProcessCapture,Animation.Review.Ragdoll,Renderer.Review.Retirement,Renderer.Review.Traversal,Navigation.OwnershipBounds,Physics.TerrainShapeRetirement,Engine.PlanningNumericBounds,Terrain.CandidateRetention,Engine.LoggerLifecycle,Engine.JournalAllocationBounds,Renderer.Review.SettingsPersistence")
+if(WIN32)
+	set(review_lifetime_cpu_floor 60)
+else()
+	# POSIX adds one process-reaping case and lacks the Windows wait-state case.
+	set(review_lifetime_cpu_floor 60)
+endif()
+terraengine_add_correctness_slice(Engine.ReviewLifetime TerraEngine-EngineTests
+	"${review_lifetime_cpu_filter}" ${review_lifetime_cpu_floor})
+# Real journal persistence stays separate from malformed-allocation cases so
+# the pre-fix evidence gate cannot be confused with the repaired lifetime lane.
+terraengine_add_correctness_slice(Engine.ReviewEvidence TerraEngine-EngineTests
+	"Engine.JournalEvidence,Engine.WorkloadPublication" 25)
+if(TERRAENGINE_ENABLE_NATIVE_REVIEW_TESTS)
+	terraengine_add_correctness_slice(Engine.ReviewLifetimeNative TerraEngine-EngineTests
+		"Native.ReviewSimulation.Deformation.,Native.ReviewSimulation.Traversal.,Native.ReviewSimulation.Lifecycle." 16)
+	set_property(TEST Engine.ReviewLifetimeNative APPEND PROPERTY ENVIRONMENT
+		TERRAENGINE_VULKAN_REVIEW_ENABLE=1
+		"TERRAENGINE_REVIEW_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")
+	set_tests_properties(Engine.ReviewLifetimeNative PROPERTIES
+		LABELS "Correctness;Native;GPU;OptIn" RUN_SERIAL TRUE TIMEOUT 300)
+endif()
 terraengine_add_correctness_slice(Engine.ResourceAsyncLifecycle TerraEngine-EngineTests Engine.ResourceAsyncLifecycle 28)
 terraengine_add_correctness_slice(Engine.SceneSaveFailureSafety TerraEngine-EngineTests Scene.SaveFailureSafety 10)
 terraengine_add_correctness_slice(Engine.AudioWorldCellCapture TerraEngine-EngineTests Audio.WorldCellCapture 5)

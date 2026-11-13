@@ -73,7 +73,11 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			if(layer.stableLayerId != stableIds[contributor]) continue;
 			const float2 surfaceUv = TerrainSurfaceUvFromPageLocalSample(
 				pageLocalSample, terrainAreaMapping, terrainLayerMappings[layerIndex]);
-			const float2 localMetres = pageLocalSample * terrainAreaMapping.sampleSpacingMetres;
+			// Add only the bounded page origin here. The existing CPU double
+			// phase already carries the canonical area origin and authored offset;
+			// re-adding a large float world origin would lose precision/count it twice.
+			const float2 localMetres = (terrainAreaMapping.localSampleOrigin + pageLocalSample)
+				* terrainAreaMapping.sampleSpacingMetres;
 			const float2 mappedHorizontal = TerrainRotateCanonicalMetres(
 				localMetres, layer.inverseRotationCosSin)
 				+ terrainLayerMappings[layerIndex].phaseMetres;

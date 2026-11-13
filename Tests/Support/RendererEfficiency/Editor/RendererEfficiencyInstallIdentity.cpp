@@ -1,6 +1,7 @@
 // Hashing the install closure is deliberately detached worker IO. File handles
 // deny concurrent writes while each file is read; no frame or GPU work is touched.
 #include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyInstallIdentity.h"
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
 #include <nlohmann/json.hpp>
@@ -220,3 +221,24 @@ namespace TerraEngine::Editor::Automation
 		catch(const std::exception& failure) { error = failure.what(); return false; }
 	}
 }
+
+#else
+namespace TerraEngine::Editor::Automation
+{
+	// This identity verifier promises Windows sharing, path and BCrypt contracts.
+	// A portable caller retains its symbols, but never receives a fabricated seal
+	// or a partially changed output while those native guarantees are unavailable.
+	bool VerifyRendererEfficiencyInstallIdentity(const std::filesystem::path&,
+		RendererEfficiencyInstallIdentity&, std::string& error)
+	{
+		error="Renderer efficiency installed identity is unavailable on this platform; Windows native identity verification is required.";
+		return false;
+	}
+	bool PrepareRendererEfficiencyInstallIdentity(RendererEfficiencyInstallIdentity&,
+		std::string& error)
+	{
+		error="Renderer efficiency installed identity is unavailable on this platform; Windows native identity verification is required.";
+		return false;
+	}
+}
+#endif

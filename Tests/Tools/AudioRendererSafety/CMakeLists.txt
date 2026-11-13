@@ -11,6 +11,12 @@ target_include_directories(RenderPublicationAllocationFixture PRIVATE
 	${PROJECT_SOURCE_DIR}/Engine ${PROJECT_SOURCE_DIR}/External/json/include
 	${PROJECT_SOURCE_DIR}/External/glfw/include)
 target_link_libraries(RenderPublicationAllocationFixture PRIVATE TerraEngine-Engine)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	# The installed publication fixture links the central engine owner rather
+	# than relying on a developer shell's loader environment.
+	set_target_properties(RenderPublicationAllocationFixture PROPERTIES
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../../Engine")
+endif()
 if(WIN32)
 	add_custom_command(TARGET RenderPublicationAllocationFixture POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different

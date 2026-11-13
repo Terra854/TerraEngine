@@ -180,6 +180,8 @@ namespace TerraEngine::Tests {
 			const std::vector<std::uint8_t> mountedUiBytes = ResourceManager::Instance().ReadFileBytes("UI/Hud.tuiml");
 			const std::vector<std::uint8_t> mountedShaderBytes = ResourceManager::Instance().ReadFileBytes("Shaders/Sky/SkyBackground.mesh.tspf");
 			const std::vector<std::uint8_t> mountedFontBytes = ResourceManager::Instance().ReadFileBytes("Fonts/Roboto-Medium.ttf");
+			// The fatal prerequisite must precede every use of the optional manifest path.
+			context.Expect(startupScene.has_value(), "The packed manifest should provide a startup scene path.");
 			const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(*startupScene);
 			const SceneDocument* scene = SceneManager::Instance().GetScene(sceneId);
 
@@ -187,7 +189,6 @@ namespace TerraEngine::Tests {
 			context.Expect(ContentMount::Instance().IsMounted(), "ResourceManager initialization should mount the export TEPAK archive.");
 			context.ExpectEqual(std::string("Smoke Export"), ResourceManager::Instance().GetProductName(), "Product metadata should come from packed game.json.");
 			context.ExpectEqual(std::string("2.5.0"), ResourceManager::Instance().GetVersion(), "Version metadata should come from packed game.json.");
-			context.Expect(startupScene.has_value(), "The packed manifest should provide a startup scene path.");
 			context.ExpectEqual(std::string("Scenes/Main.tescene"), startupScene->generic_string(), "Startup scene should preserve the manifest path for engine bootstrap.");
 			context.Expect(renderSettings.has_value(), "Packed export manifests should configure renderer settings for standalone runtime.");
 			context.ExpectEqual(4096u, renderSettings.has_value() ? renderSettings->shadowResolution : 0u, "Runtime should prefer exact exported shadow resolution over renderProfile labels.");

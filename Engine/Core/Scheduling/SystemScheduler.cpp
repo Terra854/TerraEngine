@@ -5,6 +5,7 @@
 // shaped so Part 2 can lower the same data into dependency handles and barriers.
 
 #include "SystemScheduler.h"
+#include "FrameWorkloadProfiling.h"
 
 #include "Core/Object/ObjectManager.h"
 #include "Core/SystemBase.h"
@@ -1195,6 +1196,18 @@ namespace TerraEngine::Scheduling {
 
 	const ScheduleSummary& SystemScheduler::ExecuteFrame(float deltaTime, const MutationFlushCallback& flushCallback)
 	{
+		// Observation only at the existing protected coordinator boundary. Reset
+		// before even validation can return, so a rejected pass cannot reuse an
+		// earlier publication; no worker job, phase or mutation flush is added.
+		FrameWorkloadProfilingIdentity profilingIdentity;
+		if (TerraEngine::Profiling::Profiler::Instance().IsFrameRecordingActive())
+		{
+			profilingIdentity = PrepareFrameWorkloadProfilingPublication();
+		}
+		else
+		{
+			InvalidateFrameWorkloadProfilingCapture();
+		}
 		if (dirty)
 		{
 			BuildSchedule();
@@ -1209,6 +1222,13 @@ namespace TerraEngine::Scheduling {
 
 		FrameExecutionPlan plan = ExecuteFrameWorkloads(
 			deltaTime, flushCallback, true);
+		if (plan.valid && plan.completed && plan.droppedExecutionRecordCount == 0u)
+		{
+			// Dropped rows are incomplete, never a complete bounded snapshot.
+			// Active capture made collectExecutionRecords true in the real pass.
+			// Stop/abandon/new-frame invalidation rejects any late key on publish.
+			PublishFrameWorkloadProfilingSnapshot(profilingIdentity, plan.executionRecords);
+		}
 		// The scheduler is the sole owner of the completed plan. Move its callbacks,
 		// result vectors, and optional execution evidence into the retained snapshot
 		// instead of deep-copying the complete frame graph every frame.

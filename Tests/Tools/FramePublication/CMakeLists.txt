@@ -13,6 +13,13 @@ install(FILES
 add_executable(TerraEngine-FramePublicationContracts FramePublicationContracts.cpp)
 target_compile_features(TerraEngine-FramePublicationContracts PRIVATE cxx_std_20)
 target_link_libraries(TerraEngine-FramePublicationContracts PRIVATE TerraEngine-Engine)
+if(UNIX AND NOT APPLE)
+	# Installed tools share the bundled Engine directory three levels above;
+	# source/build library paths must not be needed by a clean Linux invocation.
+	set_target_properties(TerraEngine-FramePublicationContracts PROPERTIES
+		BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../../Engine")
+endif()
 install(TARGETS TerraEngine-FramePublicationContracts
 	RUNTIME DESTINATION "${TERRAENGINE_FRAME_PUBLICATION_INSTALL_DIR}")
 if(WIN32)

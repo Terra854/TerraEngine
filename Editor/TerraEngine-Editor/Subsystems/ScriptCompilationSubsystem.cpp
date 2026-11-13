@@ -640,15 +640,60 @@ void ScriptCompilationSubsystem::PublishCompilerDiagnostics(std::string_view bui
 
 void ScriptCompilationSubsystem::BeginBuild()
 {
-	// Ensure the project workspace has the latest engine references before
-	// starting the background build job.
-	std::string syncError;
-	if (!m_WorkspaceService.SyncManagedReferences(&syncError))
+	// This is the protected editor preparation boundary. Workspace generation
+	// mutates status/files, so finish it and snapshot every input before any
+	// background task can overlap regeneration or status reads.
+	ScriptBuildInputs inputs;
+	inputs.profile = m_Status.activeProfile;
+	std::string preparationError;
+	auto rejectBeforeDispatch = [&](const std::string& message) {
+		m_Status.queuedBuild = false;
+		m_Status.state = ScriptCoordinatorState::Failed;
+		m_Status.progress = 1.0;
+		m_Status.lastSummary = message;
+		AssetDatabase::Instance().SetScriptCompileState("CompileError", message);
+		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp preparation failed: " << message);
+		UpdateSharedState();
+	};
+	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Failed to synchronize managed references before build: " << syncError);
+		rejectBeforeDispatch("No open project is available for Assembly-CSharp generation.");
+		return;
+	}
+	// Filesystem probes/workspace generation can throw before async dispatch.
+	// Route those failures through the same terminal coordinator publication.
+	try {
+		if (!m_WorkspaceService.EnsureWorkspace(&preparationError))
+		{
+		rejectBeforeDispatch(preparationError);
+		return;
+	}
+	inputs.projectRoot = m_WorkspaceService.GetProjectRoot();
+	inputs.projectPath = m_WorkspaceService.GetProjectPath();
+	inputs.assemblyPath = m_WorkspaceService.GetAssemblyPath();
+	ExportRuntimeLayout runtimeLayout;
+	if (!DiscoverExportRuntimeLayout(TerraEngine::PlatformUtils::GetExecutablePath(), runtimeLayout, preparationError))
+	{
+		rejectBeforeDispatch("Could not resolve the bundled .NET SDK: " + preparationError);
+		return;
+	}
+	inputs.dotnetExecutable = runtimeLayout.dotnetExecutable;
+	std::error_code dotnetError;
+	if (!std::filesystem::is_regular_file(inputs.dotnetExecutable, dotnetError))
+	{
+		rejectBeforeDispatch("The bundled .NET SDK executable was not found: " + inputs.dotnetExecutable.string()
+			+ ". Run the CMake install target to repair the editor layout.");
+		return;
 	}
 
-	PrepareForBuild();
+		PrepareForBuild();
+	} catch(const std::exception& error) {
+		rejectBeforeDispatch(std::string("Workspace preparation failed: ") + error.what());
+		return;
+	} catch(...) {
+		rejectBeforeDispatch("Workspace preparation failed with an unknown exception.");
+		return;
+	}
 	m_Status.queuedBuild = false;
 	m_Status.state = ScriptCoordinatorState::Building;
 	m_Status.progress = 0.2;
@@ -659,11 +704,26 @@ void ScriptCompilationSubsystem::BeginBuild()
 	m_Status.activeAssemblyPath.clear();
 	m_BuildInFlight = true;
 	AssetDatabase::Instance().SetScriptCompileState("Compiling", m_Status.lastSummary);
-	TERRAENGINE_LOG(LogLevel::Info, "Starting Assembly-CSharp build for " << m_WorkspaceService.GetProjectPath() << " using the " << BuildProfileToString(m_Status.activeProfile) << " profile.");
-	const ScriptBuildProfile requestedProfile = m_Status.activeProfile;
-	m_ActiveBuild = std::async(std::launch::async, [this, requestedProfile]() {
-		return RunBuildJob(requestedProfile);
-	});
+	TERRAENGINE_LOG(LogLevel::Info, "Starting Assembly-CSharp build for " << inputs.projectPath << " using the " << BuildProfileToString(inputs.profile) << " profile.");
+	// This bounded task owns blocking child-process I/O, so retain its dedicated
+	// async executor rather than occupying shared engine workers. Teardown joins
+	// the future before releasing this cancellation token; Update publishes the
+	// detached result at the existing protected owner boundary, with no new flush.
+	try
+	{
+		m_ActiveBuild = std::async(std::launch::async, [this, inputs = std::move(inputs)]() {
+			return RunBuildJob(inputs);
+		});
+	}
+	catch (const std::exception& exception)
+	{
+		m_BuildInFlight = false;
+		ScriptBuildResult failure;
+		failure.profile = m_Status.activeProfile;
+		failure.failureMessage = "Could not start the Assembly-CSharp build task: " + std::string(exception.what());
+		HandleCompletedBuild(std::move(failure));
+	}
+
 	UpdateSharedState();
 }
 
@@ -833,54 +893,26 @@ void ScriptCompilationSubsystem::UpdateSharedState()
 }
 
 
-ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBuildJob(ScriptBuildProfile profile)
+ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBuildJob(const ScriptBuildInputs& inputs)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	// Observe the detached values, then pause before worker-owned process work.
+	// Both callbacks remain immutable until the owning future has joined.
+	if (m_BuildInputObserverForTests) m_BuildInputObserverForTests(inputs);
+	if (m_WorkerEntryHookForTests) m_WorkerEntryHookForTests();
+#endif
 	ScriptBuildResult result;
-	result.profile = profile;
-
-
-	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
+	result.profile = inputs.profile;
+	if (m_CancelRequested.load(std::memory_order_relaxed))
 	{
-		result.failureMessage = "No open project is available for Assembly-CSharp generation.";
+		result.canceled = true;
+		result.failureMessage = "Assembly-CSharp compilation was canceled before process preparation.";
 		return result;
 	}
-
-	std::string workspaceError;
-
-	if (!m_WorkspaceService.EnsureWorkspace(&workspaceError))
-	{
-		result.failureMessage = workspaceError;
-		return result;
-	}
-
-	// Snapshot every canonical path before the worker launches dotnet. Project
-	// close joins this worker before mutating ScriptWorkspaceService, and these
-	// immutable values ensure diagnostics and output checks never observe a
-	// temporary alias or a later project's workspace.
-	const std::filesystem::path canonicalProjectRoot = m_WorkspaceService.GetProjectRoot();
-	const std::filesystem::path canonicalProjectPath = m_WorkspaceService.GetProjectPath();
-	const std::filesystem::path canonicalAssemblyPath = m_WorkspaceService.GetAssemblyPath();
-
-	// Resolve the SDK from the installed editor layout before launching worker
-	// tools. This deliberately has no PATH fallback: an incomplete install must
-	// fail clearly instead of selecting an arbitrary machine-wide SDK.
-	ExportRuntimeLayout runtimeLayout;
-	std::string runtimeLayoutError;
-	if (!DiscoverExportRuntimeLayout(
-			TerraEngine::PlatformUtils::GetExecutablePath(),
-			runtimeLayout,
-			runtimeLayoutError))
-	{
-		result.failureMessage = "Could not resolve the bundled .NET SDK: " + runtimeLayoutError;
-		return result;
-	}
-	std::error_code dotnetError;
-	if (!std::filesystem::is_regular_file(runtimeLayout.dotnetExecutable, dotnetError))
-	{
-		result.failureMessage = "The bundled .NET SDK executable was not found: "
-			+ runtimeLayout.dotnetExecutable.string() + ". Run the CMake install target to repair the editor layout.";
-		return result;
-	}
+	// Only detached inputs and this lifetime-owned atomic token are read below.
+	const auto& canonicalProjectRoot = inputs.projectRoot;
+	const auto& canonicalProjectPath = inputs.projectPath;
+	const auto& canonicalAssemblyPath = inputs.assemblyPath;
 
 	NativeAotProjectWorkspace processWorkspace(canonicalProjectRoot);
 	std::string processWorkspaceError;
@@ -894,8 +926,8 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 	const TerraEngine::Editor::Scripting::ScriptBuildInvocation invocation = TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(
 		canonicalProjectRoot,
 		canonicalProjectPath,
-		BuildProfileToString(profile),
-		runtimeLayout.dotnetExecutable,
+		BuildProfileToString(inputs.profile),
+		inputs.dotnetExecutable,
 		processWorkspace.BuildProjectRoot(),
 		processWorkspace.BuildProjectRoot() / canonicalProjectPath.filename());
 

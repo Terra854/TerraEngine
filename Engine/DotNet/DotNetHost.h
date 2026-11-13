@@ -13,10 +13,9 @@
 #include <filesystem>
 #include <coreclr_delegates.h>
 
-// Forward-declare the export-mode VTable struct so the header stays lightweight.
-// The full definition lives in Scripting/ExportVTable.h and is only needed by
-// callers that actually consume the VTable after initialization.
-struct ManagedVTable;
+// The retained typed table belongs to the loaded library below. Keeping a copy
+// lets every successful initializer populate independent caller-owned storage.
+#include "Scripting/ExportVTable.h"
 
 /**
  * @class DotNetHost
@@ -96,6 +95,9 @@ private:
 	// Export-mode state: the NativeAOT library handle stays alive for the
 	// entire engine session so the managed GC heap remains valid.
 	void* nativeAotLibraryHandle = nullptr;
+	ManagedVTable exportTable{};
+	// Canonical identity of the library owning the cached function pointers.
+	std::filesystem::path exportLibraryPath;
 	bool exportMode = false;
 	std::string m_LastNativeError;
 };

@@ -246,7 +246,9 @@ namespace TerraEngine::Terrain
 			};
 			result.stagePercentiles.push_back({std::move(stage), percentile(50u), percentile(95u), samples.size()});
 		}
-		std::sort(result.items.begin(), result.items.end(), [](const TerrainDiagnosticItem& a, const TerrainDiagnosticItem& b) { return static_cast<unsigned>(a.category) < static_cast<unsigned>(b.category); });
+		// Category groups are ordered, while equal-category facts retain their
+		// producer insertion order. Different producer permutations remain distinct.
+		std::stable_sort(result.items.begin(), result.items.end(), [](const TerrainDiagnosticItem& a, const TerrainDiagnosticItem& b) { return static_cast<unsigned>(a.category) < static_cast<unsigned>(b.category); });
 		return result;
 	}
 }

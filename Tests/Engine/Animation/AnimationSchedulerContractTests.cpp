@@ -821,6 +821,18 @@ namespace TerraEngine::Tests {
 			missing[0] = 201U;
 			context.Expect(plan.FindFirstOwnerObjectMapping(missing) == nullptr,
 				"An absent owner must fail closed without falling through to another bucket.");
+			// The optional hash table may be absent after allocation failure. Exercise
+			// the real binary-search fallback, including its first-adjacent-duplicate
+			// contract, without overriding the process allocator or simulating a GPU.
+			plan.ownerObjectLookupIndices.clear();
+			plan.ownerObjectLookupMask = 0U;
+			found = plan.FindFirstOwnerObjectMapping(plan.ownerObjectMappings[11U].ownerObjectId);
+			context.Expect(found == &plan.ownerObjectMappings[11U]
+				&& found->workPacketIndex == 11U
+				&& (found + 1)->ownerObjectId == found->ownerObjectId,
+				"Sorted lookup must preserve the first mapping and adjacent ambiguity witness when the hash allocation is unavailable.");
+			context.Expect(plan.FindFirstOwnerObjectMapping(missing) == nullptr,
+				"The sorted fallback must reject a missing owner exactly like the hash lookup.");
 		});
 
 		registry.Add("Animation.Binding.SharedArraysDetachOnlyOnMutation", [](TestContext& context) {

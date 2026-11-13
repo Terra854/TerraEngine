@@ -264,6 +264,12 @@ namespace TerraEngine::Animation {
 			request.targetTransform = input.targetTransform;
 			request.parentWorldTransform = input.parentJointIndex == kInvalidProceduralJointIndex
 				? AnimationTransform{} : source.joints[input.parentJointIndex];
+			// Graph joints are model-space, while this reusable constraint solves
+			// local transforms. Convert once at each side of that typed boundary.
+			if(!ProceduralMath::TryRelativeTransform(request.parentWorldTransform,
+				source.joints[input.jointIndex], request.currentLocalTransform)) {
+				return AnimationStatus::InvalidArgument;
+			}
 			request.targetSpace = input.targetSpace;
 			request.translationWeight = input.translationWeight;
 			request.rotationWeight = input.rotationWeight;
@@ -274,7 +280,7 @@ namespace TerraEngine::Animation {
 			if(status != AnimationStatus::Ok) {
 				return status;
 			}
-			contribution.joints[input.jointIndex] = result.transform;
+			contribution.joints[input.jointIndex] = ProceduralMath::Combine(request.parentWorldTransform, result.transform);
 			diagnostics.push_back(result.diagnostic);
 			return AnimationStatus::Ok;
 		}

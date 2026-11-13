@@ -135,6 +135,7 @@ namespace
 
 		RenderViewSelection view{};
 		view.generation = frameGeneration;
+		view.outputId = 1U;
 		view.visibleOrdinals.reserve(population);
 		view.selectedLods.reserve(population);
 		view.routeSelectors.reserve(population);
@@ -156,6 +157,17 @@ namespace
 		presentation.output.kind = publication->views.front().outputKind;
 		presentation.output.diagnosticsView = publication->views.front().viewType;
 		presentation.output.outputId = publication->views.front().outputId;
+		// The public seal validates the exact reference-frame owner even when
+		// this structural contract uses a zero canonical origin and no GPU. Each
+		// frame therefore captures its own valid view/output identity instead of
+		// relying on the obsolete default, unowned presentation frame.
+		presentation.referenceFrame.frameId = frameGeneration;
+		presentation.referenceFrame.viewId = 1U;
+		presentation.referenceFrame.outputId = presentation.output.outputId;
+		presentation.referenceFrame.originGeneration = 1U;
+		presentation.referenceFrame.spatialGeneration = 1U;
+		presentation.referenceFrame.residencyGeneration = 1U;
+		publication->referenceFrames.push_back(presentation.referenceFrame);
 		presentation.commandLanes.resize(population);
 		presentation.commandSelectionIndices.resize(population);
 		std::iota(presentation.commandSelectionIndices.begin(),
@@ -341,6 +353,12 @@ namespace
 			{"status", passed ? "passed" : "failed"},
 			{"population", population},
 			{"renderer", {
+				// Keep native rejection reasons visible: selectedCount describes the
+				// fixture's requested ranges and cannot prove that a root published.
+				{"firstOutcome", static_cast<std::uint32_t>(rendererFirstReceipt.outcome)},
+				{"firstDiagnostic", rendererFirstReceipt.DiagnosticText()},
+				{"secondOutcome", static_cast<std::uint32_t>(rendererSecondReceipt.outcome)},
+				{"secondDiagnostic", rendererSecondReceipt.DiagnosticText()},
 				{"firstGeneration", rendererFirstReceipt.publicationGeneration},
 				{"secondGeneration", rendererSecondReceipt.publicationGeneration},
 				{"persistentPages", rendererRoots.persistent->pages.size()},

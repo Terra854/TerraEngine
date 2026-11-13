@@ -11,6 +11,7 @@ namespace TerraEngine::Navigation
 	namespace
 	{
 		constexpr std::size_t kCategoryCount = 7U;
+		constexpr std::size_t kRejectionHistoryLimit = 64U;
 		[[nodiscard]] constexpr std::size_t CategoryIndex(NavigationBudgetCategory category) noexcept
 		{
 			return static_cast<std::size_t>(category);
@@ -38,6 +39,16 @@ namespace TerraEngine::Navigation
 		std::unordered_map<std::string, SharedAllocation> sharedAllocations;
 		std::vector<std::string> rejectionReasons;
 		mutable std::mutex mutex;
+
+		// Both ordinary and shared failures use the same retained diagnostic cap.
+		// The caller already holds mutex; rejection never acquires/charges a lease.
+		void RecordBudgetRejection()
+		{
+			rejectionReasons.push_back("GeometryBudgetExceeded");
+			if(rejectionReasons.size() > kRejectionHistoryLimit)
+				rejectionReasons.erase(rejectionReasons.begin(), rejectionReasons.begin()
+					+ static_cast<std::ptrdiff_t>(rejectionReasons.size() - kRejectionHistoryLimit));
+		}
 
 		void Release(NavigationBudgetCategory category, std::size_t bytes, const std::string& allocationKey) noexcept
 		{
@@ -102,8 +113,7 @@ namespace TerraEngine::Navigation
 		const std::size_t limit = LimitFor(state->limits, category);
 		const std::size_t used = state->used[CategoryIndex(category)];
 		if(bytes > limit || used > limit - bytes) {
-			state->rejectionReasons.push_back("GeometryBudgetExceeded");
-			if(state->rejectionReasons.size() > 64U) state->rejectionReasons.erase(state->rejectionReasons.begin());
+			state->RecordBudgetRejection();
 			NavigationBudgetReservation rejected{};
 			rejected.reason = "GeometryBudgetExceeded";
 			return rejected;
@@ -128,7 +138,7 @@ namespace TerraEngine::Navigation
 		const std::size_t limit = LimitFor(state->limits, category);
 		const std::size_t used = state->used[CategoryIndex(category)];
 		if(bytes > limit || used > limit - bytes) {
-			state->rejectionReasons.push_back("GeometryBudgetExceeded");
+			state->RecordBudgetRejection();
 			NavigationBudgetReservation rejected{};
 			rejected.reason = "GeometryBudgetExceeded";
 			return rejected;

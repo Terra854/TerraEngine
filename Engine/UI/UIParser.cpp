@@ -24,6 +24,30 @@
 namespace
 {
 
+// Attribute values are decoded by the XML reader. Escape each decoded byte
+// exactly once when writing, including whitespace XML would otherwise normalize.
+std::string EscapeMarkupAttribute(std::string_view value)
+{
+	std::string escaped;
+	escaped.reserve(value.size());
+	for (const char character : value)
+	{
+		switch (character)
+		{
+		case '&': escaped += "&amp;"; break;
+		case '<': escaped += "&lt;"; break;
+		case '>': escaped += "&gt;"; break;
+		case '"': escaped += "&quot;"; break;
+		case '\'': escaped += "&apos;"; break;
+		case '\t': escaped += "&#9;"; break;
+		case '\n': escaped += "&#10;"; break;
+		case '\r': escaped += "&#13;"; break;
+		default: escaped += character; break;
+		}
+	}
+	return escaped;
+}
+
 std::string TrimCopy(std::string_view text)
 {
 	std::size_t start = 0;
@@ -505,11 +529,13 @@ UIElement::Ptr ParseXmlNodeRecursive(const pugi::xml_node& xmlNode)
 
 		else if (name == "styleSrc")
 		{
+			element->hasExplicitStyleSheetSources = true;
 			element->styleSheetSources = ParseStyleSourceList(value);
 		}
 
 		else if (name == "styleSrcs")
 		{
+			element->hasExplicitStyleSheetSources = true;
 			element->styleSheetSources = ParseStyleSourceList(value);
 		}
 
@@ -1176,43 +1202,43 @@ std::string UIParser::SerializeMarkup(const UIElement::Ptr& root) const
 
 		if (!element.id.empty())
 		{
-			stream << " id=\"" << element.id << "\"";
+			stream << " id=\"" << EscapeMarkupAttribute(element.id) << "\"";
 		}
 
 		const std::string classText = element.GetClassListAsString();
 
 		if (!classText.empty())
 		{
-			stream << " class=\"" << classText << "\"";
+			stream << " class=\"" << EscapeMarkupAttribute(classText) << "\"";
 		}
 
 
 		if (!element.text.empty())
 		{
-			stream << " text=\"" << element.text << "\"";
+			stream << " text=\"" << EscapeMarkupAttribute(element.text) << "\"";
 		}
 
 
 		if (!element.source.empty())
 		{
-			stream << " src=\"" << element.source << "\"";
+			stream << " src=\"" << EscapeMarkupAttribute(element.source) << "\"";
 		}
 
 
 		if (element.styleSheetSources.size() == 1)
 		{
-			stream << " styleSrc=\"" << element.styleSheetSources.front() << "\"";
+			stream << " styleSrc=\"" << EscapeMarkupAttribute(element.styleSheetSources.front()) << "\"";
 		}
 
-		else if (!element.styleSheetSources.empty())
+		else if (element.hasExplicitStyleSheetSources || !element.styleSheetSources.empty())
 		{
-			stream << " styleSrcs=\"" << SerializeStyleSourceList(element.styleSheetSources) << "\"";
+			stream << " styleSrcs=\"" << EscapeMarkupAttribute(SerializeStyleSourceList(element.styleSheetSources)) << "\"";
 		}
 
 
 		if (HasSerializedStyleProperties(element.inlineStyle))
 		{
-			stream << " style=\"" << SerializeInlineStyleAttribute(element.inlineStyle) << "\"";
+			stream << " style=\"" << EscapeMarkupAttribute(SerializeInlineStyleAttribute(element.inlineStyle)) << "\"";
 		}
 
 

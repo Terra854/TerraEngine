@@ -1,0 +1,746 @@
+{
+	"schemaVersion": 1,
+	"qualification": "SYNTHETIC PARSER/PROTOCOL FIXTURES ONLY; never native acceptance",
+	"scope": {
+		"includedIds": [
+			"CR-001",
+			"CR-002",
+			"CR-003",
+			"CR-004",
+			"CR-005",
+			"CR-006",
+			"CR-007",
+			"CR-008",
+			"CR-009",
+			"CR-010",
+			"CR-011",
+			"CR-012",
+			"CR-013",
+			"CR-014",
+			"CR-015",
+			"CR-016",
+			"CR-017",
+			"CR-018",
+			"CR-019",
+			"CR-020",
+			"CR-021",
+			"CR-022",
+			"CR-023",
+			"CR-024",
+			"CR-025",
+			"CR-026",
+			"CR-027",
+			"CR-028",
+			"CR-029",
+			"CR-030",
+			"CR-031",
+			"CR-032",
+			"CR-033",
+			"CR-034",
+			"CR-035",
+			"CR-036",
+			"CR-037",
+			"CR-038",
+			"CR-039",
+			"CR-040",
+			"CR-041",
+			"CR-042",
+			"CR-043",
+			"CR-044",
+			"CR-045",
+			"CR-046",
+			"CR-047",
+			"CR-048",
+			"CR-049",
+			"CR-050",
+			"CR-051",
+			"CR-052",
+			"CR-053",
+			"CR-054",
+			"CR-055",
+			"CR-056",
+			"CR-057",
+			"CR-058",
+			"CR-059",
+			"CR-060",
+			"CR-061",
+			"CR-062",
+			"CR-063",
+			"CR-064",
+			"CR-065",
+			"CR-066",
+			"CR-067",
+			"CR-068",
+			"CR-069",
+			"CR-070",
+			"CR-071",
+			"CR-072",
+			"CR-073",
+			"CR-074",
+			"CR-075",
+			"CR-076",
+			"CR-077",
+			"CR-078",
+			"CR-079",
+			"CR-080",
+			"CR-081",
+			"CR-082",
+			"CR-083",
+			"CR-084",
+			"CR-085",
+			"CR-086",
+			"CR-087",
+			"CR-088",
+			"CR-089",
+			"CR-090",
+			"CR-091",
+			"CR-092",
+			"CR-093",
+			"CR-094",
+			"CR-095",
+			"CR-096",
+			"CR-097",
+			"CR-099",
+			"CR-100",
+			"CR-101",
+			"CR-102",
+			"CR-103",
+			"CR-104",
+			"CR-105",
+			"CR-106",
+			"CR-108",
+			"CR-109",
+			"CR-110",
+			"CR-111",
+			"CR-112",
+			"CR-113",
+			"CR-114",
+			"CR-115",
+			"CR-116",
+			"CR-118",
+			"CR-119",
+			"CR-120",
+			"CR-121",
+			"CR-122",
+			"CR-124",
+			"CR-125",
+			"CR-126",
+			"CR-127",
+			"CR-128",
+			"CR-129",
+			"CR-130",
+			"CR-131",
+			"CR-132",
+			"CR-133",
+			"CR-134",
+			"CR-135",
+			"CR-136",
+			"CR-137",
+			"CR-138",
+			"CR-139",
+			"CR-140",
+			"CR-143",
+			"CR-144",
+			"CR-145",
+			"CR-147",
+			"CR-148",
+			"CR-149",
+			"CR-150",
+			"CR-152",
+			"CR-155",
+			"CR-156",
+			"CR-157",
+			"CR-158",
+			"CR-163",
+			"CR-171",
+			"CR-172",
+			"CR-177",
+			"CR-179",
+			"CR-180",
+			"CR-181",
+			"CR-182",
+			"CR-183",
+			"CR-184",
+			"CR-185",
+			"CR-186",
+			"CR-187",
+			"CR-188",
+			"CR-189",
+			"CR-190",
+			"CR-191",
+			"CR-192",
+			"CR-193",
+			"CR-194",
+			"CR-195",
+			"CR-196",
+			"CR-198",
+			"CR-199",
+			"CR-200",
+			"CR-201",
+			"CR-202",
+			"CR-203",
+			"CR-204",
+			"CR-205",
+			"CR-206"
+		],
+		"partialIds": [
+			"CR-004",
+			"CR-009",
+			"CR-034",
+			"CR-066",
+			"CR-102",
+			"CR-106",
+			"CR-108",
+			"CR-112",
+			"CR-114",
+			"CR-133",
+			"CR-135",
+			"CR-143",
+			"CR-150",
+			"CR-152",
+			"CR-155",
+			"CR-157",
+			"CR-163",
+			"CR-185",
+			"CR-186",
+			"CR-187",
+			"CR-200"
+		],
+		"excludedIds": [
+			"CR-098",
+			"CR-107",
+			"CR-117",
+			"CR-123",
+			"CR-141",
+			"CR-142",
+			"CR-146",
+			"CR-151",
+			"CR-153",
+			"CR-154",
+			"CR-159",
+			"CR-160",
+			"CR-161",
+			"CR-162",
+			"CR-164",
+			"CR-165",
+			"CR-166",
+			"CR-167",
+			"CR-168",
+			"CR-169",
+			"CR-170",
+			"CR-173",
+			"CR-174",
+			"CR-175",
+			"CR-176",
+			"CR-178",
+			"CR-197"
+		]
+	},
+	"cases": [
+		{
+			"name": "valid179-partials-fixed",
+			"mutation": "partial-disposition",
+			"value": "fixed",
+			"expected": "complete"
+		},
+		{
+			"name": "valid179-partials-superseded-with-proof",
+			"mutation": "partial-disposition",
+			"value": "superseded-with-proof",
+			"expected": "complete"
+		},
+		{
+			"name": "valid179-partials-bounded-hardening",
+			"mutation": "partial-disposition",
+			"value": "bounded-hardening",
+			"expected": "complete"
+		},
+		{
+			"name": "valid179-partials-configuration-or-documentation-corrected",
+			"mutation": "partial-disposition",
+			"value": "configuration-or-documentation-corrected",
+			"expected": "complete"
+		},
+		{
+			"name": "valid179-partials-supported-path-claim-narrowed",
+			"mutation": "partial-disposition",
+			"value": "supported-path-claim-narrowed",
+			"expected": "complete"
+		},
+		{
+			"name": "confirmed-superseded",
+			"mutation": "confirmed-superseded",
+			"expected": "complete"
+		},
+		{
+			"name": "missing-id",
+			"mutation": "missing",
+			"expected": "invalid"
+		},
+		{
+			"name": "duplicate-id",
+			"mutation": "duplicate",
+			"expected": "invalid"
+		},
+		{
+			"name": "excluded-id",
+			"mutation": "excluded",
+			"expected": "invalid"
+		},
+		{
+			"name": "unknown-id",
+			"mutation": "unknown",
+			"expected": "invalid"
+		},
+		{
+			"name": "unsupported-disposition",
+			"mutation": "bad-disposition",
+			"expected": "invalid"
+		},
+		{
+			"name": "confirmed-cannot-narrow",
+			"mutation": "confirmed-narrow",
+			"expected": "invalid"
+		},
+		{
+			"name": "partial-missing-qualification",
+			"mutation": "no-qualification",
+			"expected": "blocked"
+		},
+		{
+			"name": "partial-missing-supported-observation",
+			"mutation": "no-observation",
+			"expected": "blocked"
+		},
+		{
+			"name": "missing-proof-projection",
+			"mutation": "no-projection",
+			"expected": "blocked"
+		},
+		{
+			"name": "missing-proof-row",
+			"mutation": "missing-proof-row",
+			"expected": "blocked"
+		},
+		{
+			"name": "duplicate-proof-row",
+			"mutation": "duplicate-proof-row",
+			"expected": "invalid"
+		},
+		{
+			"name": "proof-acceptance-drift",
+			"mutation": "acceptance-drift",
+			"expected": "invalid"
+		},
+		{
+			"name": "ready-not-accepted",
+			"mutation": "ready",
+			"expected": "blocked"
+		},
+		{
+			"name": "blocked-prerequisite",
+			"mutation": "blocked-prerequisite",
+			"expected": "blocked"
+		},
+		{
+			"name": "required-limit",
+			"mutation": "required-limit",
+			"expected": "blocked"
+		},
+		{
+			"name": "unproven-native",
+			"mutation": "unproven-native",
+			"expected": "blocked"
+		},
+		{
+			"name": "zero-selected",
+			"mutation": "zero-selected",
+			"expected": "blocked"
+		},
+		{
+			"name": "zero-executed",
+			"mutation": "zero-executed",
+			"expected": "blocked"
+		},
+		{
+			"name": "required-case-skipped",
+			"mutation": "skipped",
+			"expected": "blocked"
+		},
+		{
+			"name": "registered-only",
+			"mutation": "registered-only",
+			"expected": "blocked"
+		},
+		{
+			"name": "not-observed",
+			"mutation": "not-observed",
+			"expected": "blocked"
+		},
+		{
+			"name": "failed-exit",
+			"mutation": "failed-exit",
+			"expected": "blocked"
+		},
+		{
+			"name": "unreviewed",
+			"mutation": "unreviewed",
+			"expected": "blocked"
+		},
+		{
+			"name": "missing-artifact",
+			"mutation": "missing-artifact",
+			"expected": "invalid"
+		},
+		{
+			"name": "wrong-hash",
+			"mutation": "wrong-hash",
+			"expected": "invalid"
+		},
+		{
+			"name": "wrong-length",
+			"mutation": "wrong-length",
+			"expected": "invalid"
+		},
+		{
+			"name": "parent-path",
+			"mutation": "parent-path",
+			"expected": "invalid"
+		},
+		{
+			"name": "absolute-path",
+			"mutation": "absolute-path",
+			"expected": "invalid"
+		},
+		{
+			"name": "windows-drive-path",
+			"mutation": "drive-path",
+			"expected": "invalid"
+		},
+		{
+			"name": "unreadable-reference",
+			"mutation": "unknown-artifact-ref",
+			"expected": "invalid"
+		},
+		{
+			"name": "normal-rejects-synthetic",
+			"mutation": "normal-synthetic",
+			"expected": "blocked"
+		},
+		{
+			"name": "confirmed-cannot-use-bounded",
+			"mutation": "confirmed-bounded",
+			"expected": "invalid"
+		},
+		{
+			"name": "confirmed-doc-closes-fixed-only",
+			"mutation": "confirmed-config",
+			"expected": "invalid"
+		},
+		{
+			"name": "unknown-row-status",
+			"mutation": "unknown-status",
+			"expected": "invalid"
+		},
+		{
+			"name": "partial-execution-blocked",
+			"mutation": "partial-execution",
+			"expected": "blocked"
+		},
+		{
+			"name": "alternate-stream-rejected",
+			"mutation": "alternate-stream",
+			"expected": "invalid"
+		},
+		{
+			"name": "oversize-artifact-rejected",
+			"mutation": "oversize-artifact",
+			"expected": "invalid"
+		},
+		{
+			"name": "unknown-proof-semantics-rejected",
+			"mutation": "unknown-proof-semantics",
+			"expected": "invalid"
+		},
+		{
+			"name": "source-reference-must-pin-repository",
+			"mutation": "source-ref-not-repository",
+			"expected": "invalid"
+		},
+		{
+			"name": "explicit-current-erratum",
+			"mutation": "explicit-erratum",
+			"expected": "complete"
+		},
+		{
+			"name": "erratum-projection-drift",
+			"mutation": "erratum-drift",
+			"expected": "invalid"
+		},
+		{
+			"name": "observed-procedures-compile",
+			"mutation": "observed-procedure-kind",
+			"value": "compile",
+			"expected": "complete"
+		},
+		{
+			"name": "observed-procedures-build",
+			"mutation": "observed-procedure-kind",
+			"value": "build",
+			"expected": "complete"
+		},
+		{
+			"name": "observed-procedures-install",
+			"mutation": "observed-procedure-kind",
+			"value": "install",
+			"expected": "complete"
+		},
+		{
+			"name": "observed-procedures-source",
+			"mutation": "observed-procedure-kind",
+			"value": "source",
+			"expected": "complete"
+		},
+		{
+			"name": "observed-procedures-source-inspection",
+			"mutation": "observed-procedure-kind",
+			"value": "source-inspection",
+			"expected": "complete"
+		},
+		{
+			"name": "observed-procedures-artifact-inspection",
+			"mutation": "observed-procedure-kind",
+			"value": "artifact-inspection",
+			"expected": "complete"
+		},
+		{
+			"name": "observed-procedures-documentation",
+			"mutation": "observed-procedure-kind",
+			"value": "documentation",
+			"expected": "complete"
+		},
+		{
+			"name": "zero-procedure-attempts",
+			"mutation": "zero-procedures",
+			"expected": "blocked"
+		},
+		{
+			"name": "absent-observed-procedures",
+			"mutation": "absent-procedures",
+			"expected": "blocked"
+		},
+		{
+			"name": "unobserved-procedure-attempts",
+			"mutation": "unobserved-procedures",
+			"expected": "blocked"
+		},
+		{
+			"name": "procedures-cannot-fabricate-test-counts",
+			"mutation": "fake-procedure-cases",
+			"expected": "invalid"
+		},
+		{
+			"name": "procedure-requires-positive-floor",
+			"mutation": "invalid-procedure-floor",
+			"expected": "invalid"
+		},
+		{
+			"name": "required-procedure-skip",
+			"mutation": "skipped-procedures",
+			"expected": "blocked"
+		},
+		{
+			"name": "unknown-count-unit",
+			"mutation": "unknown-count-unit",
+			"expected": "invalid"
+		},
+		{
+			"name": "unknown-observation-kind",
+			"mutation": "unknown-observation-kind",
+			"expected": "invalid"
+		},
+		{
+			"name": "native-requirement-cannot-use-procedures",
+			"mutation": "native-procedure-requirement",
+			"expected": "invalid"
+		},
+		{
+			"name": "native-observation-cannot-use-procedures",
+			"mutation": "native-procedure-observation",
+			"expected": "invalid"
+		},
+		{
+			"name": "native-cannot-be-relabelled-build-procedure",
+			"mutation": "native-relabelled-procedure",
+			"expected": "blocked"
+		},
+		{
+			"name": "cases-cannot-fabricate-procedure-count",
+			"mutation": "case-procedure-counter",
+			"expected": "invalid"
+		},
+		{
+			"name": "empty-stderr-with-nonempty-controls",
+			"mutation": "empty-artifact",
+			"expected": "complete"
+		},
+		{
+			"name": "empty-artifact-wrong-size",
+			"mutation": "empty-wrong-size",
+			"expected": "invalid"
+		},
+		{
+			"name": "empty-artifact-wrong-hash",
+			"mutation": "empty-wrong-hash",
+			"expected": "invalid"
+		},
+		{
+			"name": "unexpected-checker-crash-is-not-invalid",
+			"mutation": "unexpected-checker-crash",
+			"expected": "crashed"
+		}
+	],
+	"proofRequirementsExample": {
+		"schemaVersion": 1,
+		"syntheticFixture": false,
+		"findings": [
+			{
+				"findingId": "CR-001",
+				"acceptanceSha256": "SHA256 of exact register acceptance UTF-8",
+				"requiredValidations": [
+					{
+						"requirementId": "minimum-supported-configure",
+						"kind": "compile",
+						"platform": "Windows",
+						"configuration": "RelWithDebInfo",
+						"minimumSelected": 1,
+						"minimumExecuted": 1,
+						"expectedExitStatus": 0,
+						"expectedResult": "Passed"
+					}
+				],
+				"requiredPrerequisites": [
+					"installed-final-revision"
+				]
+			}
+		]
+	},
+	"closureExample": {
+		"schemaVersion": 1,
+		"findings": [
+			{
+				"findingId": "CR-001",
+				"status": "accepted",
+				"closure": {
+					"disposition": "fixed",
+					"currentRevision": "REVIEWED_REVISION",
+					"changeReferences": [
+						{
+							"type": "source",
+							"artifactReference": "source",
+							"description": "Specific correction"
+						}
+					],
+					"qualification": null,
+					"validations": [
+						{
+							"id": "minimum",
+							"requirementId": "minimum-supported-configure",
+							"kind": "compile",
+							"command": [
+								"cmake",
+								"EXACT_ARGUMENTS"
+							],
+							"platform": "Windows",
+							"configuration": "RelWithDebInfo",
+							"selectedCases": 1,
+							"executedCases": 1,
+							"skippedCases": 0,
+							"observed": true,
+							"completed": true,
+							"expectedResult": "Passed",
+							"actualResult": "Passed",
+							"exitStatus": 0,
+							"artifactReferences": [
+								"log"
+							]
+						}
+					],
+					"artifacts": [
+						{
+							"id": "log",
+							"root": "evidence",
+							"path": "relative/log.txt",
+							"sha256": "64 lowercase hex",
+							"bytes": 123
+						}
+					],
+					"prerequisites": {
+						"installed-final-revision": {
+							"status": "satisfied",
+							"artifactReferences": [
+								"log"
+							]
+						}
+					},
+					"remainingLimitations": [],
+					"acceptanceReview": {
+						"reviewer": "named reviewer",
+						"reviewedRevision": "REVIEWED_REVISION",
+						"acceptanceSha256": "exact register acceptance SHA256",
+						"outcomeSatisfied": true,
+						"proofMethodSatisfied": true,
+						"coveredRequirementIds": [
+							"minimum-supported-configure"
+						],
+						"artifactReferences": [
+							"log"
+						]
+					}
+				}
+			}
+		]
+	},
+	"limits": [
+		"Example source artifact is abbreviated; actual records must include every referenced artifact.",
+		"All179 exact IDs and all21 partial qualification records are materialized from the explicit real register for each self-test case.",
+		"Every self-test report has acceptanceGranted=false, even for structurally complete synthetic rows.",
+		"Real proof projection is an explicit parent-reviewed input; this checker never guesses required native/platform proof from keywords.",
+		"--fixture-register is forbidden outside --self-test and cannot be combined with --register; portable fixture mode checks only artificial mechanical scope.",
+		"Zero-byte regular artifact pins are valid, but neither empty nor nonempty hashes imply native observation; required counts/kinds/commands/raw controls/review remain independent."
+	],
+	"fixtureRegister": {
+		"isNormativeRegister": false,
+		"package": "SYNTHETIC-PARSER-ONLY",
+		"acceptanceTemplate": "Artificial mechanical-scope acceptance for {findingId}; NOT the actual finding acceptance.",
+		"qualification": "For --fixture-register --self-test only. Contains no real finding titles, claims, source hashes or acceptance prose."
+	},
+	"procedureCountContract": {
+		"defaultCountUnit": "cases",
+		"procedureKinds": [
+			"compile",
+			"build",
+			"install",
+			"source",
+			"source-inspection",
+			"artifact-inspection",
+			"documentation"
+		],
+		"requirementExample": {
+			"requirementId": "actual-install",
+			"kind": "install",
+			"countUnit": "procedures",
+			"minimumExecutedProcedures": 1,
+			"platform": "Windows",
+			"configuration": "RelWithDebInfo",
+			"expectedExitStatus": 0,
+			"expectedResult": "Passed"
+		},
+		"observationRules": [
+			"executedProcedures must be the actual positively observed procedure attempt count; never substitute an arbitrary1.",
+			"selectedCases,executedCases,skippedCases are absent/null for procedures; do not invent test counters.",
+			"Exact command/procedure, observed/completed, expected/actual results and pinned raw artifacts are still mandatory.",
+			"Native,worker-native,gpu-native,protocol,synthetic regression requirements retain actual nonempty case floors and zero required skips."
+		]
+	}
+}

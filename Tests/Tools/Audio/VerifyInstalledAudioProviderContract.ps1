@@ -23,7 +23,8 @@ public:
 	TerraEngine::Audio::AudioResult PollObservations(std::span<TerraEngine::Audio::AudioBackendObservation>, std::size_t& required) override { required = 0; return TerraEngine::Audio::AudioResult::Accepted(); }
 	TerraEngine::Audio::AudioResult Shutdown() override { return TerraEngine::Audio::AudioResult::Accepted(); }
 };
-static_assert(TerraEngine::Audio::kAudioProviderContractVersion == 1U);
+// The installed consumer implements the current public packet contract.
+static_assert(TerraEngine::Audio::kAudioProviderContractVersion == 2U);
 int main() { ExternalAudioProvider provider; return provider.Shutdown().Succeeded() ? 0 : 1; }
 '@ | Set-Content $source -Encoding utf8
 	if($IsWindows -or $env:OS -eq 'Windows_NT') {

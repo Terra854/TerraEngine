@@ -626,14 +626,21 @@ void BuildProfilesWindow::PollExportAtProtectedFrame() {
 			STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
 			if (CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, launcher->parent_path().c_str(), &startup, &process)) { CloseHandle(process.hThread); CloseHandle(process.hProcess); }
 #else
+			// Prepare all allocating filesystem/string work on the protected owner
+			// before fork. A multithreaded child may only use async-signal-safe calls
+			// until exec; copied raw pointers remain valid in its private address space.
+			const std::string executablePath=launcher->string();
+			const std::string workingDirectory=launcher->parent_path().string();
+			const char* const executable=executablePath.c_str();
+			const char* const directory=workingDirectory.c_str();
 			const auto child = fork();
 			if (child == 0) {
 				// Detach the explicitly launched game so its eventual exit is reaped
 				// by the OS rather than retained as an editor-owned zombie.
 				const auto game = fork();
 				if (game != 0) _exit(game < 0 ? 127 : 0);
-				chdir(launcher->parent_path().c_str());
-				execl(launcher->c_str(), launcher->c_str(), static_cast<char*>(nullptr)); _exit(127);
+				if(chdir(directory)!=0) _exit(127);
+				execl(executable,executable,static_cast<char*>(nullptr)); _exit(127);
 			}
 			if (child > 0) { int status = 0; while (waitpid(child, &status, 0) < 0 && errno == EINTR) {} }
 #endif

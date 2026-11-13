@@ -9,6 +9,34 @@ namespace TerraEngine::Tests
 {
 	void RegisterWorldStreamingSystemTests(TestRegistry& registry)
 	{
+		registry.Add("WorldStreamingSystem.RejectedPreparedRevisionCanBeRequestedAgain", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			auto& streaming = WorldStreamingSystem::Instance(); streaming.Initialize();
+			struct Cleanup { ~Cleanup() { WorldStreamingSystem::Instance().Shutdown(); } } cleanup;
+			// The singleton directory intentionally survives lifecycle restart. Use a
+			// fixture-specific sparse key instead of replacing the shared origin entry.
+			WorldRegionDirectoryEntry entry{}; entry.key = {7391, 7391, 7391}; entry.artifactPath = "Regions/retry.teregion";
+			entry.contentHash.assign(64, 'd'); entry.revision = 9;
+			context.Expect(streaming.Directory().Upsert(entry), "Install the real region directory revision.");
+			for(const auto state : {WorldRegionState::Requested, WorldRegionState::Loading, WorldRegionState::Prepared})
+				context.Expect(streaming.Directory().Transition(entry.key, state), "Prepare the region through legal transitions.");
+			auto snapshot = std::make_shared<WorldRegionSnapshot>(); snapshot->key = entry.key;
+			snapshot->directoryRevision = entry.revision; snapshot->contentHash = entry.contentHash;
+			streaming.SubmitPreparedRegion({entry.key, entry.revision, 1, true, {}, snapshot});
+			context.Expect(!streaming.PublishAtFrameEnd(ResourceManager::Instance(), 1)
+				&& streaming.CurrentResidency().residentRegions.empty(), "Cancelled output must not publish partial residency.");
+			context.Expect(streaming.Directory().Find(entry.key)->state == WorldRegionState::Failed
+				&& streaming.Directory().Transition(entry.key, WorldRegionState::Requested),
+				"A rejected matching revision must release Prepared so a later request can recover.");
+			// A late completion must not fail a newer owner's prepared revision.
+			auto newer = entry; ++newer.revision; newer.state = WorldRegionState::Prepared;
+			context.Expect(streaming.Directory().Upsert(newer), "Install a newer prepared directory owner.");
+			streaming.SubmitPreparedRegion({entry.key, entry.revision, 2, false, {}, snapshot});
+			context.Expect(!streaming.PublishAtFrameEnd(ResourceManager::Instance(), 2)
+				&& streaming.Directory().Find(entry.key)->revision == newer.revision
+				&& streaming.Directory().Find(entry.key)->state == WorldRegionState::Prepared,
+				"Rejecting old output must preserve the newer prepared revision and residency visibility.");
+		});
 		registry.Add("WorldStreamingSystem.ArbitratesObserversDeterministically", [](TestContext& context) {
 			TerraEngine::Scene::WorldRegionDirectory directory;
 			for (std::int64_t x : { 0LL, 1LL })

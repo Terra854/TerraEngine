@@ -244,7 +244,9 @@ AnimationStatus ComposeJoint(
 		if (Dot(reference->rotation, alignedSource) < 0.0) {
 			alignedSource = Negate(alignedSource);
 		}
-		const AnimationQuaternion delta = Multiply(alignedSource, Inverse(reference->rotation));
+		// The delta is applied on the right of the base pose, so express it in
+		// reference-local space. At full weight, reference * delta equals source.
+		const AnimationQuaternion delta = Multiply(Inverse(reference->rotation), alignedSource);
 		target.rotation = Multiply(target.rotation, Nlerp(AnimationQuaternion{}, delta, weight));
 	}
 	return IsFinite(target) && IsNormalized(target.rotation) ? AnimationStatus::Ok : AnimationStatus::RangeOverflow;

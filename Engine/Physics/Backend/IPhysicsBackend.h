@@ -101,6 +101,19 @@ namespace TerraEngine::Physics {
 			PhysicsShapeRecipe result{};
 			result.kind = PhysicsShapeKind::HeightField;
 			result.terrainHeightField = std::move(recipe);
+			const auto& terrain = *result.terrainHeightField;
+			result.stableRecipeHash = terrain.collisionDependencyHash;
+			if(terrain.cookedCollision) {
+				const auto& cooked = *terrain.cookedCollision;
+				result.stableRecipeHash = cooked.recipeHash;
+				result.cookedPayload = cooked.payload;
+				result.cookedFormatFamily = cooked.formatFamily;
+				result.cookedProvider = cooked.provider;
+				result.cookedProviderVersion = cooked.providerVersion;
+				result.cookedProviderRevision = cooked.providerRevision;
+				result.cookedFormatVersion = cooked.formatVersion;
+				result.cookedPayloadChecksum = cooked.checksum;
+			}
 			return result;
 		}
 

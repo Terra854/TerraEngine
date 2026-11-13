@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 #include <thread>
@@ -286,6 +287,9 @@ public:
 
 
 	size_t getThreadCount() const { return workers.size(); }
+	// Observe only the calling thread's actual membership in this pool. Main
+	// threads and workers owned by another pool receive no invented worker index.
+	[[nodiscard]] TERRAENGINE_API std::optional<std::size_t> CurrentExecutingWorkerIndex() const noexcept;
 
 	// ConfigureTelemetrySampling changes only diagnostic retention. Capacity is
 	// always clamped to the public hard maximum so long sessions stay bounded.

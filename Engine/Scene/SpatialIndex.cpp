@@ -151,8 +151,15 @@ namespace TerraEngine::Scene
 			std::vector<SpatialObjectRecord> movableRecords;
 			staticRecords.reserve(records.size());
 			movableRecords.reserve(records.size());
-			for (const SpatialObjectRecord& record : records)
+			// Resolve identity before partitioning: one UUID cannot simultaneously
+			// own stale static and current movable memberships. Last input wins.
+			std::unordered_map<TerraEngine::UUID, std::size_t> lastOccurrence;
+			lastOccurrence.reserve(records.size());
+			for (std::size_t index = 0; index < records.size(); ++index) lastOccurrence[records[index].objectId] = index;
+			for (std::size_t index = 0; index < records.size(); ++index)
 			{
+				const SpatialObjectRecord& record = records[index];
+				if (lastOccurrence.at(record.objectId) != index) continue;
 				(record.isStatic ? staticRecords : movableRecords).push_back(record);
 			}
 			(void)staticPartition->SetReferenceFrame(referenceFrame);
@@ -251,8 +258,15 @@ namespace TerraEngine::Scene
 			std::vector<SpatialObjectRecord> movableRecords;
 			staticRecords.reserve(records.size());
 			movableRecords.reserve(records.size());
-			for (const SpatialObjectRecord& record : records)
+			// Match complete rebuild's last-occurrence policy before deciding which
+			// partition receives an incremental addition, update, or removal.
+			std::unordered_map<TerraEngine::UUID, std::size_t> lastOccurrence;
+			lastOccurrence.reserve(records.size());
+			for (std::size_t index = 0; index < records.size(); ++index) lastOccurrence[records[index].objectId] = index;
+			for (std::size_t index = 0; index < records.size(); ++index)
 			{
+				const SpatialObjectRecord& record = records[index];
+				if (lastOccurrence.at(record.objectId) != index) continue;
 				(record.isStatic ? staticRecords : movableRecords).push_back(record);
 			}
 			(void)staticPartition->SetReferenceFrame(referenceFrame);

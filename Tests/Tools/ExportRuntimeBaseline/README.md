@@ -12,12 +12,15 @@ RelWithDebInfo tree before running the baseline:
 
 ```powershell
 cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-Export TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-EditorTests
+cmake --build --preset RelWithDebInfo --target TerraEngine-Editor TerraEngine-Export TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-EditorTests
 cmake --build --preset RelWithDebInfo --target install
 ```
 
 The install must contain:
 
+- `out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe`
+- `out/build/RelWithDebInfo/Build/Editor/Project/Templates/UserSettings/EditorLayout.ini`
+- `out/build/RelWithDebInfo/Build/Editor/Project/Templates/UserSettings/EditorLayout.terra`
 - `out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe`
 - `out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe`
 - `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe`
@@ -26,6 +29,15 @@ The install must contain:
 - `out/build/RelWithDebInfo/Build/Editor/TerraEnginePhysicsColliderCompiler.exe`
 - `out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll`
 - `out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll`
+
+The full install target may already build this editor closure; the explicit target
+list and inventory make that prerequisite visible. Preserve the complete installed
+Editor runtime/SDK/shader/managed/NativeAotNuGet closure rather than copying only
+the listed files. `RunBaseline.ps1` resolves the editor executable and copies both
+installed default layout files into its private project before the real editor
+invariant check; it does not use or overwrite a developer project layout. A file
+inventory proves prerequisites are present, not that export or native execution
+has passed.
 
 ## One-command gate
 
@@ -67,7 +79,7 @@ The helper also copies the source-only physics recipe from
 `Tests/Fixtures/PhysicsExportRuntime` into its disposable project and invokes
 the installed `TerraEnginePhysicsColliderCompiler`. It requires a published
 `Build/Assets/Colliders/Startup.tepcoll` envelope with the repository-pinned
-Jolt 5.6.0 revision before export. The archive must contain that cooked
+Jolt 5.6.1 revision `2e28006e4a367624bb512bf2c37ca99a93d9d1ea` before export. The archive must contain that cooked
 envelope and Physics Settings, while excluding the `.tecollider` source recipe.
 
 ## Expected signals and diagnosis

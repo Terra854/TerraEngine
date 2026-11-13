@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <system_error>
 
@@ -24,6 +25,24 @@ namespace TerraEngine::Editor::Terrain
 {
 	namespace
 	{
+		// JSON numeric conversions can truncate or wrap. Dimensions and versions
+		// are whole positive uint32 values; reject before any store is constructed.
+		std::optional<std::uint32_t> ReadDescriptorDimension(
+			const nlohmann::json& descriptor, const char* name)
+		{
+			const auto value = descriptor.find(name);
+			if(value == descriptor.end() || !value->is_number_integer()) return std::nullopt;
+			if(value->is_number_unsigned())
+			{
+				const auto number = value->get<std::uint64_t>();
+				if(number == 0u || number > (std::numeric_limits<std::uint32_t>::max)()) return std::nullopt;
+				return static_cast<std::uint32_t>(number);
+			}
+			const auto number = value->get<std::int64_t>();
+			if(number <= 0 || static_cast<std::uint64_t>(number) > (std::numeric_limits<std::uint32_t>::max)()) return std::nullopt;
+			return static_cast<std::uint32_t>(number);
+		}
+
 		bool StagePrivateGeneration(const TerraEngine::AssetPipeline::TerrainImportRequest& request,
 			const TerraEngine::AssetPipeline::TerrainHeightfield& heightfield, const std::filesystem::path& stagingDirectory,
 			std::string& outError)
@@ -186,12 +205,20 @@ namespace TerraEngine::Editor::Terrain
 		}
 		{
 			std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-			if(!output) { result.message = "The terrain descriptor temporary file could not be opened."; return result; }
+			if(!output) { std::filesystem::remove_all(dataTemporary, error); result.message = "The terrain descriptor temporary file could not be opened."; return result; }
 			// This intentionally small parent descriptor names only stable import
 			// facts. Area blobs remain in the private sibling data directory.
-			output << "{\"format\":\"TerraEngineTerrain\",\"rootFormat\":\"TERRAROOT1\",\"version\":1,\"width\":" << compiled.heightfield.width
-				<< ",\"height\":" << compiled.heightfield.height << ",\"sampleSpacingMetres\":" << request.sampleSpacingMetres
-				<< ",\"assetId\":\"" << TerraEngine::ToHexString(request.assetId) << "\"}";
+			// The root stores the promoted float as a double. JSON's round-trip double
+			// writer preserves that exact value, unlike default stream precision.
+			output << nlohmann::json{{"format", "TerraEngineTerrain"}, {"rootFormat", "TERRAROOT1"},
+				{"version", 1}, {"width", compiled.heightfield.width}, {"height", compiled.heightfield.height},
+				{"sampleSpacingMetres", static_cast<double>(request.sampleSpacingMetres)},
+				{"assetId", TerraEngine::ToHexString(request.assetId)}};
+			// Flush and close before publishing either owner; late storage failures
+			// must leave no visible descriptor or private data generation.
+			output.flush();
+			output.close();
+			if(!output) { std::filesystem::remove(temporary, error); std::filesystem::remove_all(dataTemporary, error); result.message = "The terrain descriptor could not be completely written."; return result; }
 		}
 		std::filesystem::rename(dataTemporary, dataDirectory, error);
 		if(error) { std::filesystem::remove(temporary, error); std::filesystem::remove_all(dataTemporary, error); result.message = "The staged private terrain generation could not be atomically published."; return result; }
@@ -242,32 +269,47 @@ namespace TerraEngine::Editor::Terrain
 	{
 		TerrainOpenResult result;
 		nlohmann::json descriptor;
+		std::optional<TerraEngine::UUID> assetId;
+		double spacing = 1.0;
 		try
 		{
 			std::ifstream input(source, std::ios::binary);
 			if(!input || !(input >> descriptor) || !descriptor.is_object()
 				|| descriptor.value("format", std::string{}) != "TerraEngineTerrain"
 				|| descriptor.value("rootFormat", std::string{}) != "TERRAROOT1"
-				|| descriptor.value("version", 0u) != 1u)
+				|| ReadDescriptorDimension(descriptor, "version") != std::optional<std::uint32_t>{1u})
 			{
 				result.message = "The terrain descriptor is missing or unsupported.";
+				return result;
+			}
+			assetId = descriptor.contains("assetId") && descriptor["assetId"].is_string()
+				? TerraEngine::ParseUUID(descriptor["assetId"].get<std::string>()) : std::nullopt;
+			const auto width = ReadDescriptorDimension(descriptor, "width");
+			const auto height = ReadDescriptorDimension(descriptor, "height");
+			const auto spacingValue = descriptor.find("sampleSpacingMetres");
+			// Missing spacing retains the legacy default. A present malformed value
+			// must not silently become that default or escape as a JSON exception.
+			if(spacingValue != descriptor.end())
+			{
+				if(!spacingValue->is_number())
+				{
+					result.message = "The terrain descriptor spacing must be numeric.";
+					return result;
+				}
+				spacing = spacingValue->get<double>();
+			}
+			if(!assetId || *assetId == TerraEngine::EMPTY_UUID || !width || !height
+				|| !std::isfinite(spacing) || spacing <= 0.0
+				|| spacing > static_cast<double>((std::numeric_limits<float>::max)())
+				|| static_cast<float>(spacing) <= 0.0F)
+			{
+				result.message = "The terrain descriptor has invalid identity, dimensions, or spacing.";
 				return result;
 			}
 		}
 		catch(const nlohmann::json::exception& exception)
 		{
 			result.message = std::string("The terrain descriptor is invalid: ") + exception.what();
-			return result;
-		}
-		const auto assetId = descriptor.contains("assetId") && descriptor["assetId"].is_string()
-			? TerraEngine::ParseUUID(descriptor["assetId"].get<std::string>()) : std::nullopt;
-		const std::uint32_t compatibilityWidth = descriptor.value("width", 0u);
-		const std::uint32_t compatibilityHeight = descriptor.value("height", 0u);
-		const double spacing = descriptor.value("sampleSpacingMetres", 1.0);
-		if(!assetId || *assetId == TerraEngine::EMPTY_UUID || compatibilityWidth == 0u || compatibilityHeight == 0u
-			|| !std::isfinite(spacing) || spacing <= 0.0)
-		{
-			result.message = "The terrain descriptor has invalid identity, dimensions, or spacing.";
 			return result;
 		}
 

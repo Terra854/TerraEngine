@@ -272,6 +272,31 @@ void RegisterAnimationGraphEvaluationTests(TestRegistry &registry) {
 			"Additive reference deltas must cover morphs, curves, and every numeric root-motion field.");
 	});
 
+	registry.Add("Animation.GraphEvaluation.AdditiveNoncommutingReferenceReconstructsSource", [](TestContext &context) {
+		// X and Y rotations do not commute: a same-axis fixture cannot detect a
+		// reference delta multiplied on the wrong side of the base rotation.
+		auto base = Pose(0.0F, false), source = base, reference = base;
+		const float half = std::sqrt(0.5F);
+		base.joints[0].rotation = reference.joints[0].rotation = {half, 0.0F, 0.0F, half};
+		source.joints[0].rotation = {0.0F, half, 0.0F, half};
+		GraphLayerInput layer{10U, AnimationGraphLayerMode::Additive, 1.0F, 1.0F, 1.0F, nullptr, &source, &reference};
+		const auto equivalent = [](const AnimationQuaternion& a, const AnimationQuaternion& b) {
+			return Near(std::abs(a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w), 1.0F);
+		};
+		GraphPoseContribution output;
+		context.Expect(EvaluateAnimationLayers(base, {&layer, 1U}, output) == AnimationStatus::Ok
+			&& equivalent(output.joints[0].rotation, source.joints[0].rotation), "Full reference-local delta must reconstruct the noncommuting source.");
+		layer.layerWeight = 0.0F;
+		context.Expect(EvaluateAnimationLayers(base, {&layer, 1U}, output) == AnimationStatus::Ok
+			&& equivalent(output.joints[0].rotation, base.joints[0].rotation), "Zero weight preserves the base orientation.");
+		layer.layerWeight = 0.5F;
+		context.Expect(EvaluateAnimationLayers(base, {&layer, 1U}, output) == AnimationStatus::Ok && IsNormalized(output.joints[0].rotation), "Partial noncommuting delta remains normalized.");
+		const auto partial = output.joints[0].rotation;
+		source.joints[0].rotation = {0.0F, -half, 0.0F, -half};
+		context.Expect(EvaluateAnimationLayers(base, {&layer, 1U}, output) == AnimationStatus::Ok
+			&& equivalent(output.joints[0].rotation, partial), "Antipodal source representation must select the same partial rotation.");
+	});
+
 	registry.Add("Animation.GraphEvaluation.LayerOrderIsAuthoredOrderNotStableIdOrder", [](TestContext &context) {
 		const GraphPoseContribution base = Pose(1.0F);
 		const GraphPoseContribution overridePose = Pose(5.0F);

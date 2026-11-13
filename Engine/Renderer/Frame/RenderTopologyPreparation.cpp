@@ -328,9 +328,9 @@ bool RenderSystem::PrepareFramePersistentTopology(
 				TerraEngine::Renderer::RenderSlotGenerationKey::kInvalidOrdinal);
 			retainedRenderTopology.conventionalVisibilityIdentityTable.clear();
 			retainedRenderTopology.conventionalVisibilityIdentityIndices.clear();
-			retainedRenderTopology.orderedObjectIds.reserve(
+			retainedRenderTopology.orderedObjectIds.resize(
 				renderFrameSnapshot.renderables.size());
-			retainedRenderTopology.orderedSlotKeys.reserve(
+			retainedRenderTopology.orderedSlotKeys.resize(
 				renderFrameSnapshot.renderables.size());
 			retainedRenderTopology.conventionalVisibilityIdentityTable.resize(
 				committedSlots->nextOrdinal);
@@ -344,11 +344,13 @@ bool RenderSystem::PrepareFramePersistentTopology(
 					renderFrameSnapshot.renderables[index];
 				const auto key = retainedRenderTopology.slotKeysByObject.find(
 					renderable.objectId);
+				// All snapshot rows keep their position, including invalid groups.
+				retainedRenderTopology.orderedObjectIds[index] = renderable.objectId;
+				renderable.conventionalVisibilityIdentityIndex = 0u;
 				if(key == retainedRenderTopology.slotKeysByObject.end()) continue;
 				const std::uint32_t identityIndex = key->second.ordinal + 1u;
 				renderable.conventionalVisibilityIdentityIndex = identityIndex;
-				retainedRenderTopology.orderedObjectIds.push_back(renderable.objectId);
-				retainedRenderTopology.orderedSlotKeys.push_back(key->second);
+				retainedRenderTopology.orderedSlotKeys[index] = key->second;
 				retainedRenderTopology.renderableIndexByOrdinal[key->second.ordinal] =
 					static_cast<std::uint32_t>(index);
 				retainedRenderTopology.conventionalVisibilityIdentityTable[
@@ -380,6 +382,7 @@ bool RenderSystem::PrepareFramePersistentTopology(
 				renderFrameSnapshot.renderables[index]
 					.conventionalVisibilityIdentityIndex =
 					index < retainedRenderTopology.orderedSlotKeys.size()
+						&& retainedRenderTopology.orderedSlotKeys[index].IsValid()
 						? retainedRenderTopology.orderedSlotKeys[index].ordinal + 1u
 						: 0u;
 			}

@@ -1,0 +1,41 @@
+# Configure/build with BUILD_TESTING=ON, then run:
+# ctest --test-dir out/build/RelWithDebInfo -R UnsupportedSoak --output-on-failure
+# This invokes the real CPU-only producer; it cannot qualify native performance.
+string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
+set(proof "${PROOF_ROOT}/${nonce}")
+file(MAKE_DIRECTORY "${proof}")
+foreach(duration IN ITEMS 300 21600)
+	set(artifact "${proof}/unsupported-${duration}.json")
+	execute_process(COMMAND "${VALIDATOR}" --output "${artifact}"
+		--duration-seconds "${duration}" RESULT_VARIABLE status
+		OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 10)
+	if(NOT status STREQUAL "5" OR NOT EXISTS "${artifact}")
+		message(FATAL_ERROR "Unsupported soak must fail promptly with finalized evidence: ${status}: ${error}")
+	endif()
+	file(READ "${artifact}" evidence)
+	string(JSON count LENGTH "${evidence}" scenarios)
+	math(EXPR last "${count} - 1")
+	foreach(index RANGE 0 ${last})
+		string(JSON name MEMBER "${evidence}" scenarios ${index})
+		string(JSON cpu_status GET "${evidence}" scenarios "${name}" status)
+		if(NOT cpu_status STREQUAL "passed")
+			message(FATAL_ERROR "Unsupported native collection cannot hide failed CPU scenario ${name}")
+		endif()
+	endforeach()
+	string(JSON qualification GET "${evidence}" status)
+	string(JSON iterations GET "${evidence}" soakIterations)
+	string(JSON finalized GET "${evidence}" artifactFinalized)
+	if(NOT qualification STREQUAL "unavailable" OR NOT iterations EQUAL 0 OR NOT finalized)
+		message(FATAL_ERROR "Unsupported soak must never be reported as native measured acceptance.")
+	endif()
+endforeach()
+message(STATUS "Both unsupported native soak durations failed immediately; CPU-only evidence retained at ${proof}")
+
+# Force the real producer's CPU failure path without waiting for a native soak.
+set(artifact "${proof}/failed-cpu.json")
+execute_process(COMMAND "${VALIDATOR}" --output "${artifact}" --scenario failure-control --duration-seconds 21600 RESULT_VARIABLE status TIMEOUT 10)
+file(READ "${artifact}" evidence)
+string(JSON qualification GET "${evidence}" status)
+if(NOT status STREQUAL "4" OR NOT qualification STREQUAL "failed")
+	message(FATAL_ERROR "CPU failure must override unsupported native status and exit")
+endif()

@@ -296,6 +296,31 @@ function RmsCheckVulkanRowSession($Row,$Session){
 		RmsRequire ($Row.$name.Count -eq $expected.Count) 'Vulkan iteration omitted records from its actual contiguous session slice'
 	}
 }
+# Interpret independent acquisition-after availability only when a scenario
+# actually consumes it. Other native submit/fence/drain checks remain required.
+function RmsReadAcquireWaitAfter($Native,[bool]$RequireIndependentObservation=$true){
+	$hasValue=($Native -is [Collections.IDictionary] -and $Native.Contains('acquireWaitConsumed')) -or $null -ne $Native.PSObject.Properties['acquireWaitConsumed']
+	if(!$hasValue){throw 'UNVERIFIED: Post-operation acquisition ledger value is absent'}
+	$after=RmsField $Native 'acquireWaitConsumed'
+	$hasFlag=($Native -is [Collections.IDictionary] -and $Native.Contains('acquireWaitConsumedAfterObserved')) -or $null -ne $Native.PSObject.Properties['acquireWaitConsumedAfterObserved']
+	if(!$hasFlag){
+		if($RequireIndependentObservation){throw 'UNVERIFIED: Independent post-operation acquisition ledger observation is missing'}
+		# Explicit historical parser replay may inspect its old boolean shape;
+		# this exception never applies to strict installed/native acceptance.
+		if($after -isnot [bool]){throw 'UNVERIFIED: Historical acquisition-after value is not a boolean observation'}
+		return $after
+	}
+	$observed=RmsField $Native 'acquireWaitConsumedAfterObserved'
+	if($observed -isnot [bool]){throw 'UNVERIFIED: Acquisition-after observed flag is not boolean'}
+	if(!$observed){
+		$hasReason=($Native -is [Collections.IDictionary] -and $Native.Contains('acquireWaitConsumedAfterUnavailableReason')) -or $null -ne $Native.PSObject.Properties['acquireWaitConsumedAfterUnavailableReason']
+		$reason=if($hasReason){RmsField $Native 'acquireWaitConsumedAfterUnavailableReason'}else{$null}
+		if($reason -isnot [string] -or [string]::IsNullOrWhiteSpace($reason)){$reason='No valid native checkpoint reason was supplied'}
+		throw ('UNVERIFIED: Post-operation acquisition ledger observation unavailable: '+$reason)
+	}
+	if($after -isnot [bool]){throw 'UNVERIFIED: Observed acquisition-after value is not boolean'}
+	return $after
+}
 function RmsCheckVulkanObservation($Row,[string]$Scenario,[bool]$RequireBounds=$true){
 	foreach($key in @('graphicsInstantiated','validationActuallyEnabled','contextCleanupCompleted','threadPoolCleanupCompleted')){RmsVulkanFlag $Row $key}
 	if(!$RequireBounds){RmsVulkanFlag $Row windowCleanupCompleted}
@@ -327,7 +352,13 @@ function RmsCheckVulkanObservation($Row,[string]$Scenario,[bool]$RequireBounds=$
 	}
 	if($Scenario -ceq 'fresh-acquisition'){RmsRequire ($op.generation -eq 1 -and $op.sequence -eq 1) 'Fresh lane did not use first acquired generation'}
 	if($Scenario -ceq 'recreated-acquisition'){RmsRequire ((RmsField $Row 'recreatedBeforeFirstAcquisition') -eq $true -and $op.generation -gt 1 -and $op.sequence -eq 1) 'Recreated lane lacks actual recreation before first acquisition'}
-	if($Scenario -ceq 'acquire-wait-consumed'){RmsRequire ((RmsField $op 'acquireWaitConsumedBefore') -eq $true -and (RmsField $op 'acquireWaitConsumed') -eq $true -and (RmsField $op 'acquisitionDrainSubmitted') -eq $true -and (RmsField $op 'acquisitionDrainCompleted') -eq $true) 'Consumed acquire wait lacks actual prior drain'}
+	if($Scenario -ceq 'acquire-wait-consumed'){
+		RmsRequire ((RmsField $op 'acquireWaitConsumedBefore') -eq $true -and (RmsField $op 'acquisitionDrainSubmitted') -eq $true -and (RmsField $op 'acquisitionDrainCompleted') -eq $true) 'Consumed acquire wait lacks actual prior drain'
+		# Bounds compatibility cannot waive independent native evidence. Explicit
+		# historical parser replay belongs to the helper's separate unit contract.
+		$after=RmsReadAcquireWaitAfter $op
+		RmsRequire ($after -eq $true) 'Consumed acquire wait has an observed unconsumed post-operation ledger'
+	}
 	if($Scenario -ceq 'maintenance-enabled'){RmsRequire ($Row.maintenanceEnabled -eq $true) 'Requested maintenance was not actually enabled'}
 	if($Scenario -ceq 'maintenance-disabled'){RmsRequire ($Row.maintenanceEnabled -eq $false) 'Requested maintenance-off lane was not actually disabled'}
 	if($Scenario -ceq 'previously-presented'){

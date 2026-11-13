@@ -142,7 +142,7 @@ void RenderSystem::PrepareFrameSceneView(const FrameVisibilityInputs& visibility
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Materialize Scene View Commands",
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			visibleCommands.PopulateSelectedItems(sceneCommands, renderables,
-				renderableDrawCommands,
+				renderableDrawCommands, sceneFrameData.referenceFrame,
 				&visibleAnimatedRenderableFlags, &renderableCommandIndices,
 				&sceneGroupingCompatibilitySignature);
 			sceneFrameData.virtualGeometryVisibilitySetupSignature =
@@ -264,7 +264,7 @@ void RenderSystem::PrepareFrameGameViews(const FrameVisibilityInputs& visibility
 					gameFrameData.referenceFrame);
 			}
 			visibleCommands.PopulateSelectedItems(gameCommands, renderables,
-				renderableDrawCommands,
+				renderableDrawCommands, gameFrameData.referenceFrame,
 				&visibleAnimatedRenderableFlags, &renderableCommandIndices,
 				&gameGroupingCompatibilitySignature);
 			gameFrameData.virtualGeometryVisibilitySetupSignature =
@@ -389,7 +389,7 @@ void RenderSystem::PrepareFrameGameViews(const FrameVisibilityInputs& visibility
 			runtimeCommands.clear();
 			std::uint64_t runtimeGroupingCompatibilitySignature = 0U;
 			visibleCommands.PopulateSelectedItems(runtimeCommands, renderables,
-				renderableDrawCommands,
+				renderableDrawCommands, runtimeFrameData.referenceFrame,
 				&visibleAnimatedRenderableFlags, &renderableCommandIndices,
 				&runtimeGroupingCompatibilitySignature);
 			runtimeFrameData.virtualGeometryVisibilitySetupSignature =
@@ -490,7 +490,7 @@ void RenderSystem::PrepareFrameDedicatedViews(const FrameVisibilityInputs& visib
 		captureCommands.clear();
 		std::uint64_t captureGroupingCompatibilitySignature = 0U;
 		visibleCommands.PopulateSelectedItems(captureCommands, renderables,
-			renderableDrawCommands,
+			renderableDrawCommands, captureFrameData.referenceFrame,
 			&visibleAnimatedRenderableFlags, &renderableCommandIndices,
 			&captureGroupingCompatibilitySignature);
 		captureFrameData.virtualGeometryVisibilitySetupSignature =

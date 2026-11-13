@@ -20,6 +20,9 @@ class ProjectHubSubsystem;
 class MainEditorSubsystem;
 
 class Engine;
+#if defined(TERRAENGINE_EDITOR_TESTS)
+namespace TerraEngine::EditorTests { class LayoutPreferenceMigrationFixture; }
+#endif
 
 class EditorSystem : public SystemsBase {
 public:
@@ -54,6 +57,10 @@ public:
 	RendererEfficiencyDeviceRecreationReceipt GetRendererEfficiencyDeviceRecreationReceipt() const;
 
 private:
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	// The fixture supplies CPU-only project/layout inputs without starting GPU UI.
+	friend class TerraEngine::EditorTests::LayoutPreferenceMigrationFixture;
+#endif
 	void ProcessRendererEfficiencyDeviceRecreation();
 	void InitializeImGuiVulkanBackend(VulkanContext& vulkan);
 	mutable std::mutex rendererEfficiencyDeviceRecreationMutex;
@@ -96,6 +103,8 @@ private:
 	ManagedHideAllWindowsFn managedHideAllWindows = nullptr;
 
 	bool initialized = false;
+	// PostFrame retries UI startup only after deferred presentation is ready.
+	bool awaitingRendererInitialization = false;
 	// Track native acquisition separately from workspace readiness so partial
 	// startup can release only the ImGui context and callbacks it actually owns.
 	bool ownsImGuiContext = false;

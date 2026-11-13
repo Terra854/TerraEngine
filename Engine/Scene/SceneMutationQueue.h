@@ -62,6 +62,13 @@ namespace TerraEngine::Scene {
 		bool valid = false;
 	};
 
+	// Stable logical work identity within a tied coalescing frame. Producers assign
+	// these ordinals from their declared work, never from a physical worker index.
+	struct SceneMutationLogicalOrder {
+		std::uint64_t producerOrdinal = 0;
+		std::uint64_t requestOrdinal = 0;
+	};
+
 	struct SceneMutationRequest {
 		std::string requestId;
 		SceneMutationOperation operation = SceneMutationOperation::CreateObject;
@@ -84,6 +91,15 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID sourceObjectUuid = TerraEngine::EMPTY_UUID;
 		std::string sourceBindingId;
 		std::uint64_t sourceFrameOrder = 0;
+		// Assigned by queue admission, never by a producer. Numeric order avoids
+		// lexicographic ID ordering ("10" before "2") and spans main/worker ingress.
+		std::uint64_t submissionOrder = 0;
+		// Optional for uncontested requests and legacy main-only coalescing. Every
+		// contender must supply a unique pair when a tied group includes a worker.
+		std::optional<SceneMutationLogicalOrder> logicalCoalescingOrder;
+		// Admission overwrites this marker on both ingress paths; callers cannot
+		// masquerade as main ingress to bypass worker conflict validation.
+		bool ingressWorker = false;
 	};
 
 	struct SceneMutationResult {
@@ -257,6 +273,9 @@ namespace TerraEngine::Scene {
 		std::vector<Transaction> transactions;
 		std::vector<TransactionPublicationGroup> publicationGroups;
 		std::vector<NavigationSourceMutationIntent> navigationSourceMutationIntents;
+		// Retain queue-lifetime identities across drains and Clear(), so a late
+		// receipt cannot alias a later generated request from this same queue.
+		std::uint64_t nextSubmissionOrder = 1U;
 		// Keep this process-lifetime counter across Clear(). A scene may replace an
 		// object lifetime while navigation still drains old receipts, so resetting
 		// it could make an old source update alias a newer committed change.

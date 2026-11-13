@@ -7,6 +7,8 @@
 
 #pragma once
 
+// Fixed-size format tables require their defining header, independent of consumers.
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>

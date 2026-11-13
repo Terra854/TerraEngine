@@ -71,11 +71,10 @@ namespace {
 			ExportResult result = MakeCommandLineResult(parsed, false);
 			std::cerr << '[' << ToString(result.stage) << "/" << ToString(result.failureCategory)
 				<< "] " << result.message << '\n';
-			if(!parsed.request.evidenceDirectory.empty()) {
-				ExportEvidenceInputs evidence;
-				std::string ignoredError;
-				WriteExportEvidenceBundle(parsed.request, result, evidence, ignoredError);
-			}
+			// A rejected request has no trusted evidence destination. In particular,
+			// overlap rejection must not write a failure bundle into protected output.
+			// Keep argument failures on stdout/stderr; accepted pipeline requests own
+			// the normal on-disk evidence contract.
 			std::cout << SerializeExportResultRecord(result) << '\n';
 			return result.exitCode;
 		}

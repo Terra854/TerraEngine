@@ -431,7 +431,7 @@ void HierarchyWindow::OnGui() {
 				m_Owner->OpenPrefabFromObject(m_ContextEntityId);
 			}
 			if (ImGui::MenuItem("Reset To Prefab Defaults", nullptr, false, hasPrefabLink)) {
-				m_Owner->ResetPrefabInstanceToDefaults(m_ContextEntityId);
+				m_Owner->RequestPrefabInstanceReset(m_ContextEntityId);
 			}
 			if (ImGui::MenuItem("Unlink Prefab", nullptr, false, hasPrefabLink)) {
 				ObjectManager::instance().RemoveComponent<PrefabLinkComponent>(*contextObject);
@@ -441,9 +441,11 @@ void HierarchyWindow::OnGui() {
 		ImGui::EndPopup();
 	}
 
-	// Handle Delete Key
-
-	if (ImGui::IsKeyReleased(ImGuiKey_Delete)) {
+	// A scene shortcut belongs to this focused window. Text widgets own Delete
+	// while editing, including an input in another editor window.
+	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)
+		&& !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive()
+		&& ImGui::IsKeyReleased(ImGuiKey_Delete)) {
 		auto selected = m_Owner->GetSelectedEntity();
 		if (selected) {
 			std::optional<Object> selectedObject = objManager.getObject(*selected);

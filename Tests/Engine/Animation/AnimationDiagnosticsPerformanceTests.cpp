@@ -30,7 +30,7 @@ namespace TerraEngine::Tests {
 	namespace {
 		inline constexpr double kMaximumCollapsedDiagnosticsMedianOverheadPercent = 2.0;
 		inline constexpr std::string_view kStressManifestSha256 =
-			"b5c78e9f01dc0036db4fb4674f632ebf06a736e4a7c010ec56e1f3804b92131d";
+			"fa9678871297579e074b9dfa1961ff44bf85509738948b35d8d40c23d60c9019";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{

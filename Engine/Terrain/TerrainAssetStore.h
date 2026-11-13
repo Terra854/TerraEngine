@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <map>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,9 @@
 
 namespace TerraEngine::Terrain
 {
+	// Defined only by native regression tests; unconditional friendship keeps the
+	// exported class definition identical in the engine and its consumers.
+	struct TerrainAssetStoreTestAccess;
 	struct TerrainChannelSnapshot
 	{
 		std::optional<ContentHash> heightHash;
@@ -144,6 +148,23 @@ namespace TerraEngine::Terrain
 		[[nodiscard]] bool Succeeded() const noexcept { return code == TerrainResultCode::Ok && decodedHeight != nullptr; }
 	};
 
+	struct TerrainLazyHeightCachePolicy
+	{
+		std::size_t maximumEntries = 256U;
+		std::size_t maximumBytes = 64U * 1024U * 1024U;
+	};
+	struct TerrainLazyHeightCacheStats
+	{
+		std::size_t retainedEntries = 0U;
+		// Own decoded storage: vector capacity (not logical length) plus the fixed
+		// decoded object. Map/list/control-block overhead is bounded by entry count
+		// and is excluded; external shared readers are not additional cache owners.
+		std::size_t retainedBytes = 0U;
+		std::uint64_t hits = 0U;
+		std::uint64_t misses = 0U;
+		std::uint64_t evictions = 0U;
+	};
+
 	// In-memory byte source gives later file/TEPAK loaders one narrow interface.
 	// It deliberately returns a copy so callers cannot mutate immutable blobs.
 	class TERRAENGINE_API TerrainBlobResolver
@@ -216,16 +237,45 @@ namespace TerraEngine::Terrain
 			const TerrainRootCapture& capture,
 			TerrainAreaCoordinate coordinate,
 			const std::atomic_bool* cancellation = nullptr);
+		// Policy changes trim immediately. Zero in either limit disables cache
+		// ownership; successful decodes still return valid uncached readers.
+		void SetLazyHeightCachePolicy(TerrainLazyHeightCachePolicy policy);
+		[[nodiscard]] TerrainLazyHeightCachePolicy GetLazyHeightCachePolicy() const;
+		[[nodiscard]] TerrainLazyHeightCacheStats GetLazyHeightCacheStats() const;
 
 		TerrainBlobResolver& Blobs() noexcept { return blobResolver; }
 		const TerrainBlobResolver& Blobs() const noexcept { return blobResolver; }
 
 	private:
 		mutable std::shared_mutex rootMutex;
+		friend struct TerrainAssetStoreTestAccess;
 		std::shared_ptr<const TerrainAssetRoot> currentRoot;
 		TerrainBlobResolver blobResolver;
+		struct LazyHeightCacheKey
+		{
+			ContentHash hash{};
+			TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+			TerrainAreaCoordinate area{};
+			bool operator==(const LazyHeightCacheKey&) const noexcept = default;
+		};
+		struct LazyHeightCacheKeyHasher
+		{
+			std::size_t operator()(const LazyHeightCacheKey& key) const noexcept;
+		};
+		struct LazyHeightCacheEntry
+		{
+			std::shared_ptr<const DecodedTerrainArea> decoded;
+			std::list<LazyHeightCacheKey>::iterator recency;
+			std::size_t retainedBytes = 0U;
+		};
+		// Every LRU/map/accounting mutation is serialized by this mutex. Decode and
+		// blob IO remain worker-safe outside it; no authored root is mutated here.
 		mutable std::mutex lazyCacheMutex;
-		std::unordered_map<ContentHash, std::shared_ptr<const DecodedTerrainArea>, ContentHashHasher> lazyHeightCache;
+		std::list<LazyHeightCacheKey> lazyHeightRecency;
+		std::unordered_map<LazyHeightCacheKey, LazyHeightCacheEntry, LazyHeightCacheKeyHasher> lazyHeightCache;
+		TerrainLazyHeightCachePolicy lazyHeightCachePolicy{};
+		TerrainLazyHeightCacheStats lazyHeightCacheStats{};
+		void EvictOldestLazyHeightLocked();
 		mutable std::mutex persistenceMutex;
 		TerrainPersistedRootState persistedRoot;
 		std::shared_ptr<const TerrainAssetRoot> savedRootSnapshot;

@@ -5,6 +5,7 @@
 #include "File Formats/TerraEngineMeshFile.h"
 
 #include "Physics/Terrain/TerrainHeightFieldActiveRect.h"
+#include "Physics/Terrain/TerrainCollisionSeamPreparation.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ContentMount/TerrainContentResolver.h"
 #include "Terrain/TerrainAreaCodec.h"
@@ -141,7 +142,7 @@ namespace TerraEngine::Runtime
 			const DecodedMountedArea& area,
 			const TerraEngine::UUID& assetId,
 			double sampleSpacingMetres,
-			TerraEngine::Terrain::TerrainSampleBounds authoredBounds)
+			const TerraEngine::Physics::Terrain::TerrainCollisionRootCapture& collisionCapture)
 		{
 			TerraEngine::Physics::TerrainHeightFieldRecipe recipe{};
 			recipe.terrainAssetId = assetId;
@@ -165,12 +166,11 @@ namespace TerraEngine::Runtime
 			recipe.holeBits = area.holes;
 			if(recipe.holeBits.empty())
 				recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0U);
-			const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(
-				authoredBounds, area.descriptor.coordinate);
 			// A malformed mounted extent must not turn fixed-grid padding into walkable
 			// collision. Clear the mask so recipe validation rejects this candidate at the
 			// same protected boundary rather than publishing broadened support.
-			if(!active || !TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(recipe, *active))
+			if(!TerraEngine::Physics::Terrain::PrepareTerrainCollisionSeams(recipe, collisionCapture)
+				|| !TerraEngine::Physics::Terrain::CookTerrainCollisionRecipe(recipe))
 				recipe.holeBits.clear();
 			return recipe;
 		}
@@ -344,6 +344,21 @@ namespace TerraEngine::Runtime
 				decodedAreas.emplace(coordinate, std::move(decoded));
 			}
 			if(!generationComplete || decodedAreas.empty()) continue;
+			// Package decode already runs on the terrain worker. Freeze one copy per
+			// area for all seam recipes, retaining the exact same-root source lifetime.
+			TerraEngine::Physics::Terrain::TerrainCollisionRootCapture collisionCapture{};
+			collisionCapture.assetId = expectedAssetId;
+			collisionCapture.rootHash = *ParseContentHash(candidate);
+			collisionCapture.generation = root->publicationGeneration;
+			for(const auto& [coordinate, decoded] : decodedAreas)
+			{
+				const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(root->authoredBounds, coordinate);
+				if(!active) { generationComplete = false; break; }
+				collisionCapture.areas.emplace(coordinate,
+					TerraEngine::Physics::Terrain::TerrainCollisionAreaCapture{*active,
+						std::make_shared<const std::vector<std::int32_t>>(decoded.heights)});
+			}
+			if(!generationComplete) continue;
 
 			MountedTerrainRuntimeResult completed{};
 			completed.areas.reserve(decodedAreas.size());
@@ -401,7 +416,7 @@ namespace TerraEngine::Runtime
 				}
 				areaRuntime.pageCook = TerraEngine::Renderer::Terrain::CookTerrainPage(cookInput);
 				areaRuntime.collisionRecipe = BuildCollisionRecipe(decoded, expectedAssetId,
-					root->sampleSpacingMetres, root->authoredBounds);
+					root->sampleSpacingMetres, collisionCapture);
 				if(!areaRuntime.Succeeded())
 				{
 					failed.renderProxy.diagnostic = "A mounted terrain area failed direct, page, or collision preparation.";
@@ -429,7 +444,7 @@ namespace TerraEngine::Runtime
 			compatibilityInput.holeCellBits = compatibilitySource.holes;
 			completed.renderProxy = TerraEngine::Renderer::Terrain::BuildTerrainDirectMesh(compatibilityInput);
 			completed.collisionRecipe = BuildCollisionRecipe(
-				compatibilitySource, expectedAssetId, root->sampleSpacingMetres, root->authoredBounds);
+				compatibilitySource, expectedAssetId, root->sampleSpacingMetres, collisionCapture);
 			completed.sourceRootHash = *ParseContentHash(candidate);
 			completed.sourcePublicationGeneration = root->publicationGeneration;
 			completed.authoredBounds = root->authoredBounds;

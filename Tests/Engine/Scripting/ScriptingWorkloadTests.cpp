@@ -72,9 +72,11 @@ namespace TerraEngine::Tests {
 
 			ScriptingSystem::ScriptUpdateWorkload workload = ScriptingSystem::Instance().BuildScriptUpdateWorkload(0.016f, false);
 			ScriptingSystem::ScriptFrameReadView readView = ScriptingSystem::Instance().BuildScriptFrameReadView(workload);
+			// Both input and output lanes need fatal prerequisites before front().
+			context.ExpectEqual(static_cast<std::size_t>(1), workload.items.size(), "The scripted object should produce one workload item.");
+			context.ExpectEqual(static_cast<std::size_t>(1), readView.scriptRecords.size(), "The read view should mirror the planned scripting workload.");
 			Object objectHandle = ObjectManager::instance().makeObjectHandle(static_cast<entt::entity>(workload.items.front().objectId));
 
-			context.ExpectEqual(static_cast<std::size_t>(1), readView.scriptRecords.size(), "The read view should mirror the planned scripting workload.");
 			context.Expect(TerraEngine::IsResolvedObjectIdentity(ObjectManager::instance().validateObjectHandle(objectHandle)), "Scripting workload object ids should map to valid compact identities.");
 			context.ExpectEqual(workload.readViewVersion, readView.readViewVersion, "The workload and read view should share the same immutable version.");
 			context.ExpectEqual(binding.authoredStateVersion, readView.scriptRecords.front().authoredStateVersion, "Read-view records should carry authored binding versions for dirty hydration.");

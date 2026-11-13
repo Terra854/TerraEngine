@@ -3,6 +3,10 @@
 file(GLOB_RECURSE TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Animation/*.cpp"
 )
+# These new suites require the complete real editor closure, rather than this
+# older executable's intentionally headless window/service link substitutes.
+list(FILTER TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES EXCLUDE REGEX
+	"/(AnimationJobRetryLifecycleTests|AuthoringControlContinuityTests)\\.cpp$")
 
 add_executable(TerraEngine-EditorTests
 	EditorTests.cpp
@@ -108,6 +112,7 @@ add_executable(TerraEngine-EditorTests
 	Project/ProjectSettingsWindowTests.cpp
 	Project/ProjectSettingsMenuInventoryTests.cpp
 	Project/ProjectSettingsPersistenceTests.cpp
+	Project/WorkspaceLayoutSectionRestoreTests.cpp
 	Project/ManagedReadinessTests.cpp
 	Project/ProjectReadinessPerformanceTests.cpp
 	Core/EditorCommandLineTests.cpp
@@ -293,7 +298,6 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyScenePublication.cpp
 	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.cpp
 	${CMAKE_SOURCE_DIR}/Tests/Support/RendererEfficiency/Editor/RendererEfficiencyInstallIdentity.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Automation/RendererEfficiencyInstallIdentityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyDeviceRecreationTests.cpp
 	Automation/RendererEfficiencyAutomationTests.cpp
 	# Exercise production export rejection and independent overhead availability.
@@ -404,6 +408,19 @@ target_include_directories(TerraEngine-EditorTests
 set_target_properties(TerraEngine-EditorTests PROPERTIES
 	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	# Installed tests resolve their bundled native owners relative to this
+	# Tests category, so clean runs never depend on build-tree loader paths.
+	set_target_properties(TerraEngine-EditorTests PROPERTIES
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../Engine;${TERRAENGINE_LOCAL_RPATH}/../../Editor")
+endif()
+
+# Native file-sharing/hash identity tests exercise Windows-only contracts.
+# Keep source selection and registry guards aligned on non-Windows hosts.
+if(WIN32)
+	target_sources(TerraEngine-EditorTests PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Automation/RendererEfficiencyInstallIdentityTests.cpp)
+endif()
 
 if(MSVC)
 	# The editor test binary intentionally compiles production translation units with
@@ -763,6 +780,14 @@ set_tests_properties(Editor.Terrain.LargeWorld PROPERTIES
 )
 
 terraengine_add_correctness_slice(Editor.ExportLifecycle TerraEngine-EditorTests Editor.ExportLifecycle 6)
+# Malformed descriptors and late worker results must reject before collision
+# publication and leave subsequent valid preparation usable.
+terraengine_add_correctness_slice(Editor.TerrainPreparationRejection TerraEngine-EditorTests
+	"Editor.TerrainDescriptor,Editor.TerrainPrecommit" 5)
+# Independent layout sections retain the user's camera even when optional
+# visibility data is malformed; these cases exercise the real shared dispatcher.
+terraengine_add_correctness_slice(Editor.WorkspaceLayoutSections TerraEngine-EditorTests
+	"Editor.WorkspaceSections" 4)
 
 # Recovery slices retain independent process-tree watchdogs and exact case floors.
 terraengine_add_correctness_slice(Editor.AssetDiscoveryRecovery TerraEngine-EditorTests Editor.AssetDiscoveryRecovery 9)
@@ -831,3 +856,143 @@ terraengine_add_correctness_slice(Editor.AudioControlPersistence TerraEngine-Edi
 
 # Decode the actual MCP image item and retain the existing rejection cases.
 terraengine_add_correctness_slice(Editor.RenderCaptureContracts TerraEngine-EditorTests Editor.MCP.CameraImages 11)
+
+# Review regressions invoke real MainEditor, window drawing and authoring code.
+# Reuse the maintained application source/link closure, replacing only its
+# entrypoint. No headless RTTI, SceneView or prefab behavior substitutes enter
+# this executable; initialization of a desktop/GPU remains explicit per test.
+get_target_property(review_editor_sources TerraEngine-Editor SOURCES)
+set(review_production_sources)
+foreach(review_source IN LISTS review_editor_sources)
+	get_filename_component(review_absolute "${review_source}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+	if(NOT review_absolute MATCHES "/Core/EditorMain\\.cpp$")
+		list(APPEND review_production_sources "${review_absolute}")
+	endif()
+endforeach()
+list(APPEND review_production_sources
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryAssemblyBuilder.cpp)
+list(REMOVE_DUPLICATES review_production_sources)
+add_executable(TerraEngine-EditorReviewTests
+	ReviewRemediationTests.cpp
+	AssetPipeline/RawMeshStagingTests.cpp
+	AssetPipeline/ShaderCompilerArgumentTests.cpp
+	AssetPipeline/CompilerPipeOwnershipTests.cpp
+	AssetPipeline/AssetOrganizationAtomicityTests.cpp
+	VirtualGeometry/AssemblyIdentityCollisionTests.cpp
+	VirtualGeometry/DeformationPageBoundaryTests.cpp
+	Animation/AnimationJobRetryLifecycleTests.cpp
+	Animation/AuthoringControlContinuityTests.cpp
+	Automation/ProjectPathBoundaryTests.cpp
+	Automation/CapabilityFailureRecoveryTests.cpp
+	Automation/RendererSessionAdmissionTests.cpp
+	Project/ScriptWorkspaceConcurrencyTests.cpp
+	Project/LayoutPreferenceMigrationTests.cpp
+	Scene/AuthoringReplacementSafetyTests.cpp
+	Scene/SceneViewGenerationTests.cpp
+	Terrain/TerrainPersistenceRoundTripTests.cpp
+	Terrain/ProceduralPreviewCancellationTests.cpp
+	Hierarchy/HierarchyEditInputTests.cpp
+	Export/BuildProfileCollectionIdentityTests.cpp
+	Export/ExportCancellationPublicationTests.cpp
+	Export/ExportPublicationRollbackTests.cpp
+	UI/UIBuilderReferencePersistenceTests.cpp
+	Profiling/ProfilerOperationFailureStatusTests.cpp
+	${review_production_sources})
+target_compile_features(TerraEngine-EditorReviewTests PRIVATE cxx_std_20)
+get_target_property(review_editor_includes TerraEngine-Editor INCLUDE_DIRECTORIES)
+get_target_property(review_editor_definitions TerraEngine-Editor COMPILE_DEFINITIONS)
+get_target_property(review_editor_libraries TerraEngine-Editor LINK_LIBRARIES)
+get_target_property(review_editor_dependencies TerraEngine-Editor MANUALLY_ADDED_DEPENDENCIES)
+target_include_directories(TerraEngine-EditorReviewTests PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${review_editor_includes})
+target_compile_definitions(TerraEngine-EditorReviewTests PRIVATE
+	${review_editor_definitions} TERRAENGINE_EDITOR_TESTS=1
+	TERRAENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# These two established authoring units omit their window constructors/UI when
+# the older headless-test macro is set. Compile their real window definitions
+# only for this runner; keep the original EditorTests compilation unchanged.
+set_property(SOURCE
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RagdollEditorWindow.cpp
+	APPEND PROPERTY COMPILE_OPTIONS
+	"$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,TerraEngine-EditorReviewTests>:-UTERRAENGINE_EDITOR_TESTS>")
+target_link_libraries(TerraEngine-EditorReviewTests PRIVATE
+	${review_editor_libraries} Threads::Threads)
+add_dependencies(TerraEngine-EditorReviewTests ${review_editor_dependencies})
+set_target_properties(TerraEngine-EditorReviewTests PROPERTIES
+	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}")
+if(MSVC)
+	target_compile_options(TerraEngine-EditorReviewTests PRIVATE /FS /bigobj)
+endif()
+if(WIN32)
+	# The real compiler process seam needs an actual native child to test handle
+	# ownership; keep it beside the runner in both maintained layouts.
+	add_executable(TerraEngineCompilerProcessFixture
+		${CMAKE_SOURCE_DIR}/Tests/Tools/CodeQuality/Fixtures/CompilerProcess/CompilerProcessChild.cpp)
+	target_compile_features(TerraEngineCompilerProcessFixture PRIVATE cxx_std_20)
+	set_target_properties(TerraEngineCompilerProcessFixture PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+	add_dependencies(TerraEngine-EditorReviewTests TerraEngineCompilerProcessFixture)
+	target_compile_definitions(TerraEngine-EditorReviewTests PRIVATE
+		TERRAENGINE_COMPILER_PROCESS_FIXTURE_PATH="$<TARGET_FILE_NAME:TerraEngineCompilerProcessFixture>")
+	add_custom_command(TARGET TerraEngine-EditorReviewTests POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<FILTER:$<TARGET_RUNTIME_DLLS:TerraEngine-EditorReviewTests>,EXCLUDE,.*[\\\\/]TerraEngine\\.dll$>
+			$<TARGET_FILE_DIR:TerraEngine-EditorReviewTests>
+		COMMAND_EXPAND_LISTS)
+	install(TARGETS TerraEngineCompilerProcessFixture
+		RUNTIME DESTINATION ${CMAKE_BINARY_DIR}/Build/Editor COMPONENT ReviewRemediation)
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-EditorReviewTests>
+		DESTINATION ${CMAKE_BINARY_DIR}/Build/Editor COMPONENT ReviewRemediation)
+endif()
+# This runner executes real workspace services, which discover the application's
+# complete managed SDK beside their executable. Share the maintained editor
+# closure instead of giving Tests/Editor a second SDK or a build-tree fallback.
+install(TARGETS TerraEngine-EditorReviewTests
+	RUNTIME DESTINATION ${CMAKE_BINARY_DIR}/Build/Editor COMPONENT ReviewRemediation)
+# Five rollback cases require Windows file locking or redirect behavior. Keep
+# the nonzero floor equal to the cases actually registered on each platform.
+if(WIN32)
+	set(editor_review_minimum_cases 95)
+else()
+	set(editor_review_minimum_cases 90)
+endif()
+terraengine_add_correctness_slice(Editor.ReviewRemediation TerraEngine-EditorReviewTests Editor. ${editor_review_minimum_cases})
+# These operation-status failures are admitted separately before their repair;
+# the existing broad editor lane still includes every original registration.
+terraengine_add_correctness_slice(Editor.ReviewEvidence TerraEngine-EditorReviewTests
+	Editor.ProfilerOperationFailure 3)
+
+# Loose-mesh inspector tests use AssetDatabase's ordinary sibling-executable
+# discovery. Preserve that real compiler dependency in the installed test
+# package instead of depending on a build-root executable or a PATH fallback.
+add_dependencies(TerraEngine-EditorTests TerraEngineMeshCompiler)
+install(TARGETS TerraEngineMeshCompiler
+	RUNTIME DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Editor COMPONENT ReviewRemediation)
+if(WIN32)
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineMeshCompiler>
+		DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Editor COMPONENT ReviewRemediation)
+endif()
+
+# Compile the same checked layout decoder used by EditorSystem with assertions
+# enabled. This single translation unit never mixes Release JSON definitions
+# with an assertions-enabled editor object or links an Engine/editor DLL.
+add_executable(TerraEngine-WorkspaceLayoutDecodeAssertions
+	Project/WorkspaceLayoutDecodeAssertions.cpp)
+target_compile_features(TerraEngine-WorkspaceLayoutDecodeAssertions PRIVATE cxx_std_20)
+target_include_directories(TerraEngine-WorkspaceLayoutDecodeAssertions PRIVATE
+	${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/External/json/single_include)
+if(MSVC)
+	target_compile_options(TerraEngine-WorkspaceLayoutDecodeAssertions PRIVATE /UNDEBUG)
+	target_compile_definitions(TerraEngine-WorkspaceLayoutDecodeAssertions PRIVATE _ITERATOR_DEBUG_LEVEL=0)
+else()
+	target_compile_options(TerraEngine-WorkspaceLayoutDecodeAssertions PRIVATE -UNDEBUG)
+endif()
+add_test(NAME Editor.WorkspaceLayoutDecodeAssertions
+	COMMAND $<TARGET_FILE:TerraEngine-WorkspaceLayoutDecodeAssertions>
+		--evidence-root ${CMAKE_BINARY_DIR}/Testing/WorkspaceLayoutDecodeAssertions)
+set_tests_properties(Editor.WorkspaceLayoutDecodeAssertions PROPERTIES
+	LABELS "Editor;Correctness;Portability" TIMEOUT 20)
+install(TARGETS TerraEngine-WorkspaceLayoutDecodeAssertions
+	RUNTIME DESTINATION ${CMAKE_BINARY_DIR}/Build/Tests/Editor COMPONENT ReviewRemediation)

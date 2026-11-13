@@ -329,13 +329,9 @@ namespace TerraEngine::Tests {
 
 		std::filesystem::path SourceRoot()
 		{
-			// CMake supplies this test source by an absolute path. Walking from that
-			// stable file location avoids relying on a CTest working-directory choice.
-			std::filesystem::path root = std::filesystem::path(__FILE__).parent_path();
-			for(std::size_t level = 0U; level < 3U; ++level) {
-				root = root.parent_path();
-			}
-			return root;
+			// CMake explicitly names the source checkout. This remains valid when
+			// compiler prefix maps rewrite __FILE__ or the build lives elsewhere.
+			return std::filesystem::path(TERRAENGINE_SOURCE_DIR);
 		}
 
 		bool EmulateSafeGpuPoseOutput(

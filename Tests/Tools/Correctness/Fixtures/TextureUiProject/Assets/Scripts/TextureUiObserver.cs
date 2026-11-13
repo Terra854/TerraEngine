@@ -87,7 +87,12 @@ public sealed partial class TextureUiObserver : Script
 				File.WriteAllText(temporary, receipt);
 				File.Move(temporary, Path.Combine(_observationRoot, "texture-ui.json"), true);
 			}
-			catch (IOException error) { Log.Warning("UI observation receipt could not be persisted: " + error.Message); }
+			// Receipt persistence is optional evidence: either IO or access-denied
+			// failures must leave the normal UI observation callback running.
+			catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+			{
+				Log.Warning("UI observation receipt could not be persisted: " + error.Message);
+			}
 		}
 #endif
 	}

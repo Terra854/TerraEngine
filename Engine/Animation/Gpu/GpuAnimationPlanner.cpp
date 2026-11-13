@@ -1277,9 +1277,42 @@ namespace TerraEngine::Animation {
 				sampleTicks.resize(inputCount);
 				renderIdentities.resize(inputCount);
 
+				// The commutative topology signature permits input permutations. Map
+				// full packet identities to their immutable lanes. One owner may legally
+				// submit several packets with different stable submission ordinals.
+				using PacketIdentity = std::pair<std::uint64_t, std::uint32_t>;
+				const auto identityHash = [](const PacketIdentity& key) {
+					return std::hash<std::uint64_t>{}(key.first)
+						^ (std::hash<std::uint32_t>{}(key.second) + 0x9e3779b9u);
+				};
+				std::unordered_map<PacketIdentity, const GpuAnimationLoweringInput*, decltype(identityHash)> inputsByOwner;
+				inputsByOwner.reserve(inputs.size());
+				for(const auto& input : inputs) {
+					if(!inputsByOwner.emplace(PacketIdentity{input.visual.stableInstanceId, input.visual.stableSubmissionOrdinal}, &input).second) return false;
+				}
+				const auto& sources = previous.EvaluationSourcePacketIndices();
+				if(sources.size() != packets.size()) return false;
 				for(std::size_t packetIndex = 0U; packetIndex < inputs.size(); ++packetIndex) {
-					const GpuAnimationLoweringInput& input = inputs[packetIndex];
 					const GpuAnimationWorkPacket& packet = packets[packetIndex];
+					const auto found = inputsByOwner.find(PacketIdentity{packet.stableInstanceId, packet.stableSubmissionOrdinal});
+					if(found == inputsByOwner.end() || sources[packetIndex] > packetIndex) return false;
+					const GpuAnimationLoweringInput& input = *found->second;
+					if(sources[packetIndex] != packetIndex) {
+						const auto& sourcePacket = packets[sources[packetIndex]];
+						const auto source = inputsByOwner.find(PacketIdentity{sourcePacket.stableInstanceId, sourcePacket.stableSubmissionOrdinal});
+						if(source == inputsByOwner.end()) return false;
+						const auto& currentSource = source->second->visual;
+						// Static equality was sealed by the topology signature; changing
+						// evaluation lanes still must preserve the sharing equivalence.
+						// The high diagnostic bit belongs to the lowered request, not
+						// these original visual inputs. Read both typed opt-in values.
+						if(!input.allowSharedVisualEvaluation
+							|| !source->second->allowSharedVisualEvaluation
+							|| input.visual.sampleTick != currentSource.sampleTick
+							|| input.visual.evaluationParameterFingerprint != currentSource.evaluationParameterFingerprint
+							|| input.visual.suspendVisualEvaluation != currentSource.suspendVisualEvaluation
+							|| input.visual.ragdollTableOffsetBytes != currentSource.ragdollTableOffsetBytes) return false;
+					}
 					// topologyInputSignature was produced while these exact immutable
 					// inputs were captured and includes payload owner, stable identity,
 					// submission order, resource selectors, shape, execution mode, and

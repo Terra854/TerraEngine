@@ -3,6 +3,7 @@
 #include "TestHarness.h"
 
 #include "Animation/Graph/RetargetNodeEvaluator.h"
+#include "Animation/Evaluation/CpuDeterministicEvaluator.h"
 #include "Animation/Procedural/ProceduralTypes.h"
 #include "Animation/Retargeting/RetargetEvaluator.h"
 
@@ -412,5 +413,32 @@ namespace TerraEngine::Tests {
 					&& result.orderedStages == expectedStages,
 					"Hybrid consumers must receive the requested joint plus every target ancestor in the fixed advanced-node order.");
 			});
+		registry.Add("Animation.Retarget.ProceduralCopyReturnsParentLocalAfterNonidentityAncestors", [](TestContext& context) {
+			// The actual retarget stage emits locals. A grandchild copy must keep
+			// its requested local value after procedural model-space solving.
+			const auto fixture = MakeEvaluationFixture();
+			GraphPoseContribution base;
+			base.compatibilityFingerprint = fixture.targetSkeleton->compatibilityFingerprint;
+			base.jointCount = static_cast<std::uint32_t>(fixture.targetSkeleton->joints.size());
+			for(const auto& joint : fixture.targetSkeleton->joints) base.jointStableIds.push_back(joint.stableId);
+			base.joints = fixture.targetReferencePose->localTransforms;
+			RetargetGraphNodeRequest retarget; retarget.evaluation = fixture.request; retarget.targetBasePose = &base;
+			ProceduralCopyTransformNodeInput copy; copy.jointIndex = 5U; copy.parentJointIndex = 1U;
+			copy.targetTransform.translation = {3.0F, 2.0F, 1.0F}; copy.targetSpace = ProceduralCoordinateSpace::Parent;
+			ProceduralGraphNodeInput node; node.stableId = 1U; node.payload = copy;
+			ProceduralGraphEvaluationRequest procedural;
+			procedural.generation.animator = {1U, 1U}; procedural.generation.componentGeneration = 1U;
+			procedural.generation.skeletonGeneration = 1U; procedural.generation.programGeneration = 1U;
+			procedural.generation.poseGeneration = 1U; procedural.generation.publicationGeneration = 1U;
+			procedural.generation.queryGeneration = 1U; procedural.generation.tick = 120;
+			procedural.expectedGeneration = procedural.generation; procedural.nodes = std::span(&node, 1U);
+			CpuDeterministicEvaluationRequest request; request.inputPose = &base; request.retarget = &retarget; request.procedural = &procedural;
+			CpuDeterministicEvaluationResult result;
+			context.Expect(EvaluateCpuDeterministicAdvancedPose(request, result) == AnimationStatus::Ok && result.pose.joints.size() == base.joints.size(),
+				"The real retarget/procedural stage composition must complete.");
+			const auto value = result.pose.joints[5].translation;
+			context.Expect(std::abs(value.x - 3.0F) < 0.0001F && std::abs(value.y - 2.0F) < 0.0001F && std::abs(value.z - 1.0F) < 0.0001F,
+				"Ancestor translation/rotation must not be baked into the returned parent-local joint.");
+		});
 	}
 }

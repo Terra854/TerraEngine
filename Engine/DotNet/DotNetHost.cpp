@@ -150,7 +150,6 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
 
 
 bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotLibaryPath, ManagedVTable* outTable) {
-	if (initialized) return true;
 	SetNativeError({});
 
 
@@ -158,6 +157,34 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 		SetNativeError("DotNetHost::InitializeExportRuntime was called with a null ManagedVTable pointer.");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
 		return false;
+	}
+	std::error_code identityError;
+	// Report deployment errors with the requested path before canonical identity
+	// resolution (which necessarily fails when the library is absent).
+	if(!std::filesystem::exists(nativeAotLibaryPath, identityError)) {
+		SetNativeError("NativeAOT runtime library was not found at " + nativeAotLibaryPath.string()
+			+ ". Make sure the export output includes the platform runtime library under Managed/ and its native dependencies."
+			+ (identityError ? " " + identityError.message() : ""));
+		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+		return false;
+	}
+	const auto requestedLibrary = std::filesystem::canonical(nativeAotLibaryPath, identityError);
+	if(identityError) { SetNativeError("Cannot resolve the requested NativeAOT runtime library."); return false; }
+	if (initialized) {
+		// An editor-mode host has no export table to supply. Never report success
+		// with untouched caller storage or pointers whose library is not retained.
+		if (!exportMode || nativeAotLibraryHandle == nullptr || exportTable.version < kManagedVTableMinVersion) {
+			SetNativeError("DotNetHost is initialized without a retained export runtime. Shut it down before switching hosting modes.");
+			TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+			return false;
+		}
+		// Reusing a table is valid only for the same retained library owner.
+		if(!std::filesystem::equivalent(requestedLibrary, exportLibraryPath, identityError) || identityError) {
+			SetNativeError("A different NativeAOT runtime is already loaded. Shut it down before switching libraries.");
+			return false;
+		}
+		*outTable = exportTable;
+		return true;
 	}
 
 
@@ -302,6 +329,10 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 		}
 	}
 
+	// Retain only a fully validated table, and keep its library alive until
+	// Shutdown. Repeat initialization copies this exact released ABI contract.
+	exportTable = *outTable;
+	exportLibraryPath = requestedLibrary;
 	initialized = true;
 	exportMode = true;
 	TERRAENGINE_LOG(LogLevel::Info, "NativeAOT export runtime initialized (VTable v" << outTable->version << ").");
@@ -365,6 +396,9 @@ void* DotNetHost::GetManagedFunction(
 
 
 void DotNetHost::Shutdown() {
+	// Invalidate the host's borrowed entry points before unloading their owner.
+	exportTable = {};
+	exportLibraryPath.clear();
 	if (hostfxr_handle) {
 		FreeNativeLibrary(hostfxr_handle);
 		hostfxr_handle = nullptr;

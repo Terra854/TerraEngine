@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <system_error>
+#include <utility>
 #include <nlohmann/json.hpp>
 
 namespace TerraEngine::Tests
@@ -160,6 +162,35 @@ namespace
 		RenderSystem::Instance().SetRenderSettings(previousSettings);
 		ResourceManager::Instance().SetAssetRoot(previousAssetRoot);
 	}
+
+	// Assertions throw. Keep the shared renderer/root restoration and temporary
+	// directory retirement owned by scope exit, including exceptional test exits.
+	class QualitySettingsScope final
+	{
+	public:
+		QualitySettingsScope(std::filesystem::path previousRoot, RenderSettings previousSettings,
+			std::filesystem::path testRoot)
+			: previousRoot_(std::move(previousRoot)), previousSettings_(previousSettings),
+			  testRoot_(std::move(testRoot)), previousDiagnostics_(TerraEngine::Renderer::RenderDiagnosticsRequested()) {}
+		~QualitySettingsScope() noexcept
+		{
+			try { RestoreRenderSettings(previousRoot_, previousSettings_); } catch (...) {
+				// Even failed settings persistence must not leave the next test on our root.
+				try { ResourceManager::Instance().SetAssetRoot(previousRoot_); } catch (...) {}
+			}
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(previousDiagnostics_);
+			std::error_code ignored;
+			std::filesystem::remove_all(testRoot_, ignored);
+		}
+		QualitySettingsScope(const QualitySettingsScope&) = delete;
+		QualitySettingsScope& operator=(const QualitySettingsScope&) = delete;
+	private:
+		std::filesystem::path previousRoot_;
+		RenderSettings previousSettings_;
+		std::filesystem::path testRoot_;
+		bool previousDiagnostics_;
+	};
+
 }
 
 	void RegisterVirtualGeometryQualityTests(TestRegistry& registry)
@@ -273,10 +304,36 @@ namespace
 			context.ExpectEqual(baseSignature, BuildVirtualGeometryQualityProfileSignature(legacyChanged), "Legacy Hi-Z metadata must not rebuild visibility commands as if it were a runtime disable switch.");
 		});
 
+		registry.Add("VirtualGeometry.Quality.RestoresStateAfterAssertion", [](TestContext& context) {
+			const auto previousRoot = ResourceManager::Instance().GetAssetRoot();
+			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
+			const bool previousDiagnostics = TerraEngine::Renderer::RenderDiagnosticsRequested();
+			const auto root = MakeVirtualGeometryQualityTestRoot("TerraEngineQualityUnwindTests");
+			bool failedAsExpected = false;
+			try {
+				QualitySettingsScope restore(previousRoot, previousSettings, root);
+				ResourceManager::Instance().SetAssetRoot(root / "Assets");
+				RenderSettings changedSettings = previousSettings;
+				changedSettings.shadowResolution = previousSettings.shadowResolution == 1024u ? 2048u : 1024u;
+				RenderSystem::Instance().SetRenderSettings(changedSettings);
+				TerraEngine::Renderer::SetRenderDiagnosticsRequested(!previousDiagnostics);
+				context.Expect(false, "Injected assertion verifies the same unwinding used by a real failure.");
+			} catch (const TestFailure&) { failedAsExpected = true; }
+			context.Expect(failedAsExpected, "The injected assertion must exercise scope unwinding.");
+			context.Expect(ResourceManager::Instance().GetAssetRoot() == previousRoot,
+				"Failed assertions must restore the prior asset root.");
+			context.Expect(TerraEngine::Renderer::RenderDiagnosticsRequested() == previousDiagnostics,
+				"Failed assertions must restore diagnostics state before the next test.");
+			context.ExpectEqual(previousSettings.shadowResolution, RenderSystem::Instance().GetRenderSettings().shadowResolution,
+				"Failed assertions must restore the previous renderer quality settings.");
+			context.Expect(!std::filesystem::exists(root), "Failed assertions must retire their temporary settings project.");
+		});
+
 		registry.Add("VirtualGeometry.Quality.SavesProjectRenderSettings", [](TestContext& context) {
 			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
 			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
 			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualitySaveTests");
+			QualitySettingsScope restore(previousAssetRoot, previousSettings, root);
 			ResourceManager::Instance().SetAssetRoot(root / "Assets");
 
 			RenderSettings diagnosticSettings = RenderSystem::Instance().GetRenderSettings();
@@ -318,15 +375,13 @@ namespace
 			context.Expect(NearlyEqual(0.5f, virtualGeometry.value("lodTransitionHysteresisPixels", 0.0f)), "Saved render settings should include transition hysteresis.");
 			context.ExpectEqual(4u, virtualGeometry.value("lodTransitionStableFrames", 0u), "Saved render settings should include transition stable frames.");
 
-			RestoreRenderSettings(previousAssetRoot, previousSettings);
-			std::filesystem::remove_all(root);
 		});
 
 		registry.Add("VirtualGeometry.Quality.TransientRenderDiagnosticsDoNotSaveProjectSettings", [](TestContext& context) {
 			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
 			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
-			const bool previousDiagnosticsRequested = TerraEngine::Renderer::RenderDiagnosticsRequested();
 			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityTransientDiagnosticsTests");
+			QualitySettingsScope restore(previousAssetRoot, previousSettings, root);
 			ResourceManager::Instance().SetAssetRoot(root / "Assets");
 			RenderSystem::Instance().ClearTransientRenderDiagnosticsOverride();
 
@@ -357,16 +412,18 @@ namespace
 			context.Expect(!projectSaveDocument.value("validationEnabled", true), "Later project graphics saves should not inherit transient validation preferences.");
 			context.Expect(!projectSaveDocument.value("debugEnabled", true), "Later project graphics saves should not inherit transient debug preferences.");
 
-			RestoreRenderSettings(previousAssetRoot, previousSettings);
-			TerraEngine::Renderer::SetRenderDiagnosticsRequested(previousDiagnosticsRequested);
-			std::filesystem::remove_all(root);
 		});
 
 		registry.Add("VirtualGeometry.Quality.RenderDebugDiagnosticsApplyLive", [](TestContext& context) {
 			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
 			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
-			const bool previousDiagnosticsRequested = TerraEngine::Renderer::RenderDiagnosticsRequested();
 			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityLiveDebugTests");
+			QualitySettingsScope restore(previousAssetRoot, previousSettings, root);
+			// This test acquires a temporary diagnostics-window request. Release it
+			// even if a fatal check fires before the ordinary close-window step.
+			struct ReleaseGraphRequest {
+				~ReleaseGraphRequest() { RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false); }
+			} releaseGraphRequest;
 			ResourceManager::Instance().SetAssetRoot(root / "Assets");
 
 			// The debug flag is user-authored project state, but the editor also
@@ -394,15 +451,13 @@ namespace
 			RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
 			context.Expect(!TerraEngine::Renderer::RenderDiagnosticsRequested(), "Closing the last diagnostics window should clear diagnostics when the project toggle is off.");
 
-			RestoreRenderSettings(previousAssetRoot, previousSettings);
-			TerraEngine::Renderer::SetRenderDiagnosticsRequested(previousDiagnosticsRequested);
-			std::filesystem::remove_all(root);
 		});
 
 		registry.Add("VirtualGeometry.Quality.LoadsProjectRenderSettings", [](TestContext& context) {
 			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
 			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
 			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityLoadTests");
+			QualitySettingsScope restore(previousAssetRoot, previousSettings, root);
 			ResourceManager::Instance().SetAssetRoot(root / "Assets");
 			std::filesystem::create_directories(root / "ProjectSettings");
 
@@ -460,14 +515,13 @@ namespace
 			context.Expect(NearlyEqual(0.65f, loaded.lodTransitionHysteresisPixels), "Loaded render settings should restore transition hysteresis.");
 			context.ExpectEqual(5u, loaded.lodTransitionStableFrames, "Loaded render settings should restore transition stable frames.");
 
-			RestoreRenderSettings(previousAssetRoot, previousSettings);
-			std::filesystem::remove_all(root);
 		});
 
 		registry.Add("VirtualGeometry.Quality.LoadsMissingLegacyHiZMetadataAsDefaultOn", [](TestContext& context) {
 			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
 			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
 			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityMissingHiZTests");
+			QualitySettingsScope restore(previousAssetRoot, previousSettings, root);
 			ResourceManager::Instance().SetAssetRoot(root / "Assets");
 			std::filesystem::create_directories(root / "ProjectSettings");
 
@@ -491,8 +545,6 @@ namespace
 
 			context.Expect(loaded.hiZOcclusionEnabled, "Missing legacy Hi-Z metadata should inherit the default value.");
 
-			RestoreRenderSettings(previousAssetRoot, previousSettings);
-			std::filesystem::remove_all(root);
 		});
 
 		registry.Add("VirtualGeometry.Quality.SelectsMixedDetailForNearAndFarClusters", [](TestContext& context) {

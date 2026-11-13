@@ -151,7 +151,7 @@ try {
 			Require ($path -in @('Engine/Renderer/RenderSystem.cpp','Engine/Animation/AnimationSystem.cpp') -and (Integer $source.maxCodeLines 'source.maxCodeLines') -eq 2000) 'Only residual coordinators have the2000-line file budget.'
 			Require ($n.codeLines -le $source.maxCodeLines) "Residual file budget exceeded: $path"
 		}
-		$sources[$path] = @{full=$full;sha256=$sha;native=$n}
+		$sources[$path] = @{full=$full;sha256=$sha;native=$n;bytes=[IO.File]::ReadAllBytes($full)}
 		foreach($brace in $n.braceSpans) {
 			$key = "$path`:$($brace.openingBraceOffset)"
 			Require (!$braces.ContainsKey($key)) "Duplicate native brace: $key"
@@ -191,6 +191,12 @@ try {
 		$key = "$($symbol.path):$($symbol.openingBraceOffset)"
 		Require ($braces.ContainsKey($key) -and $claimed.Add($key)) "Missing or multiply classified symbol brace: $name"
 		$b = $braces[$key]
+		# Bind the identity itself to native brace bytes, so two mutually stale
+		# labels cannot validate each other after a coordinate-only refresh.
+		$lineStart = [int]$symbol.openingBraceOffset
+		while($lineStart -gt 0 -and $sources[$symbol.path].bytes[$lineStart-1] -ne 10) { $lineStart-- }
+		$column = $symbol.openingBraceOffset - $lineStart + 1
+		Require ($symbol.symbolId -ceq ($symbol.path+':'+$b.firstLine+':'+$column)) "Stale native symbol identity: $name"
 		foreach($field in @('spanEndOffsetExclusive','firstLine','lastLine','codeLines')) { Require ($symbol[$field] -eq $b[$field]) "Native $field mismatch: $name" }
 		Require ($symbol.closingBraceOffset -eq $b.spanEndOffsetExclusive-1 -and $symbol.signatureLine -ge 1 -and $symbol.signatureLine -le $b.firstLine) "Invalid signature/closing bounds: $name"
 		$orchestrator = $name -ceq 'RenderSystem::BuildFrameExecution' -or $name -ceq 'TerraEngine::Renderer::RenderSystem::BuildFrameExecution' -or $name -ceq 'TerraEngine::Animation::AnimationSystem::DeclareFrameWorkloads'
@@ -208,11 +214,47 @@ try {
 			$null = $used.Add($id)
 		}
 	}
+	# Location-bearing names and parent links must agree with the current identities.
+	# Matching brace offsets alone cannot validate stale lambda metadata.
+	foreach($symbol in $candidate.symbols) {
+		# Parent identities must resolve for local methods as well as lambdas.
+		foreach($referenceName in @('enclosingFunction','enclosingLambda')) {
+			if($symbol.Contains($referenceName) -and $symbol[$referenceName]) {
+				Require ($symbolIds.Contains($symbol[$referenceName])) "Stale $referenceName reference: $($symbol.qualifiedSymbol)"
+			}
+		}
+		# Named overloads and lambdas share the same current location identity.
+		if($symbol.Contains('overloadDisambiguator')) { Require ($symbol.overloadDisambiguator.EndsWith(' @ '+$symbol.symbolId)) "Stale overload location: $($symbol.qualifiedSymbol)" }
+		if($symbol.qualifiedSymbol -cmatch '::<lambda@') {
+			$coordinate = $symbol.symbolId.Substring($symbol.path.Length + 1)
+			Require ($symbol.qualifiedSymbol.EndsWith("::<lambda@$coordinate>")) "Stale lambda qualified coordinates: $($symbol.qualifiedSymbol)"
+			Require ($symbol.Contains('enclosingFunction') -and $symbolIds.Contains($symbol.enclosingFunction)) "Stale lambda enclosing function: $($symbol.qualifiedSymbol)"
+			$function = @($candidate.symbols | Where-Object symbolId -CEQ $symbol.enclosingFunction)[0]
+			Require ($function.path -ceq $symbol.path -and $function.openingBraceOffset -lt $symbol.openingBraceOffset -and $function.spanEndOffsetExclusive -gt $symbol.spanEndOffsetExclusive) "Invalid enclosing function span: $($symbol.qualifiedSymbol)"
+			$parentSymbol = $function
+			if($symbol.Contains('enclosingLambda') -and $null -ne $symbol.enclosingLambda) {
+				Require ($symbolIds.Contains($symbol.enclosingLambda)) "Stale enclosing lambda: $($symbol.qualifiedSymbol)"
+				$parentSymbol = @($candidate.symbols | Where-Object symbolId -CEQ $symbol.enclosingLambda)[0]
+				Require ($parentSymbol.path -ceq $symbol.path -and $parentSymbol.openingBraceOffset -lt $symbol.openingBraceOffset -and $parentSymbol.spanEndOffsetExclusive -gt $symbol.spanEndOffsetExclusive) "Invalid enclosing lambda span: $($symbol.qualifiedSymbol)"
+			}
+			Require ($symbol.qualifiedSymbol -ceq ($parentSymbol.qualifiedSymbol+"::<lambda@$coordinate>")) "Stale qualified parent chain: $($symbol.qualifiedSymbol)"
+		}
+	}
 	Require ($orchestrators.Count -eq 2) 'Both named residual orchestrators must be mapped.'
 	foreach($brace in $candidate.nonCallableBraces) {
 		Fields $brace @('path','openingBraceOffset','spanEndOffsetExclusive','classification') 'nonCallableBrace'
 		$null = Integer $brace.openingBraceOffset 'nonCallableBrace.openingBraceOffset'; $null = Integer $brace.spanEndOffsetExclusive 'nonCallableBrace.spanEndOffsetExclusive'
 		Description $brace.classification 'nonCallableBrace.classification'
+		if($brace.Contains('nearestCallableParent') -and $brace.nearestCallableParent) {
+			Require ($symbolIds.Contains($brace.nearestCallableParent)) "Stale nearest callable parent: $($brace.path):$($brace.openingBraceOffset)"
+			# Existence alone accepts unrelated files and outer ancestors. Native
+			# byte spans determine the innermost enclosing callable in this file.
+			$enclosing = @($candidate.symbols | Where-Object {
+				$_.path -ceq $brace.path -and $_.openingBraceOffset -lt $brace.openingBraceOffset -and
+				$_.spanEndOffsetExclusive -gt $brace.spanEndOffsetExclusive
+			} | Sort-Object openingBraceOffset -Descending)
+			Require ($enclosing.Count -gt 0 -and $enclosing[0].symbolId -ceq $brace.nearestCallableParent) "Invalid nearest callable parent span: $($brace.path):$($brace.openingBraceOffset)"
+		}
 		$key = "$($brace.path):$($brace.openingBraceOffset)"
 		Require ($braces.ContainsKey($key) -and $claimed.Add($key) -and $brace.spanEndOffsetExclusive -eq $braces[$key].spanEndOffsetExclusive) "Unknown/duplicate/inexact non-callable brace: $key"
 	}

@@ -4,6 +4,14 @@
 // It synchronizes changes made in the UI back to the underlying engine objects, ensuring real-time feedback in the scene.
 
 #include "InspectorWindow.h"
+#if defined(TERRAENGINE_EDITOR_TESTS)
+#include "Tests/Support/InspectorNameObservation.h"
+namespace TerraEngine::EditorTests {
+	// Native editor tests execute on one UI thread and clear this observer by RAII.
+	static thread_local InspectorNameObserver inspectorNameObserver = nullptr;
+	void SetInspectorNameObserver(InspectorNameObserver observer) noexcept { inspectorNameObserver = observer; }
+}
+#endif
 #include "AnimatorInspectorMetadata.h"
 #include "InspectorDisplayNames.h"
 #include "../Subsystems/MainEditorSubsystem.h"
@@ -1917,7 +1925,7 @@ void InspectorWindow::DrawPrefabLinkInspector(entt::entity obj)
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Reset Object")) {
-			m_Owner->ResetPrefabInstanceToDefaults(obj);
+			m_Owner->RequestPrefabInstanceReset(obj);
 			return;
 		}
 	}
@@ -5162,8 +5170,14 @@ void InspectorWindow::OnGui() {
 			ImGui::SameLine();
 			
 			std::string name = ObjectManager::instance().getObjectName(*object);
-			char nameBuf[256];
-			strncpy(nameBuf, name.c_str(), sizeof(nameBuf));
+			// Reserve a terminator even when an authored name exceeds the widget's
+			// capacity. Merely viewing it keeps the full object name unchanged.
+			char nameBuf[256]{};
+			std::copy_n(name.data(), std::min(name.size(), sizeof(nameBuf) - 1U), nameBuf);
+#if defined(TERRAENGINE_EDITOR_TESTS)
+			if (TerraEngine::EditorTests::inspectorNameObserver)
+				TerraEngine::EditorTests::inspectorNameObserver(std::span<const char, 256>(nameBuf));
+#endif
 			
 			// Calculate width for name input: available width minus "Static" checkbox width
 			float staticWidth = ImGui::CalcTextSize("Static").x + ImGui::GetStyle().ItemSpacing.x + ImGui::GetFrameHeight();

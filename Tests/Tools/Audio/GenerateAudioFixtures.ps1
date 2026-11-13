@@ -16,5 +16,28 @@ try {
     [IO.File]::WriteAllBytes((Join-Path $tmp 'invalid_metadata.wav'),[byte[]](0..15)); [IO.File]::WriteAllBytes((Join-Path $tmp 'corrupt_ogg.ogg'),[byte[]](0x4F,0x67,0x67,0x53,0,1,2,3,4,5))
     $manifest=@(); Get-ChildItem $tmp -File | ForEach-Object { $h=Get-FileHash $_.FullName -Algorithm SHA256; $manifest += [ordered]@{file=$_.Name; bytes=$_.Length; sha256=$h.Hash.ToLowerInvariant()} }
     if($Refresh){New-Item $dest -ItemType Directory -Force|Out-Null; Copy-Item (Join-Path $tmp '*') $dest -Force; [ordered]@{schemaVersion=1; fixtures=$manifest}|ConvertTo-Json -Depth 4|Set-Content (Join-Path $dest 'manifest.json') -Encoding utf8}
-    else { $comm=Get-Content (Join-Path $dest 'manifest.json')|ConvertFrom-Json; foreach($m in $comm.fixtures){$p=Join-Path $dest $m.file;if(!(Test-Path $p) -or (Get-Item $p).Length -ne $m.bytes -or (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $m.sha256){throw "Generated fixture mismatch: $($m.file)"} } }
-} finally {Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue}
+    else {
+		$comm=Get-Content -Raw -LiteralPath (Join-Path $dest 'manifest.json') | ConvertFrom-Json
+		if ($comm.schemaVersion -ne 1) { throw 'Unsupported committed audio manifest schema.' }
+		$generated=@($manifest | Sort-Object file)
+		$committed=@($comm.fixtures | Sort-Object file)
+		# Exact inventory includes hidden fixtures, so an extra file cannot hide
+		# from the same byte/name checks applied to ordinary committed assets.
+		$actualNames=@(Get-ChildItem -LiteralPath $dest -File -Force | Where-Object Name -NE 'manifest.json' | Sort-Object Name | ForEach-Object Name)
+		if ($generated.Count -ne $committed.Count -or $actualNames.Count -ne $generated.Count) { throw 'Generated audio fixture inventory differs from committed data.' }
+		for ($index=0; $index -lt $generated.Count; ++$index) {
+			$fresh=$generated[$index]; $entry=$committed[$index]
+			# Names originate in the bounded fresh generator; do not resolve a
+			# manifest-supplied traversal path before its exact inventory match.
+			if ($fresh.file -cne $entry.file -or $fresh.file -cne $actualNames[$index] -or $fresh.bytes -ne $entry.bytes -or $fresh.sha256 -cne $entry.sha256) { throw "Freshly generated audio manifest mismatch: $($fresh.file)" }
+			$path=Join-Path $dest $fresh.file
+			if ((Get-Item -LiteralPath $path).Length -ne $fresh.bytes -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $fresh.sha256) { throw "Freshly generated audio bytes mismatch: $($fresh.file)" }
+		}
+	}
+} finally {
+	$tempParent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
+	$owned=[IO.Path]::GetFullPath($tmp)
+	if ([IO.Path]::GetDirectoryName($owned) -eq $tempParent -and [IO.Path]::GetFileName($owned).StartsWith('terra-wav-')) {
+		Remove-Item -LiteralPath $owned -Recurse -Force -ErrorAction SilentlyContinue
+	}
+}

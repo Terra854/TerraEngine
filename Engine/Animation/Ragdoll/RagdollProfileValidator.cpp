@@ -180,14 +180,15 @@ namespace TerraEngine::Animation {
 			std::size_t childIndex,
 			const SkeletonAsset& skeleton) noexcept {
 			std::size_t current = childIndex;
-			while(current < skeleton.joints.size()) {
-				if(current == parentIndex) {
-					return true;
-				}
+			bool foundAncestor = false;
+			// A valid ancestry chain reaches a root within the joint count. Keep
+			// walking after a match so a cycle containing that match cannot pass.
+			// The scalar bound needs no visited allocation during validation.
+			for(std::size_t visited = 0U; visited < skeleton.joints.size(); ++visited) {
+				if(current >= skeleton.joints.size()) return false;
+				foundAncestor = foundAncestor || current == parentIndex;
 				const std::int32_t parent = skeleton.joints[current].parentIndex;
-				if(parent < 0) {
-					return false;
-				}
+				if(parent < 0) return foundAncestor;
 				current = static_cast<std::size_t>(parent);
 			}
 			return false;

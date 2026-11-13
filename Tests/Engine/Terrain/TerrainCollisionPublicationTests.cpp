@@ -43,12 +43,22 @@ namespace TerraEngine::Tests
 			const bool ready = backend.Initialize().Succeeded() && backend.CreateWorld(configuration).Succeeded();
 			TerraEngine::Physics::TerrainHeightFieldRecipe recipe{}; recipe.terrainAssetId = TerraEngine::GenerateUUID(); recipe.authoredGeneration = 3u; recipe.authoredHash = 77u; recipe.heightMillimetres.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount, 0); recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u); recipe.materialIndices.assign(256u * 256u, 9u);
 			TerraEngine::Physics::TerrainCollisionReplacementPacket packet; packet.id = "terrain-replacement"; packet.sourceRootHash = {12u, 13u}; packet.sourcePublicationGeneration = 3u; packet.expectedWorld = world; packet.recipe = recipe; packet.replacementShape = {world.worldId, world.worldGeneration, 0u, 1u}; packet.replacementBody.handle = {world.worldId, world.worldGeneration, 0u, 1u}; packet.replacementBody.shape = packet.replacementShape; packet.replacementBody.objectId = recipe.terrainAssetId; packet.replacementBody.objectGeneration = 3u; packet.replacementBody.componentGeneration = 1u; packet.replacementBody.motionType = TerraEngine::Physics::PhysicsMotionType::Static;
+			// A high-elevation root is valid terrain, even above a primitive's extent
+			// limit. Adding an isolated hole must retain the same vertical admission.
+			packet.recipe.heightMillimetres.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount, 1'500'000);
 			const auto committed = ready ? TerraEngine::Physics::CommitTerrainCollisionReplacement(backend, packet) : TerraEngine::Physics::TerrainCollisionReplacementReceipt{};
+			packet.priorShape = committed.activeShape; packet.priorBody = committed.activeBody;
+			packet.replacementShape.slotIndex = 1u; packet.replacementBody.handle.slotIndex = 1u;
+			packet.replacementBody.shape = packet.replacementShape;
+			constexpr std::size_t hole = 128u * 256u + 128u;
+			packet.recipe.holeBits[hole / 8u] |= static_cast<std::uint8_t>(1u << (hole % 8u));
+			const auto holed = committed.committed ? TerraEngine::Physics::CommitTerrainCollisionReplacement(backend, packet) : TerraEngine::Physics::TerrainCollisionReplacementReceipt{};
 			packet.replacementBody.motionType = TerraEngine::Physics::PhysicsMotionType::Dynamic;
 			const auto rejected = ready ? TerraEngine::Physics::CommitTerrainCollisionReplacement(backend, packet) : TerraEngine::Physics::TerrainCollisionReplacementReceipt{};
-			context.Expect(ready && committed.committed && committed.activeBody == packet.replacementBody.handle && !rejected.committed && rejected.retainedLastKnownGood,
+			context.Expect(ready && committed.committed && holed.committed && holed.activeBody == packet.replacementBody.handle && !rejected.committed && rejected.retainedLastKnownGood,
 				"A terrain collision packet must stage a fresh static material-aware heightfield body, while a rejected replacement leaves the prior committed collision authoritative.");
-			if(committed.committed) { (void)backend.DestroyBody(committed.activeBody); (void)backend.DestroyShape(committed.activeShape); }
+			const auto active = holed.committed ? holed : committed;
+			if(active.committed) { (void)backend.DestroyBody(active.activeBody); (void)backend.DestroyShape(active.activeShape); }
 			if(ready) (void)backend.DestroyWorld(world); (void)backend.Shutdown(); ThreadPool::instance().shutdown();
 		});
 

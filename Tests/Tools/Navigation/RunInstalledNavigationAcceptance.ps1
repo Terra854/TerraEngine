@@ -1,5 +1,21 @@
 # RunInstalledNavigationAcceptance.ps1 - installed, source-free navigation gate.
 # Every matrix is a separate workload record; raw lane output is retained beside it.
+# The ordinary native host now runs the production Navigation capture/worker
+# preparation/protected-publication graph. Its frame CPU metric includes that
+# scheduler boundary and bounded worker-provenance observation. Receipts marked
+# scheduled-native-v1 must not be relabeled as the
+# historical synchronous direct-Update measurements. Capture fresh matching
+# cohorts before making baseline/candidate performance claims.
+# TERRAENGINE_THREADPOOL_WORKERS is optional worker-count intent inherited by
+# each fresh child. The native host owns initialization and shutdown, and reports
+# observed capacity plus real TLS-backed route execution, never the intent value
+# as evidence. For reproducible 2/4-worker smoke cohorts set this environment
+# variable before invoking this script; keep each cohort in a fresh output root.
+# A short non-Qualification duration is diagnostic only. Qualification still
+# requires the original 256 objects, 100 requests/second, 1800-second soak and
+# complete 180000 outcomes per export lane, with unchanged comparator thresholds.
+# The bounded --qualification-worker-identity mode remains a separate semantic
+# provenance check and never substitutes for this full-duration workload.
 
 [CmdletBinding()]
 param(
@@ -37,6 +53,37 @@ $output = [IO.Path]::GetFullPath($OutputDirectory)
 $work = if ([string]::IsNullOrWhiteSpace($WorkDirectory)) { Join-Path $output "work" } else { [IO.Path]::GetFullPath($WorkDirectory) }
 $allowedLanes = @("editor", "export-rendered", "export-headless")
 $allowedMatrices = @("semantic", "performance", "idle-overload", "soak", "lifecycle", "usability")
+
+# Start-Process joins an ArgumentList array with spaces; it does not preserve
+# token boundaries for native Windows children. Encode one complete command line
+# using the native CRT quote/backslash rules. Always quote each value so empty,
+# spaced and Unicode paths remain exact, including trailing backslashes/quotes.
+function ConvertTo-NavigationNativeArgumentLine([string[]]$Values) {
+	$encoded = [Collections.Generic.List[string]]::new()
+	foreach ($value in $Values) {
+		if ($null -eq $value -or $value.IndexOf([char]0) -ge 0) { throw 'Native navigation arguments cannot contain null values or NUL characters.' }
+		$builder = [Text.StringBuilder]::new()
+		$null = $builder.Append([char]0x22)
+		$backslashes = 0
+		foreach ($character in $value.ToCharArray()) {
+			if ($character -eq [char]0x5C) { ++$backslashes; continue }
+			if ($character -eq [char]0x22) {
+				$null = $builder.Append([char]0x5C, 2 * $backslashes + 1)
+				$null = $builder.Append([char]0x22)
+			} else {
+				$null = $builder.Append([char]0x5C, $backslashes)
+				$null = $builder.Append($character)
+			}
+			$backslashes = 0
+		}
+		# Backslashes before the closing delimiter must be doubled, otherwise
+		# they escape that delimiter rather than remain part of the argument.
+		$null = $builder.Append([char]0x5C, 2 * $backslashes)
+		$null = $builder.Append([char]0x22)
+		$encoded.Add($builder.ToString())
+	}
+	return [string]::Join(' ', $encoded)
+}
 
 function Assert-Contained([string]$Path, [string]$Root, [string]$Label) {
 	$fullPath = [IO.Path]::GetFullPath($Path)
@@ -170,15 +217,25 @@ if ($required.Count -eq 0 -and -not $DryRun) {
 					"--idle-pairs", $IdlePairs) + $qualificationArgument
 				try {
 					if ($matrix -eq "soak") {
+						# The quoted native argument line preserves token boundaries while
 						# Start-Process provides separate stdout/stderr files without sharing
 						# mutable PowerShell state between the two long-running lane processes.
-						$process = Start-Process -FilePath $runner -ArgumentList $arguments -RedirectStandardOutput $stdout `
+						$process = Start-Process -FilePath $runner -ArgumentList (ConvertTo-NavigationNativeArgumentLine $arguments) -RedirectStandardOutput $stdout `
 							-RedirectStandardError $stderr -WindowStyle Hidden -PassThru
-						$pendingSoakRuns.Add([pscustomobject]@{
+						try {
+							# Retain the native handle while the child is alive. Older
+							# PowerShell/.NET hosts otherwise reopen by PID after exit and
+							# can lose the real exit status of a short concurrent lane.
+							if ($process.Handle -eq [IntPtr]::Zero) { throw 'Navigation child did not expose a valid native process handle.' }
+							$pendingSoakRuns.Add([pscustomobject]@{
 							process = $process; lane = $lane; matrix = $matrix; iteration = $iteration
 							duration = $duration; workloadName = $workloadName; stdout = $stdout
 							stderr = $stderr; laneResult = $laneResult
-						})
+							})
+						} catch {
+							$process.Dispose()
+							throw
+						}
 						continue
 					}
 					& $runner @arguments > $stdout 2> $stderr
@@ -206,6 +263,9 @@ if ($required.Count -eq 0 -and -not $DryRun) {
 			# concurrent while still making comparison wait for complete JSON files.
 			$pending.process.WaitForExit()
 			$exitCode = $pending.process.ExitCode
+			# Unknown is a launcher failure, never an implicit zero/success. Keep
+			# the actual integer status separate from the JSON semantic checks.
+			if ($null -eq $exitCode -or $exitCode -isnot [int]) { throw 'Navigation child completed without an observable integer exit status.' }
 			$hasResult = Test-Path -LiteralPath $pending.laneResult -PathType Leaf
 			$semanticEvidencePassed = $hasResult -and (Test-SemanticEvidence $pending.laneResult)
 			if ($exitCode -ne 0 -or -not $hasResult -or -not $semanticEvidencePassed) {
@@ -219,6 +279,10 @@ if ($required.Count -eq 0 -and -not $DryRun) {
 			$failed = $true
 			$_.Exception.Message | Set-Content -LiteralPath $pending.stderr -Encoding utf8
 			$evidence.workloads += [ordered]@{ lane = $pending.lane; matrix = $pending.matrix; iteration = $pending.iteration; durationSeconds = $pending.duration; status = "failed"; exitCode = 1; stdout = $pending.stdout; stderr = $pending.stderr; result = $pending.laneResult }
+		} finally {
+			# Each retained process/handle belongs only to this lane. Release it
+			# after observation, including semantic or process-query failures.
+			$pending.process.Dispose()
 		}
 	}
 	$comparisonPath = Join-Path $output "navigation-comparison.json"

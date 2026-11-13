@@ -13,7 +13,8 @@ void main(uint3 id : SV_DispatchThreadID)
 	if (id.x >= Bin.visibleCount || Bin.binCount == 0u) return;
 	if(visible[id.x].x == TE_VIRTUAL_GEOMETRY_INVALID_INDEX) return;
 	// Resolve stores material bin in the low byte and route identity in the next
-	// byte. Derivatives remain in word Z for later material reconstruction.
+	// byte. V2's tag stays in the high halfword and canonical depth in word Z;
+	// neither participates in material-bin selection.
 	uint bin = (visible[id.x].w & 0xffu) % Bin.binCount;
 	uint slot;
 	InterlockedAdd(bins[bin], 1u, slot);

@@ -14,8 +14,16 @@ param(
 	[Parameter(Mandatory)][string]$ProductionComments,
 	[Parameter(Mandatory)][string]$CommentBatches,
 	[string]$OutputPath = ([IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('TerraEngine-source-review-quality-'+[guid]::NewGuid().ToString('N')+'.json')))),
-	[ValidateSet('Portable','PrivateProof')][string]$Mode = 'Portable',
-	[string]$EvidenceRoot
+	[ValidateSet('Portable','PrivateProof','HistoricalAccounting')][string]$Mode = 'Portable',
+	[string]$EvidenceRoot,
+	# Continuation is opt-in; the legacy historical accounting path stays intact.
+	[string]$ContinuationManifest,
+	[string]$ContinuationValidator = (Join-Path $PSScriptRoot 'VerifySourceReviewContinuation.py'),
+	[string]$HistoricalManifest = (Join-Path $PSScriptRoot 'Baseline/Continuation/historical-source-manifest.json'),
+	[string]$PythonExecutable,
+	[string]$GitExecutable = 'git',
+	[string]$HistoricalInputRoot,
+	[string]$HistoricalStageMismatch = (Join-Path $PSScriptRoot 'Baseline/Continuation/historical-stage-mismatch.json')
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -53,6 +61,15 @@ function NoRedirect([string]$Path) {
 function Full([string]$Path) {
 	Require ([IO.Path]::IsPathRooted($Path)) "Expected absolute path: $Path"
 	$full=[IO.Path]::GetFullPath($Path); NoRedirect $full; return $full
+}
+function ToolchainExecutable([string]$Path) {
+	# Installed interpreters and Git commonly use symlinks or junctions. Permit
+	# those toolchain aliases while retaining executable byte pins below. Full
+	# still rejects redirected source, review artifacts and output parents.
+	Require ([IO.Path]::IsPathRooted($Path)) "Expected absolute executable path: $Path"
+	$full=[IO.Path]::GetFullPath($Path)
+	Require ([IO.File]::Exists($full)) "Missing toolchain executable: $Path"
+	return $full
 }
 function Under([string]$Root,[string]$Relative) {
 	$null=StringValue $Relative 'relative path'; Require (![IO.Path]::IsPathRooted($Relative)) 'Rooted relative path'
@@ -95,6 +112,54 @@ try {
 	$originalPath=Full $ProductionComments; $batchesPath=Full $CommentBatches
 	$inputs=@((Full $PSCommandPath),$script:tool,$stageScript,$stagePath,$ledgerPath,$originalPath,$batchesPath)
 	$pins=@{}; foreach($path in $inputs) { Require ([IO.File]::Exists($path)) "Missing file: $path"; $pins[$path]=Hash $path }
+	if($ContinuationManifest) {
+		# Historical accounting is replayed on its exact historical checkout. It
+		# cannot certify current functional changes; those have their own reviews.
+		Require ($Mode -ceq 'Portable') 'Continuation requires Portable; run PrivateProof separately on its sealed historical source.'
+		$continuation=Full $ContinuationManifest; $verifier=Full $ContinuationValidator; $historical=Full $HistoricalManifest
+		Require (![string]::IsNullOrWhiteSpace($PythonExecutable)) 'Continuation requires an explicit Python3.9+ executable'
+		$python=ToolchainExecutable $PythonExecutable; $git=ToolchainExecutable (@(Get-Command -Name $GitExecutable -CommandType Application -ErrorAction Stop)[0].Source)
+		foreach($path in @($continuation,$verifier,$historical,$python,$git)) { $pins[$path]=Hash $path }
+		$joinedPath=$output+'.continuation.json'; $work=$output+'.work'
+		$arguments=@($verifier,'--repo-root',$root,'--audit-executable',$script:tool,'--manifest',$continuation,'--historical-manifest',$historical,'--git-executable',$git,'--work-root',$work,'--report',$joinedPath)
+		if($HistoricalInputRoot) { $arguments+=@('--historical-input-root',(Full $HistoricalInputRoot)) }
+		$joinLog=& $python @arguments 2>&1
+		Require ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $joinedPath)) "Current review continuation failed: $($joinLog -join ' ')"
+		$pins[$joinedPath]=Hash $joinedPath; $joined=ReadJson $joinedPath; Require ($joined.status -ceq 'Passed' -and $joined.reviewedDeltaFiles -gt 0) 'Missing/nonempty continuation proof'
+		$hostExecutable=(Get-Process -Id $PID).Path; $historicalOutput=$output+'.historical.json'
+		$historyLog=& $hostExecutable -NoProfile -File $PSCommandPath -RepoRoot $joined.historicalRoot -AuditExecutable $script:tool -StageValidator $stageScript -StageManifest $joined.historicalStageManifest -Dispositions $ledgerPath -ProductionComments $originalPath -CommentBatches $batchesPath -OutputPath $historicalOutput -Mode HistoricalAccounting -HistoricalStageMismatch $HistoricalStageMismatch 2>&1
+		Require ($LASTEXITCODE -eq 0) "Frozen historical comment accounting failed: $($historyLog -join ' ')"
+		$pins[$historicalOutput]=Hash $historicalOutput; $history=ReadJson $historicalOutput; Require ($history.status -ceq 'Passed' -and $history.schemaVersion -ceq 'historical-source-comment-accounting-v1' -and $history.mode -ceq 'HistoricalAccounting' -and !$history.stagePerformed -and !$history.currentSourceAcceptance -and !$history.tokenProofExecuted) 'Historical accounting scope mismatch'
+		$selfTest=Native -Arguments @('--self-test'); Require ($selfTest -match 'SourceReviewAudit self-test failures=0') 'Current lexer self-test failed'
+		$strict=Json (Native -Arguments @('--strict-final',$root)); ArrayValue $strict.files 'current strict files'
+		Require ($strict.fileCount -eq $strict.files.Count -and $strict.errorCount -eq 0 -and $strict.occurrenceCount -eq 0) 'Current strict source check failed'
+		$selected=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+		foreach($file in $strict.files) {
+			Require ($file.errors.Count -eq 0 -and $file.occurrences.Count -eq 0) 'Current strict file errors'
+			$relative=[IO.Path]::GetRelativePath($root,(Full $file.path)).Replace('\','/')
+			Require ($selected.Add($relative)) 'Duplicate current strict source'
+		}
+		Require ($selected.Count -eq $joined.currentNativePaths.Count) 'Current scanner selection changed'
+		foreach($path in $joined.currentNativePaths) { Require ($selected.Contains($path)) 'Current strict selection omitted source' }
+		$strictPath=$output+'.native.json'; WriteFresh $strictPath $strict; $pins[$strictPath]=Hash $strictPath
+		$stageOutput=$output+'.stages.json'
+		$stageLog=& $hostExecutable -NoProfile -File $stageScript -RepoRoot $root -StageManifest $stagePath -AuditExecutable $script:tool -OutputPath $stageOutput 2>&1
+		Require ($LASTEXITCODE -eq 0) "Current stage validation failed: $($stageLog -join ' ')"
+		$pins[$stageOutput]=Hash $stageOutput; $stage=ReadJson $stageOutput; Require ($stage.status -ceq 'Passed' -and $stage.symbols -gt 0 -and $stage.nativeBraces -gt 0) 'Invalid current stage receipt'
+		# Re-inventory after both stages, detecting new/deleted sources as well as
+		# altered known bytes. The helper creates all receipts exclusively.
+		$recheckPath=$output+'.stability.json'
+		$recheckLog=& $python $verifier --repo-root $root --audit-executable $script:tool --manifest $continuation --historical-manifest $historical --recheck-receipt $joinedPath --historical-accounting-receipt $historicalOutput --report $recheckPath 2>&1
+		Require ($LASTEXITCODE -eq 0) "Current closure changed during verification: $($recheckLog -join ' ')"
+		foreach($path in $pins.Keys) { Require ((Hash $path) -ceq $pins[$path]) 'Input changed during continuation verification' }
+		$result.schemaVersion='source-review-quality-continuation-v1'; $result.status='Passed'
+		$result.historicalAccountingReceipt=@{path=$historicalOutput;sha256=Hash $historicalOutput;scope='Frozen historical comment accounting; obsolete mutable-stage candidate not performed'}
+		$result.continuationReceipt=@{path=$joinedPath;sha256=Hash $joinedPath}
+		$result.nativeInventory=@{path=$strictPath;sha256=Hash $strictPath}; $result.stageReceipt=@{path=$stageOutput;sha256=Hash $stageOutput}
+		$result.stabilityReceipt=@{path=$recheckPath;sha256=Hash $recheckPath}; $result.inputPins=$pins
+		$result.qualification='Historical comment accounting joined to exhaustive current reviewed deltas, current strict scanner and stage ownership; semantic completeness and native lifetime acceptance remain unproven.'
+		$exitCode=0
+	} else {
 	# Frozen constants prevent a coordinated rewrite of both the baseline and ledger.
 	$originalSha='8dc0b9a78a80aaf8cfd86d046c652353be6f156f1296f503a491e65e9dabbc26'
 	$batchesSha='6d13e2f9a72d073b5e8101b8e23827b4714568663cb02ac3ff17e23cb875e985'
@@ -221,19 +286,35 @@ try {
 	Require ($strictPaths.Count -eq $productionPins.Count) 'Production selection changed during verification'
 	foreach($path in $productionPins.Keys) { Require ($strictPaths.Contains($path) -and (Hash $path) -ceq $productionPins[$path]) 'Production source changed during strict scan' }
 	$strictPath=$output+'.native.json'; WriteFresh $strictPath $strict
+	if($Mode -cne 'HistoricalAccounting') {
 	$stageOutput=$output+'.stages.json'; Require (!(Test-Path -LiteralPath $stageOutput)) 'Stage output must be fresh'
 	$hostExecutable=(Get-Process -Id $PID).Path
 	$stageLog=& $hostExecutable -NoProfile -File $stageScript -RepoRoot $root -StageManifest $stagePath -AuditExecutable $script:tool -OutputPath $stageOutput 2>&1
 	Require ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $stageOutput)) "Stage validation failed: $($stageLog -join ' ')"
 	$stage=ReadJson $stageOutput; Require ($stage.status -ceq 'Passed' -and $stage.symbols -gt 0 -and $stage.nativeBraces -gt 0) 'Missing/invalid stage receipt'
 
+	} else {
+		# This is not Portable success: the obsolete stage after-image disagrees
+		# with exact Git bytes. Preserve its failed receipt and require current
+		# stage validation in the outer joined workflow instead of repinning it.
+		$qualificationPath=Full $HistoricalStageMismatch; $pins[$qualificationPath]=Hash $qualificationPath
+		$qualification=ReadJson $qualificationPath
+		Require ($qualification.schemaVersion -ceq 'historical-source-stage-qualification-v1' -and $qualification.historicalRevision -ceq '87d3fd037c1e881ff6630a4918c91be707673c1b' -and $qualification.historicalTree -ceq '47cf2ac37d0bee74c9da1b21e6516c3f9074a2f4' -and $qualification.mismatchCount -eq 1 -and $pins[$stagePath] -ceq '5d5dd1c6a54c1e8c707428168a04fea1ec0536c1efebebc2d02eff19b71e4394') 'Wrong historical stage qualification'
+		$failurePath=Under ([IO.Path]::GetDirectoryName($qualificationPath)) $qualification.failureReceipt.path
+		Require ((Hash $failurePath) -ceq $qualification.failureReceipt.sha256 -and (Get-Item -LiteralPath $failurePath).Length -eq $qualification.failureReceipt.bytes) 'Historical failure artifact changed'
+		$failure=ReadJson $failurePath; Require ($failure.status -ceq 'Failed' -and $failure.error -ceq 'Stale source hash: Engine/Animation/AnimationSystem.h') 'Historical failure scope mismatch'
+		$pins[$failurePath]=Hash $failurePath
+		$result.schemaVersion='historical-source-comment-accounting-v1'; $result.stagePerformed=$false; $result.currentSourceAcceptance=$false
+		$result.historicalStageMismatch=@{path=$qualificationPath;sha256=Hash $qualificationPath}
+	}
 	foreach($path in $pins.Keys) { Require ((Hash $path) -ceq $pins[$path]) 'Input changed during verification' }
 	foreach($path in $currentPins.Keys) { Require ((Hash $path) -ceq $currentPins[$path]) 'Candidate changed during verification' }
 	foreach($path in $productionPins.Keys) { Require ((Hash $path) -ceq $productionPins[$path]) 'Production source changed after strict scan' }
 	$result.status='Passed'; $result.originalOccurrences=$seen.Count; $result.batchCount=6; $result.commentOnlyFiles=$proofs.Count
-	$result.nativeInventory=@{path=$strictPath;sha256=Hash $strictPath}; $result.stageReceipt=@{path=$stageOutput;sha256=Hash $stageOutput}; $result.inputPins=$pins
-	$result.qualification=if($Mode -ceq 'Portable') {'Portable final-source/accounting checks only; private before/after token proof was not executed.'} else {'Portable checks plus native comparisons against hash-pinned pre-comment copies; no semantic/runtime acceptance.'}
+	$result.nativeInventory=@{path=$strictPath;sha256=Hash $strictPath}; if($Mode -cne 'HistoricalAccounting') { $result.stageReceipt=@{path=$stageOutput;sha256=Hash $stageOutput} }; $result.inputPins=$pins
+	$result.qualification=if($Mode -ceq 'HistoricalAccounting') {'Frozen historical comment accounting and strict source stability only; obsolete mutable-stage replay not performed. No current-source, full Portable, semantic or runtime acceptance.'} elseif($Mode -ceq 'Portable') {'Portable final-source/accounting checks only; private before/after token proof was not executed.'} else {'Portable checks plus native comparisons against hash-pinned pre-comment copies; no semantic/runtime acceptance.'}
 	$exitCode=0
+	}
 } catch { $result.error=$_.Exception.Message }
 finally {
 	if($canWrite) { try { WriteFresh $output $result; Write-Output "SourceReviewQuality receipt: $output" } catch { $exitCode=1; [Console]::Error.WriteLine($_.Exception.Message) } }

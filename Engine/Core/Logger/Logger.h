@@ -61,6 +61,9 @@ struct LogContext {
 };
 
 
+// Fixture observation copies settled queue ownership under the existing mutex.
+namespace TerraEngine::Tests { struct LoggerLifecycleTestAccess; }
+
 class Logger {
 public:
 	using SinkId = std::uint64_t;
@@ -106,15 +109,18 @@ public:
 
 	bool ShouldLog(LogLevel level) const { return level >= minLevel; }
 
-	// Gracefully shutdown the logger thread.
+	// Join the original consumer. Later Log calls still publish synchronously.
 	void Shutdown();
 
 private:
+	friend struct TerraEngine::Tests::LoggerLifecycleTestAccess;
 	Logger();
 	~Logger();
 
 	// The worker thread function: waits for and processes log entries.
 	void ProcessEntries();
+	// Both active and terminal producers preserve the same complete console line.
+	void PublishConsoleEntry(const LogEntry& entry);
 
 	std::string LogLevelToString(LogLevel level);
 	std::string GetColorCode(LogLevel level);
@@ -123,6 +129,9 @@ private:
 
 	std::queue<LogEntry> q;
 	std::mutex m;
+	// Console publication has its own lock: queue/sink work stays independent,
+	// and the mutex remains alive until the destructor has joined the consumer.
+	std::mutex consoleMutex;
 	std::condition_variable cv;
 	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
 	std::atomic<bool> done;
@@ -130,6 +139,8 @@ private:
 	std::mutex sinkMutex;
 	std::map<SinkId, Sink> sinks;
 	std::atomic<SinkId> nextSinkId{1u};
+	// Serialize join ownership; never hold queue/sink locks while waiting.
+	std::mutex shutdownMutex;
 	static thread_local LogContext currentContext;
 };
 

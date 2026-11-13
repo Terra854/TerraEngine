@@ -167,6 +167,57 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterAnimationWindowTests(TestRegistry& registry) {
+		registry.Add("Editor.Animation.RetargetAuthoring.StarterCancelRestoresBoundInactiveState", [](TestContext& context) {
+			const auto source = MakeRetargetSkeleton(51U, 23U, 501U, 601U);
+			const auto target = MakeRetargetSkeleton(61U, 24U, 502U, 602U);
+			auto starter = MakeRetargetProfile(source, target);
+			// Persist placeholders exactly as the New Profile workflow does. The
+			// selected skeleton binding must survive cancel without touching this file.
+			starter.sourceSkeletonAssetId = MakeAnimationGuid(71U);
+			starter.targetSkeletonAssetId = MakeAnimationGuid(81U);
+			starter.sourceSkeletonFingerprint = starter.targetSkeletonFingerprint = 1U;
+			starter.sourceReferencePoseHash = starter.targetReferencePoseHash = 1U;
+			std::vector<std::uint8_t> original;
+			context.Expect(SerializeRetargetProfileAsset(starter, original) == AnimationStatus::Ok,
+				"The cancellation fixture needs a decodable placeholder profile.");
+			RetargetTestFile file;
+			context.Expect(WriteRetargetBytes(file.path, original), "Persist the exact starter revision before opening.");
+			const auto snapshot = MakeRetargetSnapshot(starter, source, target, original);
+			RetargetAuthoringService service;
+			context.Expect(service.Open(file.path, starter, source, target, snapshot, original, true) == AnimationAuthoringStatus::Ok
+				&& service.BeginEdit() == AnimationAuthoringStatus::Ok,
+				"Open the explicit starter-binding path and begin a detached edit.");
+			auto* editable = service.EditableModel();
+			context.Expect(editable != nullptr && editable->AutoMap() == AnimationStatus::Ok,
+				"Author actual mappings before cancelling the starter transaction.");
+			AnimationAuthoringCompileRequest canceled;
+			context.Expect(service.PrepareCommit(canceled) == AnimationAuthoringStatus::Ok,
+				"The detached starter edit must prepare a cancellable worker request.");
+			context.Expect(service.Cancel() == AnimationAuthoringStatus::Canceled,
+				"Cancel must restore a placeholder starter using its original selected-skeleton binding mode.");
+			context.Expect(canceled.cancellationRequested && canceled.cancellationRequested->load()
+				&& !service.HasCandidate() && service.EditableModel() == nullptr
+				&& service.Generation() == snapshot.profile.generation
+				&& service.UndoDepth() == 0U && service.RedoDepth() == 0U
+				&& ReadRetargetBytes(file.path) == original
+				&& service.Model().Candidate().sourceSkeletonAssetId == source.assetId
+				&& service.Model().Candidate().targetSkeletonAssetId == target.assetId,
+				"Cancelled starter state must retain bound rigs, cancel workers, clear editing, and preserve bytes/history.");
+			context.Expect(service.BeginEdit() == AnimationAuthoringStatus::Ok,
+				"A fresh edit must begin after starter cancellation.");
+			editable = service.EditableModel();
+			context.Expect(editable != nullptr && editable->AutoMap() == AnimationStatus::Ok,
+				"The restored binding must remain usable by later mapping edits.");
+			AnimationAuthoringCompileRequest retry;
+			context.Expect(service.PrepareCommit(retry) == AnimationAuthoringStatus::Ok,
+				"A second edit must prepare successfully after cancellation reset the transaction.");
+			const auto compiled = RetargetAuthoringService::CompileCandidate(retry, source, target);
+			context.Expect(compiled.authoring.succeeded,
+				"The restored selected-skeleton binding must still produce a valid worker candidate.");
+			context.Expect(service.Cancel() == AnimationAuthoringStatus::Canceled,
+				"Finish the second detached edit without publishing fixture changes.");
+		});
+
 		registry.Add("Editor.Animation.Inspector.AnimatorPropertyGuidanceIsComplete", [](TestContext& context) {
 			using TerraEngine::Editor::Animation::AnimatorInspectorControlKind;
 			using TerraEngine::Editor::Animation::FindAnimatorInspectorProperty;

@@ -110,8 +110,11 @@ namespace TerraEngine::Scene {
 			return TerraEngine::ParseUUID(snapshot["uuid"].get<std::string>());
 		}
 
+		std::string MakeObjectRefKey(const TransactionObjectRef& ref);
+
 		bool ValidateSnapshotTree(ObjectManager& objects, const nlohmann::json& snapshot,
-			std::unordered_set<TerraEngine::UUID>& reservedIds, std::size_t maximumNodes)
+			std::unordered_set<TerraEngine::UUID>& reservedIds, std::size_t maximumNodes,
+			const std::unordered_set<std::string>& deletedTargets)
 		{
 			// Identity preflight is iterative and bounded before typed decoding.
 			if (maximumNodes == 0U) return false;
@@ -121,7 +124,8 @@ namespace TerraEngine::Scene {
 				const auto& node = *pending.back(); pending.pop_back(); ++visited;
 				const auto objectId = SnapshotObjectId(node);
 				if (!objectId || *objectId == TerraEngine::EMPTY_UUID
-					|| !reservedIds.insert(*objectId).second || objects.getObject(*objectId)) return false;
+					|| !reservedIds.insert(*objectId).second
+					|| (objects.getObject(*objectId) && !deletedTargets.contains(MakeObjectRefKey(ExistingObject(*objectId))))) return false;
 				if (node.contains("name") && !node["name"].is_string()) return false;
 				if (node.contains("components") && !node["components"].is_object()) return false;
 				if (!node.contains("children")) continue;
@@ -490,7 +494,7 @@ namespace TerraEngine::Scene {
 			for (std::size_t index = 0; index < transaction.writeSet.operations.size(); ++index)
 			{
 				const TransactionWriteOperation& operation = transaction.writeSet.operations[index];
-				if ((HasObjectRef(operation.target) && deletedTargets.contains(MakeObjectRefKey(operation.target)))
+				if ((operation.kind != TransactionWriteKind::RestoreObjectSnapshot && HasObjectRef(operation.target) && deletedTargets.contains(MakeObjectRefKey(operation.target)))
 					|| (HasObjectRef(operation.parent) && !existsInOrder(operation.parent))) {
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::MissingTarget, operation.target.objectId, index,
@@ -538,7 +542,7 @@ namespace TerraEngine::Scene {
 						|| transaction.origin == TransactionOrigin::Automation || transaction.origin == TransactionOrigin::Test;
 					if (!editorReplayOrigin || operation.target.UsesLocalObject()
 						|| !snapshotId || *snapshotId != operation.target.objectId
-						|| !ValidateSnapshotTree(objects, operation.serializedObject, snapshotRestoreIds, maximumRestoreNodes))
+						|| !ValidateSnapshotTree(objects, operation.serializedObject, snapshotRestoreIds, maximumRestoreNodes, deletedTargets))
 					{
 						result.status = TransactionStatus::Rejected;
 						AddConflict(result, TransactionConflictReason::InvalidPayload, operation.target.objectId, index,
@@ -561,9 +565,20 @@ namespace TerraEngine::Scene {
 					for (const auto& node : prepared.nodes) {
 						const auto nodeRef = ExistingObject(node.id);
 						const auto keyId = MakeObjectRefKey(nodeRef);
+						// A restore may replace only identities already deleted earlier in this batch.
+						deletedTargets.erase(keyId);
 						shadowReferences[keyId] = nodeRef;
 						shadowParents[keyId] = node.parent ? ExistingObject(prepared.nodes[*node.parent].id) : operation.parent;
 						const std::string key = MakeObjectRefKey(ExistingObject(node.id)) + "|component=";
+						// A restored snapshot replaces the entire component set. Seed absent
+						// components too, so later operations never consult deleted live storage.
+						{
+							std::lock_guard registryLock(ComponentAccessRegistryMutex());
+							for (const auto& [name, access] : ComponentAccessRegistry()) {
+								(void)access;
+								preparedComponentPresence[key + name] = false;
+							}
+						}
 						preparedComponentPresence[key + std::string(Transform::kComponentName)] = true;
 						for (const auto& [name, value] : node.components) preparedComponentPresence[key + name] = true;
 					}

@@ -12,10 +12,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
 namespace TerraEngine::Navigation
@@ -101,6 +102,20 @@ namespace TerraEngine::Navigation
 		[[nodiscard]] bool WorkerPacketsHaveNoLiveSceneReferences() const noexcept;
 
 	private:
+		// Ownership distinguishes reused addresses; address also distinguishes two
+		// vector subobjects aliased through one caller control block.
+		struct FrozenInputKey {
+			std::weak_ptr<const std::vector<std::byte>> owner;
+			const void* address = nullptr;
+		};
+		struct FrozenInputKeyLess {
+			bool operator()(const FrozenInputKey& first, const FrozenInputKey& second) const noexcept {
+				const std::owner_less<std::weak_ptr<const std::vector<std::byte>>> ownerLess;
+				if(ownerLess(first.owner, second.owner)) return true;
+				if(ownerLess(second.owner, first.owner)) return false;
+				return std::less<const void*>{}(first.address, second.address);
+			}
+		};
 		struct PendingPacket
 		{
 			NavigationDynamicWorkHandle handle{};
@@ -123,7 +138,7 @@ namespace TerraEngine::Navigation
 		std::vector<NavigationPreparationCompletion> completions_;
 		std::vector<NavigationDynamicWorkHandle> removalTombstones_;
 		std::vector<NavigationPreparationCompletion> allCompletions_;
-		std::unordered_map<const void*, std::shared_ptr<const std::vector<std::byte>>> frozenInputs_;
+		std::map<FrozenInputKey, std::shared_ptr<const std::vector<std::byte>>, FrozenInputKeyLess> frozenInputs_;
 		std::size_t droppedOrCoalescedCount_ = 0U;
 	};
 }

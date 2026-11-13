@@ -249,6 +249,13 @@ namespace {
 	}
 
 
+	// TSPF paths and contract comparisons use UTF-8, independently of the
+	// Windows ANSI code page. Native process arguments continue to use UTF-16.
+	std::string Utf8Path(const std::filesystem::path& path) {
+		const auto bytes = path.generic_u8string();
+		return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+	}
+
 	std::string Quote(const std::filesystem::path& p) {
 		std::ostringstream oss;
 		oss << "\"" << p.string() << "\"";
@@ -280,6 +287,29 @@ namespace {
 		}
 		return roots;
 	}
+
+#if defined(_WIN32)
+	// _wspawnv joins its argv strings into one Windows command line. Encode
+	// each value for the child's CRT parser, including empty values, embedded
+	// quotes, and runs of backslashes immediately before quotes or the end.
+	std::wstring QuoteWindowsCrtArgument(std::wstring_view value) {
+		std::wstring encoded = L"\"";
+		std::size_t backslashes = 0;
+		for(const wchar_t character : value) {
+			if(character == L'\\') { ++backslashes; continue; }
+			if(character == L'\"') {
+				encoded.append(backslashes * 2 + 1, L'\\');
+			} else {
+				encoded.append(backslashes, L'\\');
+			}
+			encoded.push_back(character);
+			backslashes = 0;
+		}
+		encoded.append(backslashes * 2, L'\\');
+		encoded.push_back(L'\"');
+		return encoded;
+	}
+#endif
 
 	// RunDxc supplies the public include root in addition to the authored
 	// shader's directory. DXC performs transitive dependency resolution and
@@ -315,8 +345,9 @@ namespace {
 		std::vector<const wchar_t*> cargs;
 		cargs.reserve(wideArgs.size() + 1);
 
-		for (const std::wstring& w : wideArgs) {
-			cargs.push_back(w.c_str());
+		for (std::wstring& value : wideArgs) {
+			value = QuoteWindowsCrtArgument(value);
+			cargs.push_back(value.c_str());
 		}
 		cargs.push_back(nullptr);
 
@@ -716,7 +747,7 @@ namespace {
 
 	bool IsEngineOwnedShader(const std::filesystem::path& input)
 	{
-		std::string path = input.lexically_normal().generic_string();
+		std::string path = Utf8Path(input.lexically_normal());
 		std::transform(path.begin(), path.end(), path.begin(),
 			[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
 		return path.find("/engine/shaders/") != std::string::npos
@@ -855,7 +886,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	}
 
 	StringTableBuilder strings;
-	const uint32_t pathOffset = strings.Add(input.string());
+	const uint32_t pathOffset = strings.Add(Utf8Path(input));
 	const uint32_t entryOffset = strings.Add(entryPoint);
 	const uint32_t targetOffset = strings.Add(target);
 

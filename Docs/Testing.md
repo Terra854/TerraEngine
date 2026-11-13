@@ -1,5 +1,47 @@
 # TerraEngine Testing
 
+## Current remediation behavior
+
+The current fixes have a bounded regression and build/install acceptance scope;
+another CodeRabbit scan is not a completion gate. Automation rejects
+`scene.open` while the active scene has unsaved edits; save first. Prefab reset
+persists descendant identities on the root without replacing nested links and
+retains its asynchronous success/rejection result. Terrain cancellation revokes
+pending worker output, switching assets drops the previous cook, and the first
+collision cook captures fully rehydrated persisted areas. Existing protected
+PostFrame and Before Physics visibility boundaries remain authoritative.
+
+Secondary physics admission retains atomic whole-batch rollback and stops
+retrying after three failures. Per-object warnings identify suspended batches;
+a new body, collider, material, dependency or settings change allows another
+bounded attempt budget. Animation rollback revokes a previous clip's GPU
+binding and uses CPU authority until normal residency refresh supplies the
+restored clip's resources. Rejected streaming preparation can be requested
+again, restored component presence follows the replacement snapshot, and
+failed indirect preparation cannot publish a static-shadow cache entry.
+
+From an x64 Visual Studio developer shell, using the existing bundled dependency
+configuration, compile and install before testing:
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+if ($LASTEXITCODE -ne 0) { throw 'Build/install failed.' }
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
+```
+
+Focused native coverage includes the `Engine.SceneMutationFailureSafety`,
+`Physics.FrameQuery`, `WorldStreamingSystem`, `Animation.Review.AssetRollback`,
+`Editor.Authoring`, `Editor.TerrainPersistence`, and `Editor.MCP.Prefab` filters.
+The maintained `Editor.ReviewRemediation` CTest executes actual production
+prefab-reset and terrain-window code, including asynchronous rejection,
+repeated reset with external references/nested links, Transform-less reference
+guards, cancellation, asset switching, and persisted-area collision capture.
+Build/test evidence for this repair is retained under
+`out/validation/coderabbit-fixes-20261112-round6/`; source inspection and native
+regressions do not constitute a new long soak or AAA performance qualification.
+
 ## Engine correctness and failure safety
 
 The seven focused correctness entries are implemented: `Engine.SceneMutationFailureSafety`,
@@ -653,7 +695,23 @@ on the recorded machine, not a guarantee for arbitrary scenes or hardware.
 Retain raw logs, hashes, final build gates, and actual UI/MCP managed-outcome
 verification with each qualification run.
 
-### Navigation hard-break qualification (historical standalone runner)
+### Navigation hard-break qualification (standalone scheduler host)
+
+Current standalone captures use `scheduled-native-v1`. Each measured navigation
+turn executes the existing Capture, Prepare, and Publish workloads through
+`ExecuteFrameWorkloads`, including the host's bounded provenance observations.
+Receipts retain the declared timing boundary, actual pool capacity, and worker
+observations from completed route searches. This executable measures a standalone
+CPU navigation host; its lane labels describe test inputs. Use the application-host
+runners for editor, exported-game, renderer, and GPU measurements.
+
+Use fresh baseline and candidate cohorts with matching execution modes and timing
+boundaries. The existing identity key covers source, settings, workload, renderer,
+power, and worker count; review the mode and boundary alongside that key. The
+content hash seals dynamic observations as well as content metadata. Retain earlier
+direct-`Update` captures with their recorded zero-worker qualification failures.
+Provider startup and recovery use bounded readiness checks; route latency, workload
+counts, duration floors, and throughput limits retain their existing requirements.
 
 Run the focused native navigation tests, then the complete suite and mandatory
 install gate. Use a Visual Studio developer environment with MSVC and the
@@ -1306,9 +1364,33 @@ repository contract entries, then the complete applicable CTest suite:
 
 ```powershell
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
-	-R '^(Engine\.FrameStageContracts|Repository\.(SourceReviewAuditParser|StageOwnershipContracts|FrameStageReplayComparison|SourceReviewQuality))$' `
+	-R '^(Engine\.FrameStageContracts|Repository\.(SourceReviewAuditParser|SourceReviewContinuationContracts|StageOwnershipContracts|FrameStageReplayComparison|SourceReviewQuality))$' `
 	--no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Frame-stage/source-quality contracts failed.' }
+```
+
+`Editor.WorkspaceLayoutDecodeAssertions` builds the shared production layout
+decoder in one translation unit with assertions enabled, including in optimized
+configurations. It requires exactly 14 checks and isolates an intentional JSON
+assertion in a bounded child process. It links no Engine or editor DLL; this
+qualifies the decoder rather than a complete Debug editor session. After the
+same configure, build and install workflow, run it with:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R '^Editor\.WorkspaceLayoutDecodeAssertions$' --no-tests=error --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Assertions-enabled layout decoding failed.' }
+```
+
+`Editor.WorkspaceLayoutSections` runs four regression cases through the shared
+production section dispatcher. Missing or malformed window visibility data must
+still allow a valid Scene View camera to restore; invalid root or camera data
+must preserve the current state. After the same build and install steps, run:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R '^Editor\.WorkspaceLayoutSections$' --no-tests=error --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Independent workspace section restore failed.' }
 ```
 
 [RendererFrameStages.md](RendererFrameStages.md) describes the actual coroutine
@@ -1317,6 +1399,19 @@ contains installed replay launch/comparison commands, trusted provenance joins,
 source-quality `Portable` versus independent `PrivateProof`, and the six-case
 requested-size synthetic cost fixture. The cost fixture pins its tool-adjacent
 DLL under `Tests/Tools/CodeQuality`; the editor runtime copy is a different path.
+
+`Repository.SourceReviewQuality` allows up to ten minutes for its joined current
+and historical provenance checks. This is a source-identity contract, not a
+throughput benchmark; the timeout does not relax any validation rule.
+
+The maintained source-quality entry joins exact historical comment accounting
+with reviewed current file changes, the current strict source scan and every
+current stage candidate. It requires the pinned historical Git objects or the
+explicit source archive described in the tools guide. Historical accounting has
+its own receipt because an obsolete stage snapshot contains one inconsistent
+header byte pin; the current stage audit remains mandatory. The continuation
+contract entry checks stale, missing and misleading review records with the
+actual lexer and enforces a nonempty case floor.
 
 Portable source-quality success does not execute ignored before/after token
 proof. Protocol/lexical checks do not establish installed GPU/editor or timing
@@ -1486,6 +1581,15 @@ mock-backend portability, opt-in render diagnostics, backend frame breakdown
 categories, render worker task group planning, Vulkan recording-batch planning,
 thread-local recording context ownership, and stale backend batch rejection. The
 complete renderer-threading checks also cover worker-owned render preparation,
+small-scene inline fallbacks, resource readiness fallbacks, upload budgets,
+deferred retirement safety, multi-queue readiness reports, non-fatal failure
+containment, randomized pass validation, and visible-frame versus queued
+background cost accounting. The backend submit-path checks split RHI begin,
+per-view submit, and RHI end work into named backend stages so acquire, fence,
+recording, descriptor, transition, submit, present, and forced-idle stalls can
+be diagnosed directly. The editor suite also checks that closing Scheduler
+Diagnostics disables render graph diagnostic collection with the ECS and
+scripting diagnostic toggles.
 
 Renderer device-recovery coverage lives in `Tests/Engine/Renderer`,
 `Tests/Engine/Platform`, `Tests/Engine/Runtime`, and the editor automation,
@@ -1524,15 +1628,7 @@ For CTest-based validation, run:
 ctest --test-dir out/build/Debug -R "Engine.Renderer|Engine.VirtualGeometry|Engine.Resource|Engine.SystemScheduler" --output-on-failure -C Debug
 ctest --test-dir out/build/Debug -R "Editor.VirtualGeometry|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
 ```
-small-scene inline fallbacks, resource readiness fallbacks, upload budgets,
-deferred retirement safety, multi-queue readiness reports, non-fatal failure
-containment, randomized pass validation, and visible-frame versus queued
-background cost accounting. The backend submit-path checks split RHI begin,
-per-view submit, and RHI end work into named backend stages so acquire, fence,
-recording, descriptor, transition, submit, present, and forced-idle stalls can
-be diagnosed directly. The editor suite also checks that closing Scheduler
-Diagnostics disables render graph diagnostic collection with the ECS and
-scripting diagnostic toggles.
+
 
 The resource residency checks live under `Tests/Engine/Resource` with an editor
 round-trip check under `Tests/Editor/Export`. They validate loaded RAM/VRAM
@@ -1542,8 +1638,8 @@ serialization. These tests intentionally do not inspect persistent Vulkan or
 pipeline disk caches because those files are backend cache implementation
 details, not loaded resource residency.
 
-Profiler stats and render-diagnostic relocation coverage for
-GPU profiler statistics coverage lives in the existing engine/editor harnesses.
+Profiler statistics and render-diagnostic relocation coverage lives in the
+existing engine/editor harnesses.
 Use this pass when changing the Game View stats overlay, Profiler timing stream
 presentation, Profiler toolbar, Resource Residency virtual geometry diagnostic
 tables, or automation diagnostics contracts:
@@ -1688,23 +1784,25 @@ For capability validation page-source diagnostics, build both native test target
 registry filters that match the editor-facing contract names:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
 ```
 
 The literal task checkpoint
 `ctest --test-dir out/build/Debug -C Debug -R VirtualGeometry.Editor --output-on-failure`
 currently matches no top-level CTest target. Treat the registry filters above
-as the authoritative capability validation validation until CTest target names are expanded.
+as the focused registry workflow. Each corrected filter matches current registered
+names; the native harness fails on zero selected cases. Registry enumeration and
+CTest listing alone do not prove those cases passed.
 
 For capability validation asset cook/runtime integrity, run the inspector, runtime loader, and
 automation slices before the asset-pipeline CTest checkpoint:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
 ctest --test-dir out/build/Debug -C Debug -R AssetPipeline --output-on-failure
 ```
 
@@ -1716,8 +1814,8 @@ For capability validation page-streaming performance and memory gates, run the p
 before the broad VirtualGeometry label checkpoint:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
 ctest --test-dir out/build/Debug -C Debug -L VirtualGeometry --output-on-failure
 ```
 
@@ -2129,8 +2227,9 @@ The Profiler idle-overhead gate uses the same installed editor, project,
 disposable dense-animation scene, and fixed port for both sides of every pair.
 It alternates closed/open-idle order, records unlimited frame history, and
 reports every pair for diagnosis, then requires the median matched-pair Engine
-CPU median and p95 deltas to remain within two percent. Run five 60-second pairs
-and retain the generated summaries and manifest:
+CPU median and p95 deltas to remain within two percent. Run five pairs with
+30 seconds per condition (300 seconds total), matching the canonical runner
+guard, and retain the generated summaries and manifest:
 
 ```powershell
 & .\Tests\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
@@ -2295,7 +2394,7 @@ first:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Profiling/CheckProfilerSource.ps1 `
-    -RepositoryRoot . -InstallRoot out/install/RelWithDebInfo
+    -RepositoryRoot . -InstallRoot out/build/RelWithDebInfo/Build
 ```
 
 Run a clean-input dry run, then the canonical five-run installed-editor
@@ -2304,12 +2403,12 @@ comparison (use the five-minute canonical duration for release evidence):
 ```powershell
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
     -Project <project> -Scene <scene> -Manifest Tests/Tools/FramePublication/workloads.json `
-    -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+    -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
     -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
     -DurationSeconds 60 -DryRun
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
     -Project <project> -Scene <scene> -Manifest Tests/Tools/FramePublication/workloads.json `
-    -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+    -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
     -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
     -DurationSeconds 300
 ```
@@ -2345,7 +2444,7 @@ cmake --build out/build/RelWithDebInfo --target install --parallel 2
 # Run the exact-scene one-minute JournalV1 smoke and reopen/count check.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 5 `
   -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/smoke
 
@@ -2353,6 +2452,8 @@ cmake --build out/build/RelWithDebInfo --target install --parallel 2
 & .\Tests\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
   -InstalledEditor <installed-editor> -Project <project> -PairCount 5 `
   -CaptureDurationSeconds 30 -OutputDirectory out/evidence/profiler-rework/open-idle
+
+```
 
 Each paired condition is interleaved in short closed/open blocks and then
 aggregated by condition, preserving 30 seconds of valid samples per state (300
@@ -2364,13 +2465,16 @@ fail closed. Open-idle acceptance uses signed one-sided deltas: median and P95
 overhead must each be at most 2%; negative values indicate an improvement and
 remain passing.
 
+```powershell
 # Run a closed/open recording pair; the window opens only in the final minute.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode MatchedWindowOpen -Runs 1 `
   -DurationSeconds 300 -OpenProfilerAtSeconds 240 `
   -OutputDirectory out/evidence/profiler-rework/late-window
+
+```
 
 Late-window evidence contains five same-run closed/open pairs. Each condition
 sets visibility, waits one second for the completed UI state, then collects 30
@@ -2406,6 +2510,7 @@ into six equal 10-second blocks. Every block must contain at least 30 valid
 samples; the recording-overhead criterion compares the median block median/P95 values and fails closed on
 missing or unequal blocks. Raw samples remain available for diagnosis.
 
+```powershell
 # Run one five-minute profiler capture that also serves as the changing-animation
 # visual soak, without adding a second sequential soak or saving Scene.tescene.
 & .\Tests\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
@@ -2421,19 +2526,21 @@ missing or unequal blocks. Raw samples remain available for diagnosis.
 # three-percent median/P95 gate; this smoke is not the canonical stability run.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode MatchedRecordingComparison -Runs 1 `
   -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/overhead-smoke
 ```
 
+```powershell
 # Run the single canonical five-minute detailed recording. Fixed 60-second health
 # checkpoints measure protected collection cost per produced frame, backlog/loss,
 # memory, and Finish evidence; raw Engine CPU first/final windows are diagnostic.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/install/RelWithDebInfo -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 1 `
   -DurationSeconds 300 -OutputDirectory out/evidence/profiler-rework/final
+```
 
 Installed identity hashes cover both `TerraEngine-Editor.exe` and the matching
 `TerraEngine.dll`; a missing engine DLL or a changed sibling package
@@ -2543,7 +2650,7 @@ After installation, run the native contract executable through the wrapper:
 
 ```powershell
 & '.\Tests\Tools\FramePublication\RunFramePublicationContracts.ps1' `
-	-InstallRoot '.\out\install\RelWithDebInfo' `
+	-InstallRoot '.\out\build\RelWithDebInfo\Build' `
 	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
 	-OutputDirectory '.\out\evidence\frame-publication\contracts'
 ```
@@ -2555,7 +2662,7 @@ hash; the tool refuses to infer it or use multiple editor processes:
 & '.\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1' `
 	-Project $framePubProject -Scene $framePubScene -CameraHash $framePubCameraHash `
 	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
-	-InstallRoot '.\out\install\RelWithDebInfo' `
+	-InstallRoot '.\out\build\RelWithDebInfo\Build' `
 	-OutputDirectory '.\out\evidence\frame-publication\candidate' -Runs 5 -WarmupSeconds 30 -DurationSeconds 60
 ```
 
@@ -3115,7 +3222,7 @@ Installed GPU and physical-pointer acceptance requires an unlocked Windows
 desktop and a fresh owned directory:
 
 ```powershell
-& out/build/RelWithDebInfo/Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/texture-ui-live-fresh -AllowLiveAcceptance
+pwsh -NoProfile -File out/build/RelWithDebInfo/Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/texture-ui-live-fresh -AllowLiveAcceptance
 ```
 
 The installed runner verifies its artifact seal, matching native DLL closure,
@@ -3361,3 +3468,183 @@ acceptance requires All, exact installed manifest hashes, normal watched exits,
 real C# callbacks and positive-delta playback frames. Missing provider/device,
 callbacks or selections are failures. See `Tests/Tools/Audio/README.md` for
 prerequisites, retained receipts and the clean-checkout workflow.
+
+## Review-finding remediation
+
+The 069 remediation adds `Engine.ReviewRemediation` and
+`Editor.ReviewRemediation`. Configure, build, and install from a clean checkout
+in the supported developer shell before invoking them:
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.ReviewRemediation$' --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'Review regression failed.' }
+```
+
+The Windows authoring selection requires at least 11 engine cases. The
+simulation selection `Engine.ReviewSimulation` requires 99 CPU cases, and the
+combined editor review runner requires 79 cases.
+The dedicated editor runner links the real editor implementations and owns
+private CPU-side ImGui contexts; these cases do not establish GPU rendering
+acceptance. The full-production review runner is installed at
+`out/build/RelWithDebInfo/Build/Editor/TerraEngine-EditorReviewTests.exe` beside
+the editor's complete SDK and managed closure. Native compiler and managed-host ABI children are installed beside
+their corresponding test executables. Empty selections, skipped required cases,
+and watchdog termination cannot establish acceptance.
+
+GPU cases require `-DTERRAENGINE_ENABLE_NATIVE_REVIEW_TESTS=ON` at configure
+time, followed by compile/install and the `Engine.ReviewSimulationNative`
+CTest selection. Its floor is nine explicitly enabled watched cases. Default
+unfiltered engine runs keep native cases disabled. This lane needs an observed
+supported hardware device, validation layer, matching shader packages and real
+completed-fence output; an unavailable case cannot count as acceptance.
+The optional `TERRAENGINE_VULKAN_REVIEW_DEVICE` environment variable selects an
+exact Vulkan-reported device name. Set it in the validation environment when
+multiple hardware adapters match, or when qualifying a specific adapter. Unset
+or empty leaves the name/vendor unrestricted; the fixture still rejects an
+ambiguous match and retains hardware, validation and required-feature checks.
+Keep the observed host selection local rather than committing a machine pin.
+Dedicated terrain shader instruction fixtures declare their descriptor
+relocation separately from the installed renderer route, whose absence remains
+an explicit limitation. See the retained per-case receipts for proof scope.
+
+The virtual-geometry visibility record now uses its V2 encoding: direct
+perspective weights and the winning raster depth travel together. Raster,
+resolve, and composite packages must be rebuilt and installed as one cohort;
+mixing old and current packages is unsupported. The signed-W native case runs
+the actual raster and resolve shaders, then checks the shared reconstruction
+helper against an independent geometric oracle, including a tiny positive W.
+
+Two authoring-state regressions extend the original editor runner. Select
+`Editor.Animation.RetargetAuthoring.StarterCancelRestoresBoundInactiveState`
+and `Editor.Animation.ControllerAuthoring.NoOpCommitLeavesNextEditUsable`
+through `Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1`, requiring two
+cases. The separate PowerShell 7
+`Tests/Tools/HeadlessExport/TestEvidenceContainment.ps1` exercises three rejected
+evidence/output overlaps against the installed export executable; supply an
+isolated project copy and a fresh work directory as its parameter help describes.
+
+The export overlay preserves destination-directory identity and unmentioned
+files. It replaces individual complete files and restores its published prefix
+on ordinary publication failure. This does not promise simultaneous visibility
+of the entire directory tree or crash/power-loss recovery.
+
+The input and lifetime selection `Engine.ReviewLifetime` requires 60 CPU cases.
+Its process children isolate logger shutdown and bounded ancestry failures; a
+timed-out ancestry child is a failing liveness assertion. Decoder and numeric
+observers stop before unsafe vendor calls or conversions, rather than executing
+malformed input to obtain a crash.
+
+`Engine.ReviewLifetimeNative` requires 16 explicitly enabled GPU cases. Its
+renderer cases use the real installed Engine, presentation window and shader
+closure. CTest supplies `TERRAENGINE_REVIEW_INSTALL_ROOT` pointing at the
+maintained `Build` directory. A direct invocation must supply that absolute
+directory too. The shared mesh, skeleton and clip fixtures are generated by the
+actual package importer and compilers, baked twice, hash-compared and installed
+beside the engine test executable automatically.
+
+Three private Vulkan test friends read `Impl`. Their source-local validation
+definitions must match the correctness-enabled Engine DLL; compile guards reject
+a different layout. Keep those definitions with the registered source files.
+Compiler/reflection checks alone do not establish device execution, and a setup
+failure is not a reproduced renderer defect.
+
+
+The November 11 CodeRabbit follow-up regressions cover secondary physics-body
+removal at protected boundaries, isolated synchronous cooking diagnostics,
+mesh-specific CPU animation offsets, noncommuting additive rotations on CPU and
+native Vulkan, deferred zero-extent presentation startup, and in-memory profiler
+workload quarantine. Configure, build and install using the workflow above before
+running `ctest --test-dir out/build/RelWithDebInfo --output-on-failure`.
+The native lifetime selection includes actual startup rollback/retry and genuine
+texture-upload failure controls; the native simulation selection includes fenced
+additive-shader readback. A hidden native window still requires a working desktop
+and the configured hardware/validation prerequisites.
+
+`Repository.ReviewEvidence.ResolvedWarmup` requires 25 bounded protocol cases, including observed
+and unavailable recovery probes. `Repository.ReviewEvidence.ToolchainPaths` requires seven exact
+verifier path-policy cases. These scripts execute maintained AST functions with
+fixture inputs; they do not claim live editor recovery or native performance.
+The complete `SourceReviewQuality` audit additionally executes the explicitly
+selected Python and Git and rechecks their byte pins; executable aliases may be
+symlinks/junctions, while source, artifact and output redirection stays rejected.
+
+The current review regressions also exercise parented rigid-body and virtual-character
+publication through the protected physics flush, authoring-cache invalidation after
+accepted membership ingress, same-source saves through a directory junction, duplicate
+mesh/page allocator rejection, nested ImGui contexts, and deferred editor startup with
+pending recreation intent. These run in the existing simulation, scene-save and editor
+review selections. The membership-cache case tests ingress and snapshot reuse; it does
+not substitute callbacks for a native body-transfer acceptance run.
+
+`Repository.ReviewEvidence.DisposableScene` requires 11 actual filesystem protocol
+cases, including all four low-poly adapter workloads and an unknown-workload refusal.
+`Repository.ReviewPortability.BuildInstall` requires six protocols. Its ELF cleanup case
+uses bundled ELF bytes and CMake's actual ELF editor, preserving originals, removing
+successful scratch copies and retaining failed comparisons. RUNPATH inspection is
+explicitly substituted in that bounded case; Linux build/install acceptance remains
+a separate platform gate.
+
+`Tools.UnboundedScenes.UnsupportedSoakFailsImmediately` invokes the installed-tool
+producer target with both five-minute and six-hour requests under ten-second child
+timeouts. The current producer collects CPU contracts only. It writes an explicit
+`unavailable` artifact and exits with code 5 immediately for soak requests, rather
+than spending the requested duration on work that cannot qualify native stability.
+Native rendered-frame, resident-memory and bounded high-water qualification still
+requires a live runtime collector; CPU timing and deterministic hashes do not close
+that acceptance gap. Run this regression after the normal configure/build/install:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -R UnsupportedSoak --output-on-failure
+```
+
+On Windows, `Repository.ReviewEvidence.OwnedJobMembership` compiles the actual
+`OwnedProcess.cpp` membership loop with only its kernel query substituted. Its
+six cases cover incomplete snapshots, missing required-count information, larger
+lists, continuous churn, terminal errors and the shared deadline. Windows exposes
+both required and returned PID counts in its [job-membership contract](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_process_id_list).
+The capture loop requires complete membership, grows checked buffer headroom and
+retries within its existing eight-attempt/deadline limits. Run this protocol from
+the documented x64 Visual Studio developer shell. `Engine.OwnedProcess`,
+`Engine.ReviewLifetime` and both native review groups separately exercise real
+process/handle settlement; the kernel-query substitute is not native acceptance.
+
+Linux test builds require a runnable GNU or LLVM `readelf` from the compiler toolchain. Set `CMAKE_READELF` in the toolchain file when automatic discovery is unavailable; configuration rejects a missing or unusable tool before building because installation uses it to verify ELF runtime paths.
+
+## Closing a review round
+
+Give each review a fixed repair scope and retain evidence for rejected findings.
+Close that scope after focused regression tests, the integrated compile, the
+install target, and the full applicable CTest suite pass. Fix failures caused by
+these repairs, then rerun the affected checks. A new broad review is not a
+completion gate, and zero comments from repeated fresh scans is not required.
+Later review comments belong to a new work item with concrete reproduction or
+source evidence, severity, and an explicit scope.
+
+Run the final checks from an x64 Visual Studio developer shell on Windows:
+
+```powershell
+cmake --build --preset RelWithDebInfo --target install --parallel 2
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+```
+
+Installation precedes CTest because several maintained tests execute installed
+tools together with their adjacent runtime dependencies. The install tree is
+`out/build/RelWithDebInfo/Build`; do not use a stale tree from an earlier build.
+This round's validation does not qualify AAA performance or a new long soak.
+
+Interactive prefab reset prepares bounded source bytes and concrete values on
+the shared pool. The protected editor boundary checks the original scene/object
+observations before atomically replacing the branch. Terrain collision cooking
+also runs without a UI-thread join: Play stays stopped with
+`play.state.pendingTransition = "playing"` until preparation completes. Stop
+cancels pending entry; stale terrain roots are discarded before adoption at the
+existing Before Physics boundary.
+
+Physics frame membership callbacks support pre-admission objects. A live
+system-owned body or character transfer rejects before callbacks and retains
+source authority. Native provider transfer, connected constraint ownership, and
+rollback require a separate typed implementation; successful callback return
+values cannot claim that those owners were released.

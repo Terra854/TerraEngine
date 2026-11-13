@@ -1,14 +1,26 @@
 // AnimationBlend.comp.hlsl - Bounded blend/layer/mask accumulation for local poses.
 #include "AnimationCodec.hlsli"
 
+// HLSL vector multiplication is component-wise. Quaternion composition needs
+// the Hamilton product in the stored xyzw convention.
+float4 TeHamiltonProduct(float4 left, float4 right)
+{
+	return float4(left.w * right.xyz + right.w * left.xyz + cross(left.xyz, right.xyz),
+		left.w * right.w - dot(left.xyz, right.xyz));
+}
+
 TeAnimationPose TeBlendPose(TeAnimationPose basePose, TeAnimationPose source, TeAnimationPose reference, float weight, bool additive)
 {
 	weight = saturate(weight);
 	if (!additive) { basePose.translation.xyz = lerp(basePose.translation.xyz, source.translation.xyz, weight); basePose.scale.xyz = lerp(basePose.scale.xyz, source.scale.xyz, weight); basePose.rotation = TeNormalizeQuaternion(lerp(basePose.rotation, dot(basePose.rotation, source.rotation) < 0.0f ? -source.rotation : source.rotation, weight)); return basePose; }
 	basePose.translation.xyz += (source.translation.xyz - reference.translation.xyz) * weight;
 	basePose.scale.xyz *= lerp(float3(1.0f, 1.0f, 1.0f), source.scale.xyz / max(abs(reference.scale.xyz), float3(1.0e-6f, 1.0e-6f, 1.0e-6f)), weight);
-	const float4 delta = TeNormalizeQuaternion(source.rotation * float4(-reference.rotation.xyz, reference.rotation.w));
-	basePose.rotation = TeNormalizeQuaternion(basePose.rotation * TeNormalizeQuaternion(lerp(float4(0.0f, 0.0f, 0.0f, 1.0f), delta, weight)));
+	// Right-applied deltas must be reference-local: reference * delta = source.
+	float4 delta = TeNormalizeQuaternion(TeHamiltonProduct(float4(-reference.rotation.xyz, reference.rotation.w), source.rotation));
+	// q and -q encode the same rotation; interpolate the shortest hemisphere.
+	if (delta.w < 0.0f) delta = -delta;
+	basePose.rotation = TeNormalizeQuaternion(TeHamiltonProduct(basePose.rotation,
+		TeNormalizeQuaternion(lerp(float4(0.0f, 0.0f, 0.0f, 1.0f), delta, weight))));
 	return basePose;
 }
 

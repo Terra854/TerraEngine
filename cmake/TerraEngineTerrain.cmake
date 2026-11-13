@@ -89,6 +89,9 @@ set(_TERRAENGINE_TERRAIN_PHYSICS_FILES
 	Engine/Physics/Terrain/TerrainCollisionSystem.h
 	Engine/Physics/Terrain/TerrainHeightFieldActiveRect.cpp
 	Engine/Physics/Terrain/TerrainHeightFieldActiveRect.h
+	# Shared immutable neighbor capture and worker-only derived collision cooking.
+	Engine/Physics/Terrain/TerrainCollisionSeamPreparation.cpp
+	Engine/Physics/Terrain/TerrainCollisionSeamPreparation.h
 )
 foreach(_terrain_file IN LISTS _TERRAENGINE_TERRAIN_PHYSICS_FILES)
 	if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_terrain_file}")
@@ -211,6 +214,7 @@ set(_TERRAENGINE_TERRAIN_EDITOR_TEST_FILES
 	Tests/Editor/Terrain/TerrainAssetDatabaseTests.cpp
 	Tests/Editor/Terrain/TerrainBrushPresetStoreTests.cpp
 	Tests/Editor/Terrain/TerrainCreationImportTests.cpp
+	Tests/Editor/Terrain/TerrainDescriptorFailureTests.cpp
 	Tests/Editor/Terrain/TerrainSculptWorkflowTests.cpp
 	Tests/Editor/Terrain/TerrainHistoryTests.cpp
 	Tests/Editor/Terrain/TerrainSaveRecoveryTests.cpp

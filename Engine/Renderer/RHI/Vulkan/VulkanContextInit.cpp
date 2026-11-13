@@ -12,6 +12,19 @@
 #include <map>
 #include <utility>
 
+namespace
+{
+	// Only callers that already own the pass's fence/idle retirement proof may
+	// remove its compatible pipeline. Erasing at recreation time would be early.
+	void RetireCompositeForPass(VkDevice device, std::unordered_map<VkRenderPass, VkPipeline>& pipelines, VkRenderPass pass)
+	{
+		const auto found = pipelines.find(pass);
+		if (found == pipelines.end()) return;
+		if (found->second != VK_NULL_HANDLE) vkDestroyPipeline(device, found->second, nullptr);
+		pipelines.erase(found);
+	}
+}
+
 bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Spin up instance, device, swapchain, and default resources so rendering can begin.
 	this->windowSystem = &windowSystem;
@@ -70,7 +83,11 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	allocatorInfo.instance = instance;
 	allocatorInfo.pVulkanFunctions = &vulkanFunctions;
 	
-	vmaCreateAllocator(&allocatorInfo, &allocator);
+	if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS)
+	{
+		RecordInitializationFailure("VK_ERROR_INITIALIZATION_FAILED", "Vulkan allocator creation");
+		return false;
+	}
 
 
 	if (!CreateSwapChain(windowSystem)) return false;
@@ -96,9 +113,10 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	for (auto& view : submittedHiZWritesByViewFrame) for (auto& submitted : view) submitted.Reset();
 
 
-	if (vrsFeatures.pipelineFragmentShadingRate) {
+	if (vrsFeatures.attachmentFragmentShadingRate) {
 		vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
-		TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+		if (vrs.view != VK_NULL_HANDLE)
+			TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
 	}
 
 
@@ -139,12 +157,10 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 			CreateIndirectDrawResources();
 		} catch (const std::exception& e) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create bootstrap resources: " << e.what());
-			Cleanup();
 			return false;
 		}
 		if (!textureDescriptorBootstrap.RequiredWritesComplete()) {
 			TERRAENGINE_LOG(LogLevel::Error, "Vulkan texture descriptor bootstrap did not publish every required fallback.");
-			Cleanup();
 			return false;
 		}
 		// Cold pyramids have no completed depth yet. Populate every sampled-image
@@ -152,7 +168,6 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 		for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
 			if (!UpdateGlobalHiZ(frameIndex)) {
 				TERRAENGINE_LOG(LogLevel::Error, "Vulkan Hi-Z descriptor bootstrap has no valid fallback owner.");
-				Cleanup();
 				return false;
 			}
 		}
@@ -918,6 +933,13 @@ void VulkanContext::Impl::DestroyVulkanDeformationComputePipelines()
 
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	// A completed cleanup removed every native root. Repeated owner rollback
+	// must not pass stale/default handles to a destroyed allocator or device.
+	if (instance == VK_NULL_HANDLE && device == VK_NULL_HANDLE && allocator == VK_NULL_HANDLE)
+	{
+		initialized = false;
+		return;
+	}
 	textureDescriptorBootstrap.Reset();
 	defaultTextureShaderReadable = false;
 	// Shutdown/device recovery invalidates depth ownership even if the native
@@ -1315,9 +1337,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		vkDestroySampler(device, defaultMaterialMaskTexture.sampler, nullptr);
 		vkDestroyImageView(device, defaultMaterialMaskTexture.view, nullptr);
 	}
-	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
-	vmaDestroyImage(allocator, defaultNormalTexture.image, defaultNormalTexture.allocation);
-	vmaDestroyImage(allocator, defaultMaterialMaskTexture.image, defaultMaterialMaskTexture.allocation);
+	if (allocator != VK_NULL_HANDLE)
+	{
+		vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
+		vmaDestroyImage(allocator, defaultNormalTexture.image, defaultNormalTexture.allocation);
+		vmaDestroyImage(allocator, defaultMaterialMaskTexture.image, defaultMaterialMaskTexture.allocation);
+	}
+	defaultTexture = {}; defaultNormalTexture = {}; defaultMaterialMaskTexture = {};
 
 	// UI Rendering cleanup
 
@@ -1640,7 +1666,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 
 	if (device) {
 		vkDestroyImageView(device, depthImageView, nullptr);
-		vmaDestroyImage(allocator, depthImage, depthImageAllocation);
+		if (allocator != VK_NULL_HANDLE) vmaDestroyImage(allocator, depthImage, depthImageAllocation);
 		depthImageView = VK_NULL_HANDLE;
 		depthImage = VK_NULL_HANDLE;
 		depthImageAllocation = VK_NULL_HANDLE;
@@ -2033,7 +2059,25 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	presentationFeaturesQuery.pNext = &supportedPresentationFenceFeatures;
 	vkGetPhysicalDeviceFeatures2(physicalDevice, &presentationFeaturesQuery);
 
-	vrsFeatures.attachmentFragmentShadingRate = supportedVrsFeatures.attachmentFragmentShadingRate;
+	// This optional attachment also serves as a typed R8 compute storage image.
+	// Qualify that exact format/usage, without disabling independent pipeline or
+	// primitive shading-rate features and without a blanket extended-format bit.
+	VkFormatProperties vrsFormatProperties{};
+	vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_R8_UINT, &vrsFormatProperties);
+	const VkFormatFeatureFlags vrsRequiredFormatFeatures = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+		| VK_FORMAT_FEATURE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+	VkImageFormatProperties vrsImageProperties{};
+	const VkResult vrsImageSupport = vkGetPhysicalDeviceImageFormatProperties(physicalDevice,
+		VK_FORMAT_R8_UINT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+		VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR,
+		0u, &vrsImageProperties);
+	const bool vrsAttachmentSupported = supportedVrsFeatures.attachmentFragmentShadingRate
+		&& (vrsFormatProperties.optimalTilingFeatures & vrsRequiredFormatFeatures) == vrsRequiredFormatFeatures
+		&& vrsImageSupport == VK_SUCCESS && vrsImageProperties.maxMipLevels >= 1u
+		&& vrsImageProperties.maxArrayLayers >= 1u && (vrsImageProperties.sampleCounts & VK_SAMPLE_COUNT_1_BIT);
+	vrsFeatures.attachmentFragmentShadingRate = vrsAttachmentSupported ? VK_TRUE : VK_FALSE;
+	if (supportedVrsFeatures.attachmentFragmentShadingRate && !vrsAttachmentSupported)
+		TERRAENGINE_LOG(LogLevel::Warning, "Optional VRS attachment unavailable: R8 storage/attachment usage is unsupported.");
 	vrsFeatures.pipelineFragmentShadingRate = supportedVrsFeatures.pipelineFragmentShadingRate;
 	vrsFeatures.primitiveFragmentShadingRate = supportedVrsFeatures.primitiveFragmentShadingRate;
 
@@ -2156,7 +2200,11 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchai
 	VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapChainSupport.formats);
 	VkPresentModeKHR presentMode = ChooseSwapPresentMode(swapChainSupport.presentModes);
 	VkExtent2D extent = ChooseSwapExtent(swapChainSupport.capabilities, windowSystem);
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	if (!initialized && forceZeroStartupExtentForValidation) extent = {0u, 0u};
+#endif
 	if (extent.width == 0 || extent.height == 0) {
+		if (!initialized) initializationDeferred = true;
 		// Minimized windows are a normal presentation state. Return to the frame
 		// loop and retry after a later resize event instead of blocking in GLFW.
 		presentationLifecycle.PublishRecreation(
@@ -2971,7 +3019,12 @@ void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResource
 			[this](VkFramebuffer framebuffer) { vkDestroyFramebuffer(device, framebuffer, nullptr); },
 			[this](VkRenderPass pass) { vkDestroyRenderPass(device, pass, nullptr); });
 		for (VkFramebuffer framebuffer : bundle.framebuffers) if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, framebuffer, nullptr);
-		if (bundle.renderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, bundle.renderPass, nullptr);
+		if (bundle.renderPass != VK_NULL_HANDLE)
+		{
+			// This bundle reached the existing completed-present/idle boundary.
+			RetireCompositeForPass(device, virtualGeometryCompositePipelines, bundle.renderPass);
+			vkDestroyRenderPass(device, bundle.renderPass, nullptr);
+		}
 		for (VkImageView view : bundle.imageViews) if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
 		if (bundle.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, bundle.depthView, nullptr);
 		for (VkSemaphore semaphore : bundle.acquireByFrame) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
@@ -3600,7 +3653,12 @@ void VulkanContext::Impl::CleanupSwapChain() {
 
 		for (auto framebuffer : framebuffers) vkDestroyFramebuffer(device, framebuffer, nullptr);
 
-		if (renderPass) vkDestroyRenderPass(device, renderPass, nullptr);
+		if (renderPass)
+		{
+			// CleanupSwapChain is called only by device-idle/lost Cleanup.
+			RetireCompositeForPass(device, virtualGeometryCompositePipelines, renderPass);
+			vkDestroyRenderPass(device, renderPass, nullptr);
+		}
 
 		for (auto imageView : swapchainImageViews) vkDestroyImageView(device, imageView, nullptr);
 
@@ -3708,7 +3766,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		candidateCreated = swapchainCreated && CreateImageViews();
 		if (candidateCreated && !editorMode) {
 			candidateCreated = CreateDepthResources();
-			if (candidateCreated && vrsFeatures.pipelineFragmentShadingRate) {
+			if (candidateCreated && vrsFeatures.attachmentFragmentShadingRate) {
 				vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
 				candidateVrsCreated = vrs.view != VK_NULL_HANDLE;
 				if (candidateVrsCreated) {

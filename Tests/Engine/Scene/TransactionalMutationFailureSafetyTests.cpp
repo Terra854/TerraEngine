@@ -150,7 +150,67 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterTransactionalMutationFailureSafetyTests(TestRegistry& registry) {
+		registry.Add("Engine.SceneMutationFailureSafety.RestoreReplacesProjectedComponentPresence", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			auto fixture = MakeTransactionalMutationFixture();
+			fixture.objects.AddComponent<MeshRenderComponent>(fixture.root);
+			auto snapshot = Serializer::SerializeObject(fixture.root.EntityId());
+			snapshot["components"].erase("MeshRenderComponent");
+			auto tx = TransactionalMutationBuilder("restore-component-presence", TransactionOrigin::Test)
+				.ObserveScene(fixture.objects).DeleteObject(fixture.rootId).Build();
+			TransactionWriteOperation restore;
+			restore.kind = TransactionWriteKind::RestoreObjectSnapshot;
+			restore.target = ExistingObject(fixture.rootId); restore.serializedObject = snapshot;
+			tx.writeSet.operations.push_back(std::move(restore));
+			TransactionWriteOperation add;
+			add.kind = TransactionWriteKind::AddComponent; add.target = ExistingObject(fixture.rootId);
+			add.componentName = "MeshRenderComponent"; tx.writeSet.operations.push_back(std::move(add));
+			// The old component stays physically alive until commit; projected presence
+			// must follow the replacement snapshot rather than that deferred storage.
+			const auto result = CommitTransaction(fixture.objects, tx);
+			const auto restored = fixture.objects.getObject(fixture.rootId);
+			context.Expect(result.status == TransactionStatus::Committed && restored
+				&& fixture.objects.GetComponent<MeshRenderComponent>(*restored),
+				"Delete/restore-without-component/add must commit using the replacement component set.");
+		});
 
+		registry.Add("Engine.SceneMutationFailureSafety.SnapshotReplacementPreservesIdentityAndRollsBack", [](TestContext& context) {
+			using namespace TerraEngine::Scene;
+			for(unsigned variant = 0; variant < 3U; ++variant) {
+				auto fixture = MakeTransactionalMutationFixture();
+				const auto child = fixture.objects.createObject("Stable Child"); fixture.objects.setParent(child, fixture.root);
+				const auto childId = fixture.objects.getUUID(child); const auto lifetime = fixture.objects.getObjectLifetimeGeneration(fixture.root);
+				auto snapshot = Serializer::SerializeObject(fixture.root.EntityId()); snapshot["name"] = "Reset Root";
+				(void)fixture.objects.PublishSceneChangePacket(); const auto before = Capture(fixture.objects);
+				auto tx = TransactionalMutationBuilder("snapshot-identity-replacement", TransactionOrigin::Test)
+					.ObserveScene(fixture.objects).ObserveObject(fixture.objects, fixture.rootId).ObserveObject(fixture.objects, childId).DeleteObject(fixture.rootId).Build();
+				TransactionWriteOperation restore; restore.kind = TransactionWriteKind::RestoreObjectSnapshot; restore.target = ExistingObject(fixture.rootId); restore.serializedObject = snapshot; tx.writeSet.operations.push_back(std::move(restore));
+				TransactionWriteOperation rename; rename.kind = TransactionWriteKind::SetName; rename.target = ExistingObject(fixture.rootId); rename.stringValue = "Final Root"; tx.writeSet.operations.push_back(std::move(rename));
+				// Inject after deletion and after restoration, exercising both rollback states.
+				if(variant != 0U) tx.injectedFailureOperationIndex = variant;
+				std::vector<TransactionResult> results;
+				if(variant == 0U) {
+					auto& queue = SceneMutationQueue::Instance(); queue.Clear(); queue.EnqueueTransaction(std::move(tx));
+					ExpectUnchanged(context, fixture.objects, before); // Deferred until the protected drain.
+					results = queue.DrainTransactions(fixture.objects);
+				} else {
+					// Direct protected commit distinguishes rollback from the drain owner
+					// deliberately publishing a new (possibly empty) boundary packet.
+					results.push_back(CommitTransaction(fixture.objects, tx));
+				}
+				context.Expect(results.size() == 1U, "Settle exactly one replacement.");
+				if(variant == 0U) {
+					const auto root = fixture.objects.getObject(fixture.rootId), restoredChild = fixture.objects.getObject(childId);
+					context.Expect(results[0].status == TransactionStatus::Committed && root && restoredChild && fixture.objects.getObjectName(*root) == "Final Root"
+						&& fixture.objects.getParent(*restoredChild) && fixture.objects.getParent(*restoredChild)->EntityId() == root->EntityId()
+						&& fixture.objects.getObjectLifetimeGeneration(*root) != lifetime, "Stable root/child UUIDs must resolve to complete replacement lifetimes.");
+				} else {
+					context.Expect(results[0].status == TransactionStatus::Rejected && fixture.objects.isObjectValid(fixture.root)
+						&& fixture.objects.getObjectLifetimeGeneration(fixture.root) == lifetime, "Rollback must recover the original owner and lifetime.");
+					ExpectUnchanged(context, fixture.objects, before);
+				}
+			}
+		});
 		registry.Add("Engine.SceneMutationFailureSafety.SameUuidReplacementPublishesNewLifetimeAtDrain", [](TestContext& context) {
 			auto fixture = MakeTransactionalMutationFixture(); const auto oldLifetime = fixture.objects.getObjectLifetimeGeneration(fixture.root);
 			(void)fixture.objects.PublishSceneChangePacket(); const auto oldPacket = fixture.objects.LoadPublishedSceneChangePacket().PublicationRevision();

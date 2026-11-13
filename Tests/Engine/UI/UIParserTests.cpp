@@ -2,7 +2,15 @@
 
 #include "UI/UIParser.h"
 
+#include <atomic>
 #include <cmath>
+#include <system_error>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -31,14 +39,43 @@ namespace TerraEngine::Tests {
 			return false;
 		}
 
-		// File API tests write tiny documents to a deterministic temp directory so
-		// they exercise ResourceManager-backed reads without requiring fixtures.
-		std::filesystem::path MakeParserTempDirectory() {
-			const std::filesystem::path directory = std::filesystem::temp_directory_path() / "TerraEngine_UIParserFileTests";
-			std::filesystem::remove_all(directory);
-			std::filesystem::create_directories(directory);
-			return directory;
-		}
+		// Each file case exclusively creates its own directory. A competing process
+		// or a stale directory is never removed just to make room for this test.
+		class ParserTempDirectory final {
+		public:
+			ParserTempDirectory() : tempRoot_(std::filesystem::absolute(std::filesystem::temp_directory_path()).lexically_normal()) {
+				// Remove a trailing separator so child-parent ownership compares exactly.
+				if (tempRoot_.filename().empty()) tempRoot_ = tempRoot_.parent_path();
+				static std::atomic<unsigned long long> nextSerial{0U};
+#if defined(_WIN32)
+				const auto processId = _getpid();
+#else
+				const auto processId = getpid();
+#endif
+				for (unsigned attempt = 0U; attempt < 4096U; ++attempt) {
+					const auto candidate = tempRoot_ / ("TerraEngine_UIParserFileTests-" + std::to_string(processId)
+						+ "-" + std::to_string(nextSerial.fetch_add(1U)));
+					std::error_code error;
+					if (std::filesystem::create_directory(candidate, error)) { directory_ = candidate; return; }
+					if (error && error != std::errc::file_exists) throw std::filesystem::filesystem_error("Cannot create parser fixture directory", candidate, error);
+				}
+				throw std::runtime_error("Cannot reserve an exclusive parser fixture directory.");
+			}
+			~ParserTempDirectory() {
+				// Only the exclusively created child of the resolved temporary root
+				// can be deleted. This also runs when a throwing assertion exits a case.
+				if (!directory_.empty() && directory_.is_absolute() && directory_.parent_path() == tempRoot_) {
+					std::error_code ignored;
+					std::filesystem::remove_all(directory_, ignored);
+				}
+			}
+			ParserTempDirectory(const ParserTempDirectory&) = delete;
+			ParserTempDirectory& operator=(const ParserTempDirectory&) = delete;
+			const std::filesystem::path& Path() const noexcept { return directory_; }
+		private:
+			std::filesystem::path tempRoot_;
+			std::filesystem::path directory_;
+		};
 
 		void WriteTextFile(const std::filesystem::path& path, const std::string& contents) {
 			std::ofstream stream(path, std::ios::binary);
@@ -47,6 +84,21 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterUIParserTests(TestRegistry& registry) {
+		registry.Add("Engine.UIParser.FileFixturesOwnIndependentDirectories", [](TestContext& context) {
+			const ParserTempDirectory first;
+			const auto originalFile = first.Path() / "owner.txt";
+			WriteTextFile(originalFile, "first case");
+			std::filesystem::path retired;
+			{
+				const ParserTempDirectory second;
+				retired = second.Path();
+				context.Expect(first.Path() != second.Path(), "Simultaneous fixtures require distinct directories.");
+				context.Expect(std::filesystem::exists(originalFile), "Creating another fixture must preserve its neighbor's files.");
+			}
+			context.Expect(!std::filesystem::exists(retired), "Fixture destruction should clean its own directory.");
+			context.Expect(std::filesystem::exists(originalFile), "Cleanup must preserve the other fixture's files.");
+		});
+
 		registry.Add("Engine.UIParser.ParseMarkupStringBuildsTypedTree", [](TestContext& context) {
 			const UIParser parser;
 			const UIElement::Ptr root = parser.ParseMarkupString(
@@ -135,7 +187,8 @@ R"(:root { width: 100%; height: 100%; }
 		});
 
 		registry.Add("Engine.UIParser.TryParseMarkupFileLoadsValidTempFile", [](TestContext& context) {
-			const std::filesystem::path directory = MakeParserTempDirectory();
+			const ParserTempDirectory temporary;
+			const std::filesystem::path& directory = temporary.Path();
 			const std::filesystem::path markupPath = directory / "valid.tuiml";
 			WriteTextFile(markupPath, R"(<UIRoot><Label id="title" text="From disk" /></UIRoot>)");
 
@@ -148,11 +201,11 @@ R"(:root { width: 100%; height: 100%; }
 			context.Expect(error.empty(), "TryParseMarkupFile should clear stale errors after a successful parse.");
 			context.Expect(root != nullptr && root->FindById("title") != nullptr, "TryParseMarkupFile should populate the parsed root tree.");
 
-			std::filesystem::remove_all(directory);
 		});
 
 		registry.Add("Engine.UIParser.TryParseStyleFileLoadsValidAndEmptyTempFiles", [](TestContext& context) {
-			const std::filesystem::path directory = MakeParserTempDirectory();
+			const ParserTempDirectory temporary;
+			const std::filesystem::path& directory = temporary.Path();
 			const std::filesystem::path stylePath = directory / "valid.tuss";
 			const std::filesystem::path emptyStylePath = directory / "empty.tuss";
 			WriteTextFile(stylePath, ".disk { width: 42px; opacity: 0.5; }");
@@ -175,11 +228,11 @@ R"(:root { width: 100%; height: 100%; }
 			context.Expect(error.empty(), "TryParseStyleFile should clear stale errors for empty stylesheet files.");
 			context.Expect(rules.empty(), "TryParseStyleFile should return no rules for an empty stylesheet.");
 
-			std::filesystem::remove_all(directory);
 		});
 
 		registry.Add("Engine.UIParser.TryParseFileApisClearOutputsOnFailure", [](TestContext& context) {
-			const std::filesystem::path directory = MakeParserTempDirectory();
+			const ParserTempDirectory temporary;
+			const std::filesystem::path& directory = temporary.Path();
 			const std::filesystem::path brokenMarkupPath = directory / "broken.tuiml";
 			const std::filesystem::path missingStylePath = directory / "missing.tuss";
 			WriteTextFile(brokenMarkupPath, "<UIRoot><Label></UIRoot>");
@@ -200,7 +253,6 @@ R"(:root { width: 100%; height: 100%; }
 			context.Expect(rules.empty(), "TryParseStyleFile should clear stale output rules after failure.");
 			context.Expect(ContainsText(styleError, missingStylePath.generic_string()), "TryParseStyleFile should include the missing path in its error.");
 
-			std::filesystem::remove_all(directory);
 		});
 
 		registry.Add("Engine.UIParser.ApplyStylesMergesSpecificityHoverAndInlineStyle", [](TestContext& context) {

@@ -1631,8 +1631,37 @@ void SceneViewWindow::DrawSceneToolbar()
 	PersistOverlayPreferences();
 }
 
+// This editor UI protected-boundary step reads the camera/viewport and writes
+// only local cache generations. It runs even when marker preparation is hidden;
+// immutable worker snapshots and live scene/component storage are untouched.
+void SceneViewWindow::UpdateSceneViewGeneration(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize)
+{
+	const glm::ivec4 viewport(
+		static_cast<int>(std::lround(viewportPos.x)),
+		static_cast<int>(std::lround(viewportPos.y)),
+		static_cast<int>(std::lround(viewportSize.x)),
+		static_cast<int>(std::lround(viewportSize.y)));
+	bool projectionChanged = viewport != m_LastMarkerViewport
+		|| m_LastMarkerCameraPosition != m_CameraPosition;
+	for (glm::length_t column = 0; column < 4 && !projectionChanged; ++column)
+	{
+		for (glm::length_t row = 0; row < 4; ++row)
+		{
+			projectionChanged = projectionChanged || m_LastMarkerViewProjection[column][row] != viewProjection[column][row];
+		}
+	}
+	if (projectionChanged)
+	{
+		m_LastMarkerViewProjection = viewProjection;
+		m_LastMarkerViewport = viewport;
+		m_LastMarkerCameraPosition = m_CameraPosition;
+		++m_MarkerViewGeneration;
+	}
+}
+
 void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize)
 {
+	UpdateSceneViewGeneration(viewProjection, viewportPos, viewportSize);
 	if (!m_ToolState.iconsVisible)
 	{
 		m_ObjectMarkers.clear();
@@ -1856,25 +1885,7 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 	}
 	m_MarkerWorkingFrameOrigin = m_CameraPosition;
 
-	const glm::ivec4 viewport(
-		static_cast<int>(std::lround(viewportPos.x)),
-		static_cast<int>(std::lround(viewportPos.y)),
-		static_cast<int>(std::lround(viewportSize.x)),
-		static_cast<int>(std::lround(viewportSize.y)));
-	bool projectionChanged = viewport != m_LastMarkerViewport;
-	for (glm::length_t column = 0; column < 4 && !projectionChanged; ++column)
-	{
-		for (glm::length_t row = 0; row < 4; ++row)
-		{
-			projectionChanged = projectionChanged || m_LastMarkerViewProjection[column][row] != viewProjection[column][row];
-		}
-	}
-	if (projectionChanged)
-	{
-		m_LastMarkerViewProjection = viewProjection;
-		m_LastMarkerViewport = viewport;
-		++m_MarkerViewGeneration;
-	}
+	const glm::ivec4 viewport = m_LastMarkerViewport;
 
 	SceneOverlay::MarkerViewportQuery query;
 	query.viewportKey.viewGeneration = m_MarkerViewGeneration;
@@ -2092,6 +2103,14 @@ bool SceneViewWindow::DrawOrientationWidget(glm::mat4& view, const glm::mat4& pr
 		// matching how editor view cubes orbit content instead of drifting away.
 		RepositionCameraAroundFocus(focus, focusDistance);
 		view = glm::lookAt(glm::vec3(0.0f), GetCameraForward(), GetCameraUp());
+		// Widget input changes the camera after the first cache lookup. Refresh
+		// the same-frame diagnostic/cache key before publishing its streaming lease.
+		UpdateSceneViewGeneration(projection * view, viewportPos, viewportSize);
+		cacheKey.viewportGeneration = m_MarkerViewGeneration;
+		m_OrientationWidgetState = SceneOverlay::BuildOrientationWidgetStateCached(
+			m_OrientationWidgetCache, cacheKey, GetCameraForward(), GetCameraUp(),
+			m_ToolState.projectionMode, glm::vec4(min.x, min.y, max.x, max.y));
+		m_OrientationWidgetState.hoveredAxis = widgetHovered ? "view-manipulate" : "none";
 		m_OrientationWidgetState.activeAxis = "view-manipulate";
 	}
 	ImGui::PopID();

@@ -1,6 +1,7 @@
 // MiniaudioBackend.cpp - concrete device/decoder implementation behind IAudioBackend.
 
 #include "Audio/Backend/MiniaudioBackend.h"
+#include "Audio/Backend/Detail/MiniaudioOfflineProbe.h"
 #include "Audio/Backend/AudioBackendRegistry.h"
 #include "Audio/AudioSpatialRenderer.h"
 
@@ -94,6 +95,9 @@ namespace TerraEngine::Audio::Backend {
 	struct MiniaudioBackend::Impl {
 		ma_engine engine{};
 		ma_device device{};
+		// Only the private probe can choose no-device operation; public users
+		// always use the normal physical device and recovery boundary.
+		bool offlineProbe = false;
 		bool engineInitialized = false;
 		bool deviceInitialized = false;
 		bool initialized = false;
@@ -194,39 +198,47 @@ namespace TerraEngine::Audio::Backend {
 	MiniaudioBackend::~MiniaudioBackend() { (void)Shutdown(); }
 
 	AudioResult MiniaudioBackend::Initialize(const AudioBackendCreateInfo& createInfo) {
+		return InitializeInternal(createInfo, false);
+	}
+
+	AudioResult MiniaudioBackend::InitializeInternal(const AudioBackendCreateInfo& createInfo, bool offlineProbe) {
 		if(impl->initialized) return AudioResult::Accepted("miniaudio was already initialized.");
 		if(createInfo.sampleRate == 0U || createInfo.channels == 0U || createInfo.maximumVoices == 0U)
 			return AudioResult::Rejected("Audio device preferences must be non-zero.");
 
-		// TerraEngine owns the device so its callback can point at the private Impl.
-		// That lets the callback publish a fixed event record without a global map or
-		// an allocation, while miniaudio's engine remains responsible for mixing.
-		ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
-		deviceConfig.playback.format = ma_format_f32;
-		// The mixer always uses the standard 7.1 superset channel map. Stereo/HRTF
-		// and Mono leave unused channels silent, while miniaudio converts this map to
-		// the physical endpoint layout selected by the operating system.
-		deviceConfig.playback.channels = kAudioRenderChannelCount;
-		deviceConfig.sampleRate = createInfo.sampleRate;
-		deviceConfig.dataCallback = &Impl::DeviceDataCallback;
-		deviceConfig.notificationCallback = &Impl::DeviceNotificationCallback;
-		deviceConfig.pUserData = impl.get();
-		deviceConfig.noPreSilencedOutputBuffer = MA_TRUE;
-		deviceConfig.noClip = MA_TRUE;
-		if(ma_device_init(nullptr, &deviceConfig, &impl->device) != MA_SUCCESS)
-			return {AudioResultCode::DeviceUnavailable, "miniaudio could not open the default playback device; audio remains safely silent."};
-		impl->deviceInitialized = true;
+		if(!offlineProbe) {
+			// TerraEngine owns the device so its callback can point at the private Impl.
+			// That lets the callback publish a fixed event record without a global map or
+			// an allocation, while miniaudio's engine remains responsible for mixing.
+			ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+			deviceConfig.playback.format = ma_format_f32;
+			// The mixer always uses the standard 7.1 superset channel map. Stereo/HRTF
+			// and Mono leave unused channels silent, while miniaudio converts this map to
+			// the physical endpoint layout selected by the operating system.
+			deviceConfig.playback.channels = kAudioRenderChannelCount;
+			deviceConfig.sampleRate = createInfo.sampleRate;
+			deviceConfig.dataCallback = &Impl::DeviceDataCallback;
+			deviceConfig.notificationCallback = &Impl::DeviceNotificationCallback;
+			deviceConfig.pUserData = impl.get();
+			deviceConfig.noPreSilencedOutputBuffer = MA_TRUE;
+			deviceConfig.noClip = MA_TRUE;
+			if(ma_device_init(nullptr, &deviceConfig, &impl->device) != MA_SUCCESS)
+				return {AudioResultCode::DeviceUnavailable, "miniaudio could not open the default playback device; audio remains safely silent."};
+			impl->deviceInitialized = true;
+		}
 
 		ma_engine_config engineConfig = ma_engine_config_init();
-		engineConfig.pDevice = &impl->device;
+		engineConfig.pDevice = offlineProbe ? nullptr : &impl->device;
+		engineConfig.noDevice = offlineProbe ? MA_TRUE : MA_FALSE;
+		if(offlineProbe) engineConfig.sampleRate = createInfo.sampleRate;
 		engineConfig.channels = kAudioRenderChannelCount;
 		if(ma_engine_init(&engineConfig, &impl->engine) != MA_SUCCESS) {
-			ma_device_uninit(&impl->device);
+			if(impl->deviceInitialized) ma_device_uninit(&impl->device);
 			impl->deviceInitialized = false;
 			return {AudioResultCode::DeviceUnavailable, "miniaudio could not initialize the playback mixer; audio remains safely silent."};
 		}
 		impl->engineInitialized = true;
-		if(ma_device_start(&impl->device) != MA_SUCCESS) {
+		if(!offlineProbe && ma_device_start(&impl->device) != MA_SUCCESS) {
 			ma_engine_uninit(&impl->engine);
 			ma_device_uninit(&impl->device);
 			impl->engineInitialized = false;
@@ -235,7 +247,8 @@ namespace TerraEngine::Audio::Backend {
 		}
 
 		impl->createInfo = createInfo;
-		impl->acceptsCallbacks.store(true, std::memory_order_release);
+		impl->offlineProbe = offlineProbe;
+		impl->acceptsCallbacks.store(!offlineProbe, std::memory_order_release);
 		impl->initialized = true;
 		return AudioResult::Accepted();
 	}
@@ -245,24 +258,28 @@ namespace TerraEngine::Audio::Backend {
 		if(packet.sequence == 0U || packet.sequence != impl->lastSequence + 1U)
 			return {AudioResultCode::StalePacket, "Audio packets must be strictly consecutive."};
 
-		// Some platforms cannot emit an unplug notification. Polling miniaudio's
-		// atomic device state at the protected boundary supplies that fallback.
-		if(ma_device_get_state(&impl->device) != ma_device_state_started)
-			impl->MarkDeviceLost();
-		if(impl->deviceLost.load(std::memory_order_acquire) || impl->recoveryPublicationPending) {
-			if(!packet.requestRecovery || !impl->createInfo.requestDeviceRecovery)
-				return {AudioResultCode::DeviceUnavailable, "The playback device is unavailable until the engine requests reconciliation."};
-			if(ma_device_get_state(&impl->device) != ma_device_state_started
-				&& ma_device_start(&impl->device) != MA_SUCCESS)
-				return {AudioResultCode::DeviceUnavailable, "miniaudio could not restart the playback device; audio remains safely silent."};
-			// The engine packet contains every audible voice. Marking retained voices
-			// paused makes their command seek to the authoritative logical cursor,
-			// completing reconciliation without exposing SDK state to the engine.
-			for(auto& [token, voice] : impl->voices) voice->wasPaused = true;
-			impl->deviceLost.store(false, std::memory_order_release);
-			// Do not report success until the complete packet is applied. If packet
-			// validation fails, the next retry remains a reconciliation request.
-			impl->recoveryPublicationPending = true;
+		// Offline probes have no physical device to poll or recover. The complete
+		// packet validation, voice graph and mixer below are shared unchanged.
+		if(!impl->offlineProbe) {
+			// Some platforms cannot emit an unplug notification. Polling miniaudio's
+			// atomic device state at the protected boundary supplies that fallback.
+			if(ma_device_get_state(&impl->device) != ma_device_state_started)
+				impl->MarkDeviceLost();
+			if(impl->deviceLost.load(std::memory_order_acquire) || impl->recoveryPublicationPending) {
+				if(!packet.requestRecovery || !impl->createInfo.requestDeviceRecovery)
+					return {AudioResultCode::DeviceUnavailable, "The playback device is unavailable until the engine requests reconciliation."};
+				if(ma_device_get_state(&impl->device) != ma_device_state_started
+					&& ma_device_start(&impl->device) != MA_SUCCESS)
+					return {AudioResultCode::DeviceUnavailable, "miniaudio could not restart the playback device; audio remains safely silent."};
+				// The engine packet contains every audible voice. Marking retained voices
+				// paused makes their command seek to the authoritative logical cursor,
+				// completing reconciliation without exposing SDK state to the engine.
+				for(auto& [token, voice] : impl->voices) voice->wasPaused = true;
+				impl->deviceLost.store(false, std::memory_order_release);
+				// Do not report success until the complete packet is applied. If packet
+				// validation fails, the next retry remains a reconciliation request.
+				impl->recoveryPublicationPending = true;
+			}
 		}
 
 		// Validate the complete packet before changing device or provider state.
@@ -323,8 +340,14 @@ namespace TerraEngine::Audio::Backend {
 			if(ma_decoder_init_memory(created->payload->data(), created->payload->size(), &decoderConfig, &created->decoder) != MA_SUCCESS)
 				return {AudioResultCode::ProviderFailure, "miniaudio rejected an encoded clip; the frame packet was not committed."};
 			created->decoderInitialized = true;
-			if(ma_sound_init_from_data_source(&impl->engine, &created->decoder,
-				MA_SOUND_FLAG_NO_DEFAULT_ATTACHMENT | MA_SOUND_FLAG_NO_SPATIALIZATION, nullptr, &created->sound) != MA_SUCCESS)
+			// A sound otherwise defaults to the eight-channel engine output. Keep
+			// the decoder's two channels until our custom spatial node computes
+			// point-source mono; averaging an upmix would dilute authored gain.
+			ma_sound_config soundConfig = ma_sound_config_init_2(&impl->engine);
+			soundConfig.pDataSource = &created->decoder;
+			soundConfig.flags = MA_SOUND_FLAG_NO_DEFAULT_ATTACHMENT | MA_SOUND_FLAG_NO_SPATIALIZATION;
+			soundConfig.channelsOut = MA_SOUND_SOURCE_CHANNEL_COUNT;
+			if(ma_sound_init_ex(&impl->engine, &soundConfig, &created->sound) != MA_SUCCESS)
 				return {AudioResultCode::ProviderFailure, "miniaudio could not stage a voice; the frame packet was not committed."};
 			created->soundInitialized = true;
 			created->renderer.inputChannels = ma_node_get_output_channels(reinterpret_cast<ma_node*>(&created->sound), 0U);
@@ -447,8 +470,36 @@ namespace TerraEngine::Audio::Backend {
 		impl->providerCount = 0U;
 		impl->providerDrops = 0U;
 		impl->initialized = false;
+		impl->offlineProbe = false;
 		impl->lastSequence = 0U;
 		return AudioResult::Accepted();
+	}
+
+	std::unique_ptr<IAudioBackend> detail::MiniaudioOfflineProbe::Create(const AudioBackendCreateInfo& createInfo, AudioResult& result) {
+		auto backend = std::make_unique<MiniaudioBackend>();
+		result = backend->InitializeInternal(createInfo, true);
+		if(!result.Succeeded()) return {};
+		return backend;
+	}
+
+	AudioResult detail::MiniaudioOfflineProbe::ReadFrames(IAudioBackend& backend, std::span<float> output, std::uint64_t frameCount) {
+		auto* concrete = dynamic_cast<MiniaudioBackend*>(&backend);
+		if(!concrete || !concrete->impl->initialized || !concrete->impl->offlineProbe || !concrete->impl->engineInitialized)
+			return {AudioResultCode::InvalidState, "Manual mixing requires an initialized private offline graph."};
+		// Divide before multiplying: hostile frame counts cannot overflow a span.
+		if(frameCount == 0U || frameCount > output.size() / kAudioRenderChannelCount)
+			return AudioResult::Rejected("Offline PCM destination is too small.");
+		ma_uint64 framesRead = 0;
+		if(ma_engine_read_pcm_frames(&concrete->impl->engine, output.data(), frameCount, &framesRead) != MA_SUCCESS || framesRead != frameCount)
+			return {AudioResultCode::ProviderFailure, "The offline graph did not fill the requested PCM frames."};
+		return AudioResult::Accepted();
+	}
+
+	std::uint32_t detail::MiniaudioOfflineProbe::InputChannels(IAudioBackend& backend, AudioVoiceToken voice) {
+		auto* concrete = dynamic_cast<MiniaudioBackend*>(&backend);
+		if(!concrete || !concrete->impl->initialized || !concrete->impl->offlineProbe) return 0U;
+		const auto found = concrete->impl->voices.find(voice);
+		return found == concrete->impl->voices.end() ? 0U : found->second->renderer.inputChannels;
 	}
 
 	AudioProviderDescriptor MiniaudioProviderDescriptor() {

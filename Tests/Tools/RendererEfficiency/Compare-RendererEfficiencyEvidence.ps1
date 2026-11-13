@@ -2065,13 +2065,13 @@ try {
 					VerifyNativeObservationPhase $observed
 					if($observed.publicationState -ne 'Complete') { Unverified 'Observation lacks completed GPU publication' }
 					foreach($field in @('frameSerial','settingsGeneration','mutationGeneration','rendererSessionGeneration','commandSerial','submitSerial','completionSerial')) { $null=Metric $observed.$field $field }
-					Require ((Metric $observed.completionSerial 'completionSerial') -ge (Metric $observed.submitSerial 'submitSerial')) 'Completion precedes submission'
+					NativeRequire ((Metric $observed.completionSerial 'completionSerial') -ge (Metric $observed.submitSerial 'submitSerial')) 'Completion precedes submission'
 					# Static allocations are introduced by P5. Earlier gates keep those
 					# counters explicitly unavailable rather than invent measured zeros.
 					if($stageName -eq 'P5') {
 						$budget=Metric $observed.memory.staticCacheBudgetEffectiveBytes 'effective static budget'
 						$charged=(Metric $observed.memory.activeBytes 'active static bytes')+(Metric $observed.memory.reservedBytes 'reserved static bytes')+(Metric $observed.memory.retiringBytes 'retiring static bytes')
-						Require ($charged -le $budget) 'Static cache admission exceeds effective budget'
+						NativeRequire ($charged -le $budget) 'Static cache admission exceeds effective budget'
 					}
 				}
 				if($stageName -cne 'P5'){Require ((Canonical $frame.effectiveOptions) -ceq (Canonical $cv.requestedOptions)) 'Candidate settings not observed'
@@ -2274,15 +2274,15 @@ try {
 				if($result.status -eq 'Unverified') { $anyUnverified=$true }
 				if($result.status -eq 'Failed') { $anyFailed=$true }
 				if($result.status -eq 'Passed') {
-					Require ((Metric $result.coverageMismatchCount 'coverageMismatch') -eq 0 -and (Metric $result.casterIdentityMismatchCount 'casterMismatch') -eq 0) 'Reported coverage/identity mismatch'
-					Require ((Metric $result.maxDepthAbsoluteError 'depthError') -le 0.000001 -and (Metric $result.maxImageNormalizedChannelError 'imageError') -le (2.0/255.0)) 'Reported correctness tolerance exceeded'
+					NativeRequire ((Metric $result.coverageMismatchCount 'coverageMismatch') -eq 0 -and (Metric $result.casterIdentityMismatchCount 'casterMismatch') -eq 0) 'Reported coverage/identity mismatch'
+					NativeRequire ((Metric $result.maxDepthAbsoluteError 'depthError') -le 0.000001 -and (Metric $result.maxImageNormalizedChannelError 'imageError') -le (2.0/255.0)) 'Reported correctness tolerance exceeded'
 				}
 				$summary.comparisons+=@{fixtureId=$workload.id;runIndex=$run;criterion=$sc;status=$result.status;reason=$result.reason}
 			}
 			if($timedDepth -or $timedBaseline) {
 				$rm=Percentile $referenceTiming 0.5; $cm=Percentile $candidateTiming 0.5; Require ($rm -gt 0) 'Reference median must be positive'
-				if($timedBaseline) { Require ($cm -le $rm*1.05 -and (Percentile $candidateTiming 0.95) -le (Percentile $referenceTiming 0.95)*1.05) 'Total frame median/p95 regression exceeds 5%' }
-				else { Require ($cm -le $rm*0.9) 'Depth GPU stage median improvement below 10%' }
+				if($timedBaseline) { NativeRequire ($cm -le $rm*1.05 -and (Percentile $candidateTiming 0.95) -le (Percentile $referenceTiming 0.95)*1.05) 'Total frame median/p95 regression exceeds 5%' }
+				else { NativeRequire ($cm -le $rm*0.9) 'Depth GPU stage median improvement below 10%' }
 			}
 			# P4 reduction was checked on every complete paired native region above;
 			# no aggregate metric sum can hide a failed face, view, or frame.
@@ -2301,7 +2301,9 @@ try {
 	$summary.reason=$_.Exception.Message
 	if($summary.reason.StartsWith('UNVERIFIED: ')) {$summary.exitCode=2;$summary.status='Unverified'} else {$summary.exitCode=3;$summary.status='Invalid'}
 	if($summary.reason.StartsWith('NATIVE_FAILED: ')) {$summary.exitCode=1;$summary.status='Failed'}
-	if($summary.reason -match 'exceeds|below 10%|below 90%|unexpectedly refreshed|writes are nonzero|Coverage bytes differ|mismatch$|Completion precedes') {$summary.exitCode=1;$summary.status='Failed'}
+	# Classify the explicit producer/gate category, never words in a reason.
+	# Invalid identities and bounded parse failures remain Invalid; unavailable
+	# evidence remains Unverified even when its message contains gate wording.
 }
 $parent=Split-Path ([IO.Path]::GetFullPath($Output)); if(!(Test-Path -LiteralPath $parent)) { [IO.Directory]::CreateDirectory($parent)|Out-Null }
 [IO.File]::WriteAllText([IO.Path]::GetFullPath($Output),($summary|ConvertTo-Json -Depth 100),$utf8)

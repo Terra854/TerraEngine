@@ -3,6 +3,7 @@
 #include "../TestHarness.h"
 
 #include "Physics/Backend/JoltPhysicsBackend.h"
+#include "Physics/Backend/PhysicsAllocatorAdapter.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Physics/PhysicsQueries.h"
 #include "Physics/PhysicsSettings.h"
@@ -223,6 +224,25 @@ namespace TerraEngine::Tests {
 				"The retry world must also tear down without retaining prepared work from the failed generation.");
 		});
 
+		registry.Add("Physics.LifecycleStress.CookingFailureDoesNotPoisonRunningWorld", [](TestContext& context) {
+			using namespace TerraEngine::Physics::Backend;
+			ThreadPoolSession pool;
+			JoltPhysicsBackend live{ThreadPool::instance()};
+			const PhysicsWorldHandle world{{93U}, 1U};
+			PhysicsBackendWorldConfiguration configuration; configuration.world = world;
+			context.Expect(live.Initialize().Succeeded() && live.CreateWorld(configuration).Succeeded(), "Create an actual independent running provider world.");
+			{
+				ScopedPhysicsProviderFailureIsolation isolated;
+				JoltPhysicsBackend cooker{ThreadPool::instance()};
+				context.Expect(cooker.Initialize().Succeeded(), "Initialize the actual temporary cooking backend.");
+				cooker.ReportFatalProviderFailureForValidation();
+				context.Expect(!cooker.IsHealthy(), "The failed temporary provider must retain its own fatal diagnostic.");
+				context.Expect(live.Step({world, 1U, 1.0F / 60.0F, 1U}).Succeeded() && live.IsHealthy(), "The running world must continue stepping after the isolated failure.");
+				context.Expect(cooker.Shutdown().Succeeded(), "The failed cooker must still release every owner.");
+			}
+			context.Expect(live.Step({world, 2U, 1.0F / 60.0F, 1U}).Succeeded(), "The restored thread domain must not expose the cook's failure later.");
+			context.Expect(live.DestroyWorld(world).Succeeded() && live.Shutdown().Succeeded(), "Drain and release the running world normally.");
+		});
 		registry.Add("Physics.LifecycleStress.FatalProviderBarrierFailurePublishesNothingAndDrainsBeforeTeardown", [](TestContext& context) {
 			using namespace TerraEngine::Physics::Backend;
 			ThreadPoolSession pool;

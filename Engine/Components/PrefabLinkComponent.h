@@ -21,6 +21,9 @@ struct PrefabLinkComponent : public Component<PrefabLinkComponent>
 	std::string prefabName;
 	std::string prefabPath;
 	std::string overriddenProperties;
+	// The instance root owns a bounded source UUID -> live UUID JSON object.
+	// Keeping this map separate preserves authored nested-prefab link metadata.
+	std::string sourceToInstanceIds;
 
 	static void reflect(entt::meta_factory<PrefabLinkComponent>& factory)
 	{
@@ -29,5 +32,6 @@ struct PrefabLinkComponent : public Component<PrefabLinkComponent>
 		TerraEngine::Reflection::RegisterDataProperty<&PrefabLinkComponent::prefabName>(factory, "prefabName");
 		TerraEngine::Reflection::RegisterDataProperty<&PrefabLinkComponent::prefabPath>(factory, "prefabPath");
 		TerraEngine::Reflection::RegisterDataProperty<&PrefabLinkComponent::overriddenProperties>(factory, "overriddenProperties");
+		TerraEngine::Reflection::RegisterDataProperty<&PrefabLinkComponent::sourceToInstanceIds>(factory, "sourceToInstanceIds");
 	}
 };

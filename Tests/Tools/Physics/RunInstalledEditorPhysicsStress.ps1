@@ -36,8 +36,12 @@ param(
 	[ValidateRange(1024, 65535)]
 	[int] $McpPort = 43127,
 
-	[ValidateRange(1, 100)]
+	# Explicit steps include warmup; measured work remains bounded at 100 below.
+	[ValidateRange(1, 200)]
 	[int] $ExplicitStepCount = 100,
+
+	[ValidateRange(0, 100)]
+	[int] $WarmupStepCount = 0,
 
 	# The committed acceptance manifest requires exactly 1,000 concurrently
 	# active dynamic bodies. Callers may raise this for an explicit overload run,
@@ -199,6 +203,63 @@ function Test-LoopbackPortAvailable {
 	}
 }
 
+# Preserve raw MCP responses and normalized gate evidence as separate fields.
+function Set-PhysicsProfilerSummaryFields {
+	param($Summary, $RawCapture, $ProfilerEvidence)
+	$Summary.profilerCapture = $RawCapture
+	$Summary.profilerEvidence = $ProfilerEvidence
+}
+
+# Read copied child telemetry only. The parent process and request cannot prove
+# child capacity; each detailed worker record represents one actual pool slot.
+function Get-PhysicsRuntimeWorkerEvidence {
+	param($Snapshots)
+	# Snapshots are ordered dictionaries in the real collector. Sort their numeric
+	# key values explicitly; Sort-Object named properties cannot read these keys.
+	foreach ($snapshot in @($Snapshots | Select-Object -Last 16 | Sort-Object { [double](Get-PropertyValue $_ 'monotonicMs') } -Descending)) {
+		$data = Get-PropertyValue $snapshot 'data'
+		$frame = Get-PropertyValue $data 'parallelFrame'
+		$telemetry = Get-PropertyValue $frame 'executionTelemetry'
+		if (-not (Get-PropertyValue $telemetry 'detailIncluded')) { continue }
+		# Read the property directly so an observed empty array remains capacity0.
+		if ($telemetry -is [Collections.IDictionary]) {
+			if (-not $telemetry.Contains('workers')) { continue }; $workers = @($telemetry['workers'])
+		} else {
+			$property = $telemetry.PSObject.Properties['workers']
+			if ($null -eq $property) { continue }; $workers = @($property.Value)
+		}
+		$ids = @($workers | ForEach-Object { Get-PropertyValue $_ 'workerId' })
+		if (@($ids | Where-Object { $null -eq $_ }).Count -or @($ids | Sort-Object -Unique).Count -ne $workers.Count) { continue }
+		$executed = @($workers | Where-Object { [UInt64](Get-PropertyValue $_ 'dispatchCount') -gt 0 } | ForEach-Object { [int](Get-PropertyValue $_ 'workerId') })
+		return [ordered]@{
+			observedPoolCapacity = $workers.Count; executingWorkerIndices = $executed
+			executionAvailability = if ($executed.Count) { 'observed' } else { 'unavailable-no-runtime-worker-dispatch' }
+			executionEvidenceSource = 'child diagnostics.get_summary parallelFrame.executionTelemetry process-lifetime dispatch counters'
+			poolCapacitySource = 'child detailed ThreadPool telemetry slots'; snapshotMonotonicMs = $snapshot.monotonicMs
+			# This is a child-reported hardware hint. Missing/zero remains unknown;
+			# neither parent hardware nor requested max can replace that observation.
+			hardwareConcurrency = Get-PropertyValue $telemetry 'hardwareConcurrency'
+			hardwareConcurrencySource = Get-PropertyValue $telemetry 'hardwareConcurrencySource'
+		}
+	}
+	return $null
+}
+
+function Get-PhysicsRuntimeWorkerIdentity {
+	param([string]$Requested, $RuntimeEvidence)
+	$capacity = Get-PropertyValue $RuntimeEvidence 'observedPoolCapacity'
+	return [ordered]@{ actualWorkerCount = $capacity; workerIdentity = [ordered]@{
+		requested = $Requested; resolved = $capacity; mode = 'copied-child-runtime-observation'
+		available = $null -ne $capacity; observedPoolCapacity = $capacity
+		executingWorkerIndices = @(Get-PropertyValue $RuntimeEvidence 'executingWorkerIndices')
+		executionAvailability = if ($null -eq $RuntimeEvidence) { 'unavailable-no-child-runtime-observation' } else { Get-PropertyValue $RuntimeEvidence 'executionAvailability' }
+		executionEvidenceSource = Get-PropertyValue $RuntimeEvidence 'executionEvidenceSource'
+		poolCapacitySource = Get-PropertyValue $RuntimeEvidence 'poolCapacitySource'
+		hardwareConcurrency = Get-PropertyValue $RuntimeEvidence 'hardwareConcurrency'
+		hardwareConcurrencySource = Get-PropertyValue $RuntimeEvidence 'hardwareConcurrencySource'
+	} }
+}
+
 function Write-JsonFile {
 	param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)] $Value, [int] $Depth = 32)
 	$directory = Split-Path -Parent $Path
@@ -295,8 +356,11 @@ function Get-ArtifactInventory {
 }
 
 function Get-PropertyValue {
-	param([Parameter(Mandatory = $true)] $Object, [Parameter(Mandatory = $true)][string] $Name)
+	param([Parameter(Mandatory = $true)][AllowNull()] $Object, [Parameter(Mandatory = $true)][string] $Name)
+	# Copied evidence may be an in-memory dictionary or deserialized JSON.
+	# Allow null to reach the existing unavailable-value branch explicitly.
 	if ($null -eq $Object) { return $null }
+	if ($Object -is [Collections.IDictionary]) { return $Object[$Name] }
 	$property = $Object.PSObject.Properties[$Name]
 	if ($null -eq $property) { return $null }
 	return $property.Value
@@ -326,31 +390,61 @@ function Get-CanonicalFixtureEvidence {
 	}
 }
 
+function Get-PhysicsStepPlan {
+	param([int]$TotalSteps, [int]$WarmupSteps)
+	# Warmup must not consume the measured budget or lower the canonical 100-step
+	# floor. Both portions remain bounded and every raw step snapshot is retained.
+	$measuredSteps = $TotalSteps - $WarmupSteps
+	if ($WarmupSteps -lt 0 -or $WarmupSteps -gt 100 -or $measuredSteps -lt 1 -or $measuredSteps -gt 100) {
+		throw "Explicit steps must contain 1..100 measured steps plus 0..100 warmup steps; received total=$TotalSteps, warmup=$WarmupSteps."
+	}
+	return [ordered]@{ totalSteps = $TotalSteps; warmupSteps = $WarmupSteps; measuredSteps = $measuredSteps }
+}
+
 function Assert-CanonicalFixtureArguments {
 	param([Parameter(Mandatory = $true)] $Fixture)
 	if ($Fixture.availability -ne "available") {
 		throw "Canonical fixture '$($Fixture.id)' is unavailable: $($Fixture.availabilityReason)"
 	}
-	if ($ObjectCount -ne [int]$Fixture.population -or $ActiveDynamicCount -ne [int]$Fixture.activeBodies -or $ExplicitStepCount -ne [int]$Fixture.measuredSteps) {
-		throw "Canonical fixture '$($Fixture.id)' requires population=$($Fixture.population), activeBodies=$($Fixture.activeBodies), and measuredSteps=$($Fixture.measuredSteps); received $ObjectCount/$ActiveDynamicCount/$ExplicitStepCount."
+	$plan = Get-PhysicsStepPlan -TotalSteps $ExplicitStepCount -WarmupSteps $WarmupStepCount
+	if ($ObjectCount -ne [int]$Fixture.population -or $ActiveDynamicCount -ne [int]$Fixture.activeBodies -or $plan.measuredSteps -ne [int]$Fixture.measuredSteps) {
+		throw "Canonical fixture '$($Fixture.id)' requires population=$($Fixture.population), activeBodies=$($Fixture.activeBodies), and measuredSteps=$($Fixture.measuredSteps); received $ObjectCount/$ActiveDynamicCount/$($plan.measuredSteps) (total=$ExplicitStepCount, warmup=$WarmupStepCount)."
 	}
 }
 
 function Get-WorkerResolutionCheck {
 	param([Parameter(Mandatory = $true)] $Record)
 	$resolved = Get-PropertyValue -Object $Record.summary -Name "actualWorkerCount"
-	if ($null -eq $resolved -or [int]$resolved -lt 1) {
-		return [ordered]@{ available = $false; exact = $false; reason = "child did not report a positive resolved worker count"; resolved = $null }
+	$resolvedNumber = 0
+	if ($null -eq $resolved -or -not [int]::TryParse([string]$resolved, [ref]$resolvedNumber) -or $resolvedNumber -lt 0) {
+		return [ordered]@{ available = $false; exact = $false; reason = "child runtime pool capacity is unavailable"; resolved = $null }
 	}
 	$requested = [string]$Record.requestedWorkerCount
-	# `max` is not a wildcard in acceptance evidence: the child must resolve it to
-	# the exact hardware-concurrency value it records for the same process.
-	$expected = if ($requested -eq "max") { [int][Math]::Max(1, [Environment]::ProcessorCount) } else { [int]$requested }
+	$identity = Get-PropertyValue $Record.summary 'workerIdentity'
+	$hardware = Get-PropertyValue $identity 'hardwareConcurrency'
+	$hardwareNumber = 0
+	if (($requested -eq 'max' -or $requested -eq '0') -and
+		($null -eq $hardware -or -not [int]::TryParse([string]$hardware, [ref]$hardwareNumber) -or $hardwareNumber -le 0)) {
+		return [ordered]@{ available = $false; exact = $false; reason = "child hardware concurrency is unavailable; max cannot be qualified from parent hardware"; resolved = [int]$resolved }
+	}
+	$expected = if ($requested -eq 'max' -or $requested -eq '0') { $hardwareNumber } else { [int]$requested }
 	$exact = [int]$resolved -eq $expected
 	return [ordered]@{
 		available = $true; exact = $exact; requested = $requested; resolved = [int]$resolved
-		reason = if ($exact) { $null } else { "requested $requested workers (expected $expected) but the runtime resolved $resolved" }
+		reason = if ($exact) { $null } else { "requested $requested workers (expected $expected) but the child observed $resolved" }
 	}
+}
+
+function Get-WorkerScalingOutcome {
+	param([bool]$Complete, [bool]$Deterministic, $Gate)
+	# Missing child facts are an unverified comparison, not measured scaling
+	# failure. Available but incorrect resolution/timing remains a real failure.
+	if (-not $Complete -or -not $Deterministic) { return 'Failed' }
+	$checks = @(Get-PropertyValue $Gate 'workerResolutionChecks')
+	if (@($checks | Where-Object { $_.available -and -not $_.exact }).Count -gt 0) { return 'Failed' }
+	if (-not $Gate.available) { return 'Unverified' }
+	if (-not $Gate.passed) { return 'Failed' }
+	return 'Passed'
 }
 
 function Get-QualityEvidenceCheck {
@@ -425,7 +519,11 @@ function Complete-ProfilerCaptureEvidence {
 	if ($metricAvailability.scheduler) { [void]$unavailableMetrics.Remove("workerUtilizationHistory") }
 	if ($metricAvailability.protectedBoundary) { [void]$unavailableMetrics.Remove("protectedBoundaryStallHistory") }
 	if ($metricAvailability.responsiveness) { [void]$unavailableMetrics.Remove("frameResponsiveness") }
-	$profilerCapture.recoveryProbe = [ordered]@{ attempted = $false; supported = $false; status = "not-requested"; reason = "The public load operation is exercised by the orchestrator's truncated-tail fixture probe." }
+	# The caller has already observed the real load job before completing this
+	# summary. Preserve that result; only absent observations remain unavailable.
+	if ($null -eq (Get-PropertyValue -Object $profilerCapture -Name 'recoveryProbe')) {
+		$profilerCapture.recoveryProbe = [ordered]@{ attempted = $false; supported = $false; status = "not-requested"; reason = "The public load operation is exercised by the orchestrator's truncated-tail fixture probe." }
+	}
 	$baseline = Get-PropertyValue -Object $summaryData -Name "baseline"
 	$profilerCapture.comparableBaseline = [ordered]@{
 		captureLevel = $CaptureLevel; requestedFormat = 'TerraEngineProfilerJournalV1'
@@ -489,6 +587,8 @@ function Invoke-WorkerScalingMatrix {
 				"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
 				"-InstallRoot", $InstallRoot, "-WorkRoot", $childRoot,
 				"-WorkerCount", $workers, "-WorkerScalingScenario", $scenario,
+				# Preserve the caller's warmup/measured split in every matrix child.
+				"-ExplicitStepCount", $ExplicitStepCount, "-WarmupStepCount", $WarmupStepCount,
 				"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
 				"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
 				"-VelocityIterations", $VelocityIterations,
@@ -560,7 +660,7 @@ function Invoke-WorkerScalingMatrix {
 		maximumWorkerDurationMs = if($null -eq $largeMax){$null}else{Get-ScalingMetricMs -Record $largeMax}
 		speedupFourVsOne = $null
 		maximumVsFourRatio = $null
-		passed = $false
+		passed = $null
 	}
 	if($workerScalingGate.available -and $workerScalingGate.fourWorkerDurationMs -gt 0.0) {
 		$workerScalingGate.speedupFourVsOne = $workerScalingGate.oneWorkerDurationMs / $workerScalingGate.fourWorkerDurationMs
@@ -577,10 +677,15 @@ function Invoke-WorkerScalingMatrix {
 		recommended = if ($null -eq $recommendation) { $null } else { [ordered]@{ scenario = $recommendation.scenario; requestedWorkerCount = $recommendation.requestedWorkerCount; resolvedWorkerCount = $recommendation.summary.actualWorkerCount; durationMs = Get-ScalingMetricMs -Record $recommendation; reason = "fastest successful correctness-gated median physics-stage large-workload result" } }
 		runs = @($records)
 	}
+	$report.status = Get-WorkerScalingOutcome -Complete ($successful.Count -eq 16) -Deterministic $report.deterministic -Gate $workerScalingGate
 	$reportPath = Join-Path $matrixRoot "worker-scaling-matrix-summary.json"
 	Write-JsonFile -Path $reportPath -Value $report -Depth 64
 	Write-Output ("worker-scaling matrix report: {0}" -f $reportPath)
-	if (-not $report.deterministic -or -not $report.scalingComparable -or -not $report.workerScalingGate.passed) {
+	if ($report.status -eq 'Unverified') {
+		[Console]::Error.WriteLine('Worker-scaling comparison is Unverified: required child runtime/hardware resolution evidence is unavailable.')
+		exit 2
+	}
+	if ($report.status -ne 'Passed') {
 		throw "worker-scaling matrix failed determinism, completeness, or the required 1.5x / 10% limits."
 	}
 	exit 0
@@ -603,7 +708,7 @@ function Invoke-QualityProfileMatrix {
 			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
 			"-InstallRoot", $InstallRoot, "-WorkRoot", $childRoot,
 			"-CanonicalFixture", $CanonicalFixture, "-ObjectCount", $ObjectCount,
-			"-ActiveDynamicCount", $ActiveDynamicCount, "-ExplicitStepCount", $ExplicitStepCount,
+			"-ActiveDynamicCount", $ActiveDynamicCount, "-ExplicitStepCount", $ExplicitStepCount, "-WarmupStepCount", $WarmupStepCount,
 			"-WorkerCount", $WorkerCount, "-WorkerScalingScenario", $WorkerScalingScenario,
 			"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
 			"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
@@ -649,7 +754,7 @@ function Invoke-RepeatedAcceptanceMatrix {
 			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
 			"-InstallRoot", $InstallRoot, "-WorkRoot", $childRoot,
 			"-CanonicalFixture", $CanonicalFixture, "-ObjectCount", $ObjectCount,
-			"-ActiveDynamicCount", $ActiveDynamicCount, "-ExplicitStepCount", $ExplicitStepCount,
+			"-ActiveDynamicCount", $ActiveDynamicCount, "-ExplicitStepCount", $ExplicitStepCount, "-WarmupStepCount", $WarmupStepCount,
 			"-WorkerCount", $WorkerCount, "-WorkerScalingScenario", $WorkerScalingScenario,
 			"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
 			"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
@@ -708,7 +813,7 @@ function Invoke-ReadinessMatrix {
 			"-InstallRoot", $InstallRoot, "-WorkRoot", $matrixRoot,
 			"-ReadinessMode", $mode,
 			"-ObjectCount", $ObjectCount, "-ActiveDynamicCount", $ActiveDynamicCount,
-			"-ExplicitStepCount", $ExplicitStepCount,
+			"-ExplicitStepCount", $ExplicitStepCount, "-WarmupStepCount", $WarmupStepCount,
 			"-WorkerCount", $WorkerCount,
 			"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
 			"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
@@ -748,6 +853,7 @@ $resolvedInstallRoot = Get-AbsolutePath -Path $InstallRoot -BasePath $repoRoot
 $resolvedWorkRoot = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
 Assert-PathBelow -Parent $outRoot -Child $resolvedWorkRoot
 
+$stepPlan = Get-PhysicsStepPlan -TotalSteps $ExplicitStepCount -WarmupSteps $WarmupStepCount
 $matrixFlags = @([bool]$RunWorkerScalingMatrix, [bool]$RunReadinessMatrix, [bool]$RunQualityProfileMatrix, [bool]$RunRepeatedAcceptanceMatrix)
 if (@($matrixFlags | Where-Object { $_ }).Count -gt 1) {
 	throw "Run one matrix at a time so every child owns an unambiguous disposable project and evidence root."
@@ -876,12 +982,10 @@ $unavailableMetrics.Add("profilerCaptureUnlessGeneratedByEditor")
 $profilerCaptureRequiredMetrics = @("physics", "sceneView", "scheduler", "protectedBoundary", "responsiveness", "presentation", "workVolume")
 $lastDiagnosticsCaptureMs = -5000.0
 $hardwareEvidence = Get-HardwareEvidence
-$resolvedWorkerCount = if ($WorkerCount -eq "max" -or $WorkerCount -eq "0") { [int][Math]::Max(1, [Environment]::ProcessorCount) } else { [int]$WorkerCount }
-$workerIdentity = [ordered]@{
-	requested = $WorkerCount; resolved = $resolvedWorkerCount
-	mode = if ($WorkerCount -eq "max" -or $WorkerCount -eq "0") { "hardware-concurrency" } else { "explicit-override" }
-	environmentOverride = if ($WorkerCount -eq "max" -or $WorkerCount -eq "0") { $null } else { $WorkerCount }
-}
+# Initial identity is unavailable until a detailed child snapshot is copied.
+$workerResolution = Get-PhysicsRuntimeWorkerIdentity -Requested $WorkerCount -RuntimeEvidence $null
+$resolvedWorkerCount = $workerResolution.actualWorkerCount
+$workerIdentity = $workerResolution.workerIdentity
 $determinismHash = $null
 $process = $null
 $forcedTermination = $false
@@ -1341,6 +1445,10 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		try {
 			$snapshot = Invoke-Tool -Name "diagnostics.get_summary" -Arguments ([ordered]@{ includeDetails = $true })
 			$script:diagnosticSnapshots.Add([ordered]@{ phase = $Phase; monotonicMs = $nowMs; timestamp = (Get-Date).ToString("o"); data = $snapshot.data })
+			$observedWorkers = Get-PhysicsRuntimeWorkerEvidence -Snapshots @($script:diagnosticSnapshots)
+			$observedIdentity = Get-PhysicsRuntimeWorkerIdentity -Requested $WorkerCount -RuntimeEvidence $observedWorkers
+			$script:resolvedWorkerCount = $observedIdentity.actualWorkerCount
+			$script:workerIdentity = $observedIdentity.workerIdentity
 			$script:lastDiagnosticsCaptureMs = $nowMs
 		} catch {
 			# Diagnostics are optional evidence; transient unavailability must not
@@ -1896,7 +2004,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			transactionConstruction = [double]$timings.transactionConstructionMs
 		}
 		$physicsStageSamples.Add([ordered]@{
-			step = $step; tick = [UInt64]$physicsDiagnostics.tick
+			step = $step; phase = if ($step -le $WarmupStepCount) { "warmup" } else { "measured" }; tick = [UInt64]$physicsDiagnostics.tick
 			totalDurationMs = [double](@($stageDurations.Values) | Measure-Object -Sum).Sum
 			stages = $stageDurations; quality = $physicsDiagnostics.data.quality; jobs = $physicsDiagnostics.data.jobs
 		})
@@ -2173,7 +2281,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		canonicalFixture = $canonicalFixtureEvidence; qualityEvidence = $qualityEvidence
 		installRoot = $resolvedInstallRoot; editorExecutable = $editorExecutable; projectRoot = $projectRoot
 		objectCount = $ObjectCount; activeDynamicCount = $dynamicCount; dynamicCount = $dynamicCount; kinematicCount = $kinematicCount; staticCount = $staticCount
-		mcpEndpoint = "http://127.0.0.1:$McpPort/mcp"; explicitStepCount = $measuredExplicitStepCount; requestedExplicitStepCount = $ExplicitStepCount
+		mcpEndpoint = "http://127.0.0.1:$McpPort/mcp"; explicitStepCount = $measuredExplicitStepCount; requestedExplicitStepCount = $ExplicitStepCount; requestedWarmupStepCount = $WarmupStepCount; requestedMeasuredStepCount = $stepPlan.measuredSteps
 		firstLiveTick = $previousTick; finalPausedTick = $pausedTick; processId = $process.Id
 		authoredSceneSha256Before = $authoredSceneHashBefore; authoredSceneSha256After = $authoredSceneHashAfter
 		observations = @($observations); diagnosticsSnapshots = @($diagnosticSnapshots); automationLatencySamples = @($latencySamples)
@@ -2249,8 +2357,7 @@ finally {
 		$summary.workerScalingScenario = $workerScalingScenarioEvidence
 		$artifactInventory = @(Get-ArtifactInventory -Root $projectRoot)
 		$summary.artifactInventory = $artifactInventory
-		$summary.profilerCapture = [ordered]@{ start = $profilerCaptureStart; stop = $profilerCaptureStop; job = $profilerCaptureJob; artifact = $profilerCaptureArtifact; summary = $profilerCaptureSummary; succeeded = $profilerCaptureSucceeded }
-		$summary.profilerCapture = $profilerCapture
+		Set-PhysicsProfilerSummaryFields -Summary $summary -RawCapture ([ordered]@{ start = $profilerCaptureStart; stop = $profilerCaptureStop; job = $profilerCaptureJob; artifact = $profilerCaptureArtifact; summary = $profilerCaptureSummary; succeeded = $profilerCaptureSucceeded }) -ProfilerEvidence $profilerCapture
 		$summary.processMemorySamples = @($processMemorySamples)
 		$summary.unavailableMetrics = @($unavailableMetrics)
 		if ($ReadinessMode -ne "none") {
@@ -2262,9 +2369,10 @@ finally {
 		}
 		$completenessFailure = $false
 		if ($RunManagedReloadAutomationLoopback -and [bool]$summary.success) {
-			$stepDeltas = @($stepPublicationSamples | ForEach-Object { [UInt64]$_.toTick - [UInt64]$_.fromTick })
-			$evidenceStepDeltas = @($determinismEvidence.explicitStepDeltas)
-			$exactSteps = $measuredExplicitStepCount -gt 0 -and $stepDeltas.Count -eq $measuredExplicitStepCount -and @($stepDeltas | Where-Object { $_ -ne 1 }).Count -eq 0 -and ($stepDeltas -join ",") -eq ($evidenceStepDeltas -join ",")
+			$stepDeltas = @($stepPublicationSamples | Select-Object -Skip $WarmupStepCount | ForEach-Object { [UInt64]$_.toTick - [UInt64]$_.fromTick })
+			$evidenceStepDeltas = @($determinismEvidence.explicitStepDeltas | Select-Object -Skip $WarmupStepCount)
+			$completedMeasuredSteps = [Math]::Max(0, $measuredExplicitStepCount - $WarmupStepCount)
+			$exactSteps = $completedMeasuredSteps -gt 0 -and $stepDeltas.Count -eq $completedMeasuredSteps -and @($stepDeltas | Where-Object { $_ -ne 1 }).Count -eq 0 -and ($stepDeltas -join ",") -eq ($evidenceStepDeltas -join ",")
 			$stateEvidence = -not [string]::IsNullOrWhiteSpace([string]$determinismHash) -and $null -ne $determinismEvidence -and -not [string]::IsNullOrWhiteSpace([string]$determinismEvidence.authoredSceneSha256)
 			$rollbackEvidence = [bool]$colliderCookMatrix.completed -and $null -ne $colliderCookMatrix.conflict -and -not [bool]$colliderCookMatrix.conflict.partialVisibility -and $null -ne $colliderCookMatrix.stale -and -not [bool]$colliderCookMatrix.stale.partialVisibility
 			$visibilityEvidence = $null -ne $colliderCookMatrix.reparent -and -not [string]::IsNullOrWhiteSpace([string]$colliderCookMatrix.reparent.visibilityBoundary) -and $null -ne $colliderCookMatrix.active -and -not [string]::IsNullOrWhiteSpace([string]$colliderCookMatrix.active.targetBoundary)
@@ -2272,7 +2380,7 @@ finally {
 			$unavailableEvidence = $unavailableMetrics.Count -gt 0 -and @($unavailableMetrics | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -eq 0
 			$artifactEvidence = $artifactInventory.Count -gt 0
 			$checks = [ordered]@{
-				exactMeasuredStepDeltas = $exactSteps; measuredStepCount = $measuredExplicitStepCount; stepDeltas = $stepDeltas
+				exactMeasuredStepDeltas = $exactSteps; measuredStepCount = $completedMeasuredSteps; warmupStepCount = $WarmupStepCount; totalStepCount = $measuredExplicitStepCount; stepDeltas = $stepDeltas
 				deterministicStateEvidence = $stateEvidence; determinismHash = $determinismHash
 				rollbackEvidence = $rollbackEvidence; visibilityEvidence = $visibilityEvidence
 				normalEditorShutdown = $normalShutdown; unavailableMetricEvidence = $unavailableEvidence

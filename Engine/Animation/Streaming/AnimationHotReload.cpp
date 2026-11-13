@@ -640,7 +640,7 @@ namespace TerraEngine::Animation
 			return false;
 		}
 		++count;
-		AdvancePreparationEpochLocked();
+		// Retain bookkeeping is read live at retirement, never swapped by prepared publication.
 		return true;
 	}
 
@@ -659,7 +659,7 @@ namespace TerraEngine::Animation
 		{
 			m_generationRetains.erase(retained);
 		}
-		AdvancePreparationEpochLocked();
+		// Retain bookkeeping is read live at retirement, never swapped by prepared publication.
 		return true;
 	}
 

@@ -558,7 +558,11 @@ namespace TerraEngine::Editor::SceneViewOverlay
 				{"effective", snapshot.largeSceneState.effective},
 				{"objectCount", snapshot.largeSceneState.objectCount},
 				{"activationThreshold", snapshot.largeSceneState.activationThreshold}
-				,{"reason", snapshot.largeSceneState.effective ? "object_threshold" : "below_threshold"}
+				// An explicit preference is the cause even when the object count
+				// also crosses the automatic threshold. Preserve that distinction.
+				,{"reason", snapshot.largeSceneState.configuredMode == LargeSceneMode::On ? "forced_on"
+					: snapshot.largeSceneState.configuredMode == LargeSceneMode::Off ? "forced_off"
+					: snapshot.largeSceneState.effective ? "object_threshold" : "below_threshold"}
 				,{"reductions", snapshot.activeReductions}
 			}},
 			{"markers", {

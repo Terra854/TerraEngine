@@ -9,6 +9,10 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#if defined(TERRAENGINE_EDITOR_TESTS)
+#include <functional>
+#include <string_view>
+#endif
 
 enum class ScriptWorkspaceHealth
 {
@@ -65,6 +69,11 @@ struct ScriptCreationResult
 class ScriptWorkspaceService
 {
 public:
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	// Install before admitting a build and clear only after its worker joins.
+	// The callback records access ownership; it never changes production data.
+	void SetAccessObserverForTests(std::function<void(std::string_view)> observer) { m_AccessObserverForTests = std::move(observer); }
+#endif
 	struct EditorCommandContext
 	{
 		// Paths used by command templates. Tests and runtime code share this
@@ -114,6 +123,13 @@ public:
 	[[nodiscard]] static bool RequiresManagedReferenceCopy(const std::filesystem::path& source, const std::filesystem::path& target);
 
 private:
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	void ObserveAccessForTests(std::string_view operation) const
+	{
+		if (m_AccessObserverForTests) m_AccessObserverForTests(operation);
+	}
+	std::function<void(std::string_view)> m_AccessObserverForTests;
+#endif
 	// These helpers are kept private so every caller goes through
 	// EnsureWorkspace/RegenerateWorkspace and gets one consistent validation path.
 	bool WriteWorkspaceFiles(std::string* outError);

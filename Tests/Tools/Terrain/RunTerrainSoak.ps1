@@ -65,6 +65,7 @@ $evidence = [ordered]@{
 if (-not $DryRun -and $missing.Count -eq 0) {
 	$benchmarkResult = Join-Path $output "terrain-benchmark-result.json"
 	$generatedFixture = Join-Path $output "terrain-256km.json"
+	$stopwatch = $null
 	try {
 		# The sparse 256 km fixture is generated immediately before the route run,
 		# proving the installed generator and benchmark consume the same artifact.
@@ -72,32 +73,60 @@ if (-not $DryRun -and $missing.Count -eq 0) {
 		if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $generatedFixture -PathType Leaf)) {
 			throw "Terrain fixture generator did not publish the 256 km fixture."
 		}
+		$evidence.status = 'running'
 		$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 		$iteration = 0
 		do {
 			$iteration++
+			$evidence.iterations = $iteration
+			$evidence.benchmarkResult = $benchmarkResult
+			# Require fresh evidence after each invocation before another iteration;
+			# an old successful file must not survive a missing child result.
+			if (Test-Path -LiteralPath $benchmarkResult) { Remove-Item -LiteralPath $benchmarkResult -Force }
 			& $benchmark --fixture $generatedFixture --route $Route --duration-minutes 0 --collision true --output $benchmarkResult
 			if ($LASTEXITCODE -ne 0) { throw "Terrain benchmark exited with code $LASTEXITCODE." }
+			$evidence.benchmarkSha256 = (Get-FileHash -LiteralPath $benchmarkResult -Algorithm SHA256).Hash.ToLowerInvariant()
+			$benchmarkJson = Get-Content -Raw -LiteralPath $benchmarkResult | ConvertFrom-Json
+			$evidence.benchmarkResult = $benchmarkResult
+			$evidence.iterations = $iteration
+			$evidence.elapsedSeconds = $stopwatch.Elapsed.TotalSeconds
+			if ([string]$benchmarkJson.status -eq 'unavailable') {
+				# The CPU-only producer honestly lacks a live route. Stop now rather
+				# than waiting 30 minutes to rediscover that missing prerequisite.
+				$evidence.status = 'unavailable'
+				$evidence.unavailableReason = 'Installed terrain benchmark did not execute the required live route.'
+				$qualification = $benchmarkJson.PSObject.Properties['qualification']
+				$evidence.benchmarkQualification = if ($null -ne $qualification) { $qualification.Value } else { $null }
+				break
+			}
+			if ([string]$benchmarkJson.status -notin @('available', 'measured') -or $benchmarkJson.route -ne $Route -or $null -eq $benchmarkJson.distanceKilometres -or $benchmarkJson.distanceKilometres -ne 1000) {
+				throw "Terrain benchmark did not publish available evidence for the requested 1000 km route."
+			}
 		} while ($stopwatch.Elapsed.TotalSeconds -lt $runtimeSeconds)
 		$stopwatch.Stop()
-		$benchmarkJson = Get-Content -Raw -LiteralPath $benchmarkResult | ConvertFrom-Json
-		if ($benchmarkJson.route -ne $Route -or $benchmarkJson.distanceKilometres -ne 1000) { throw "Terrain benchmark did not publish the requested 1000 km route." }
-		$evidence.fixtureArtifact = $generatedFixture
-		$evidence.benchmarkResult = $benchmarkResult
-		$evidence.iterations = $iteration
-		$evidence.elapsedSeconds = $stopwatch.Elapsed.TotalSeconds
-		$evidence.artifactHashes = [ordered]@{
-			manifest = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
-			workloads = (Get-FileHash -LiteralPath $workloads -Algorithm SHA256).Hash.ToLowerInvariant()
-			fixture = (Get-FileHash -LiteralPath $generatedFixture -Algorithm SHA256).Hash.ToLowerInvariant()
-			benchmark = (Get-FileHash -LiteralPath $benchmarkResult -Algorithm SHA256).Hash.ToLowerInvariant()
+		if ($evidence.status -eq 'unavailable') {
+			# Raw unsupported evidence remains intact; vector timings do not become
+			# terrain/render measurements. The common epilogue writes and rejects it.
+			$evidence.metrics = 'unavailable-until-measured-route-execution'
+		} else {
+			$evidence.fixtureArtifact = $generatedFixture
+			$evidence.benchmarkResult = $benchmarkResult
+			$evidence.iterations = $iteration
+			$evidence.elapsedSeconds = $stopwatch.Elapsed.TotalSeconds
+			$evidence.artifactHashes = [ordered]@{
+				manifest = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+				workloads = (Get-FileHash -LiteralPath $workloads -Algorithm SHA256).Hash.ToLowerInvariant()
+				fixture = (Get-FileHash -LiteralPath $generatedFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+				benchmark = (Get-FileHash -LiteralPath $benchmarkResult -Algorithm SHA256).Hash.ToLowerInvariant()
+			}
+			if (-not [string]::IsNullOrWhiteSpace($TepakArchive)) { $evidence.artifactHashes.tepak = (Get-FileHash -LiteralPath $TepakArchive -Algorithm SHA256).Hash.ToLowerInvariant() }
+			if ($evidence.elapsedSeconds -lt $runtimeSeconds) { throw "Measured route duration did not reach the requested runtime." }
+			$evidence.status = if ($shortSmoke) { "measured-smoke" } else { "measured" }
+			$evidence.metrics = $benchmarkJson.rawMetrics
 		}
-		if (-not [string]::IsNullOrWhiteSpace($TepakArchive)) { $evidence.artifactHashes.tepak = (Get-FileHash -LiteralPath $TepakArchive -Algorithm SHA256).Hash.ToLowerInvariant() }
-		if ($evidence.elapsedSeconds -lt $runtimeSeconds) { throw "Measured route duration did not reach the requested runtime." }
-		$evidence.status = if ($shortSmoke) { "measured-smoke" } else { "measured" }
-		$evidence.metrics = $benchmarkJson.rawMetrics
 	}
 	catch {
+		if ($null -ne $stopwatch) { $stopwatch.Stop(); $evidence.elapsedSeconds = $stopwatch.Elapsed.TotalSeconds }
 		$evidence.status = "failed"
 		$evidence.failure = $_.Exception.Message
 	}

@@ -714,44 +714,53 @@ namespace TerraEngine::Animation {
 		return hash;
 	}
 
+	namespace {
+		// Fingerprints describe an exact admissible dependency binding. Keeping
+		// this pure lets rollback qualify another current controller clip without
+		// changing the live animator or weakening the history validator.
+		AnimationDeterministicFingerprint BuildBindingDeterministicFingerprint(
+			const AnimatorInstanceDescriptor& descriptor, const AnimatorPlaybackBinding& binding) noexcept {
+			AnimationDeterministicFingerprint result;
+			result.compatibility = binding.skeleton ? binding.skeleton->compatibilityFingerprint : 0U;
+
+			const AnimationGuid controllerId = descriptor.controller.IsValid()
+												   ? descriptor.controller.assetId
+												   : (binding.clip ? binding.clip->assetId : AnimationGuid{});
+			result.controllerAsset = HashAnimationGuid(1469598103934665603ULL, controllerId);
+			result.programAsset = binding.evaluationProgram && binding.evaluationProgram->stableHash != 0U
+									  ? binding.evaluationProgram->stableHash
+									  : binding.clipDeterministicContentFingerprint;
+			if(binding.retargetProfile) {
+				result.retargetAsset = HashAnimationGuid(1469598103934665603ULL, binding.retargetProfile->assetId);
+			}
+			if(binding.motionDatabase) {
+				result.motionDatabaseAsset = HashAnimationGuid(1469598103934665603ULL, binding.motionDatabase->assetId);
+			}
+			if(binding.ragdollProfile) {
+				result.ragdollProfileAsset = HashAnimationGuid(1469598103934665603ULL, binding.ragdollProfile->assetId);
+			}
+
+			std::uint64_t aggregate = 1469598103934665603ULL;
+			aggregate = MixDeterministicChecksum(aggregate, result.compatibility);
+			aggregate = MixDeterministicChecksum(aggregate, result.controllerAsset);
+			aggregate = MixDeterministicChecksum(aggregate, result.programAsset);
+			aggregate = MixDeterministicChecksum(aggregate, result.retargetAsset);
+			aggregate = MixDeterministicChecksum(aggregate, result.motionDatabaseAsset);
+			aggregate = MixDeterministicChecksum(aggregate, result.ragdollProfileAsset);
+			aggregate = MixDeterministicChecksum(aggregate, binding.clipGeneration);
+			aggregate = MixDeterministicChecksum(aggregate, binding.skeletonGeneration);
+			aggregate = MixDeterministicChecksum(aggregate, binding.programGeneration);
+			aggregate = MixDeterministicChecksum(aggregate, binding.clipDeterministicContentFingerprint);
+			if(binding.skeleton) {
+				aggregate = HashAnimationGuid(aggregate, binding.skeleton->assetId);
+				aggregate = MixDeterministicChecksum(aggregate, binding.skeleton->referencePoseHash);
+			}
+			result.aggregateAssetHash = aggregate;
+			return result;
+		}
+	}
 	AnimationDeterministicFingerprint AnimationSystem::Impl::BuildDeterministicFingerprint(const RuntimeRecord& record) noexcept {
-		AnimationDeterministicFingerprint result;
-		result.compatibility = record.binding.skeleton ? record.binding.skeleton->compatibilityFingerprint : 0U;
-
-		const AnimationGuid controllerId = record.descriptor.controller.IsValid()
-											   ? record.descriptor.controller.assetId
-											   : (record.binding.clip ? record.binding.clip->assetId : AnimationGuid{});
-		result.controllerAsset = HashAnimationGuid(1469598103934665603ULL, controllerId);
-		result.programAsset = record.binding.evaluationProgram && record.binding.evaluationProgram->stableHash != 0U
-								  ? record.binding.evaluationProgram->stableHash
-								  : record.binding.clipDeterministicContentFingerprint;
-		if(record.binding.retargetProfile) {
-			result.retargetAsset = HashAnimationGuid(1469598103934665603ULL, record.binding.retargetProfile->assetId);
-		}
-		if(record.binding.motionDatabase) {
-			result.motionDatabaseAsset = HashAnimationGuid(1469598103934665603ULL, record.binding.motionDatabase->assetId);
-		}
-		if(record.binding.ragdollProfile) {
-			result.ragdollProfileAsset = HashAnimationGuid(1469598103934665603ULL, record.binding.ragdollProfile->assetId);
-		}
-
-		std::uint64_t aggregate = 1469598103934665603ULL;
-		aggregate = MixDeterministicChecksum(aggregate, result.compatibility);
-		aggregate = MixDeterministicChecksum(aggregate, result.controllerAsset);
-		aggregate = MixDeterministicChecksum(aggregate, result.programAsset);
-		aggregate = MixDeterministicChecksum(aggregate, result.retargetAsset);
-		aggregate = MixDeterministicChecksum(aggregate, result.motionDatabaseAsset);
-		aggregate = MixDeterministicChecksum(aggregate, result.ragdollProfileAsset);
-		aggregate = MixDeterministicChecksum(aggregate, record.binding.clipGeneration);
-		aggregate = MixDeterministicChecksum(aggregate, record.binding.skeletonGeneration);
-		aggregate = MixDeterministicChecksum(aggregate, record.binding.programGeneration);
-		aggregate = MixDeterministicChecksum(aggregate, record.binding.clipDeterministicContentFingerprint);
-		if(record.binding.skeleton) {
-			aggregate = HashAnimationGuid(aggregate, record.binding.skeleton->assetId);
-			aggregate = MixDeterministicChecksum(aggregate, record.binding.skeleton->referencePoseHash);
-		}
-		result.aggregateAssetHash = aggregate;
-		return result;
+		return BuildBindingDeterministicFingerprint(record.descriptor, record.binding);
 	}
 
 	AnimationRollbackGenerationStamp
@@ -1158,7 +1167,8 @@ namespace TerraEngine::Animation {
 			// atomically instead of partially restoring only animation-owned fields.
 			return AnimationStatus::Unsupported;
 		}
-		if(record.historyGeneration == std::numeric_limits<AnimationGeneration>::max() ||
+		if(record.contentGeneration == std::numeric_limits<AnimationGeneration>::max() ||
+		   record.historyGeneration == std::numeric_limits<AnimationGeneration>::max() ||
 		   record.stateGeneration == std::numeric_limits<std::uint64_t>::max() ||
 		   record.parameterGeneration == std::numeric_limits<std::uint64_t>::max() ||
 		   record.executionModeGeneration == std::numeric_limits<std::uint64_t>::max()) {
@@ -1197,6 +1207,32 @@ namespace TerraEngine::Animation {
 			if(!clipSelected || !candidateBinding.clip) {
 				return AnimationStatus::IncompatibleAsset;
 			}
+			const bool clipChanged = candidateBinding.clip != record.binding.clip
+				|| candidateBinding.clipGeneration != record.binding.clipGeneration
+				|| candidateBinding.clipDeterministicContentFingerprint != record.binding.clipDeterministicContentFingerprint;
+			if(clipChanged) {
+				// Controller clip records do not carry a resident GPU publication. Revoke
+				// the previous clip's proof and use CPU authority until residency refresh
+				// supplies a complete binding for the restored clip at its normal boundary.
+				candidateBinding.gpuFastBinding.reset();
+				candidateBinding.gpuResidentPayloads.reset();
+				candidateBinding.gpuProgramResourceIndex = kGpuAnimationInvalidResourceIndex;
+				candidateBinding.gpuVisual = {};
+				candidateBinding.gpuExecution.resourcesResident = false;
+			}
+
+			// Pin and validate the selected immutable clip's exact residency tuple.
+			// The previous view may still name the transient crossfade destination.
+			const bool sourceCompatible = candidateBinding.retargetSourceSkeleton
+				&& candidateBinding.clip->compatibilityFingerprint == candidateBinding.retargetSourceSkeleton->compatibilityFingerprint
+				&& candidateBinding.clip->skeletonAssetId == candidateBinding.retargetSourceSkeleton->assetId;
+			const SkeletonAsset* samplingSkeleton = sourceCompatible
+				? candidateBinding.retargetSourceSkeleton.get() : candidateBinding.skeleton.get();
+			AnimationClipView candidateClipView;
+			const auto viewStatus = candidateClipView.Open(*candidateBinding.clip, samplingSkeleton,
+				std::span<const std::uint8_t>(candidateBinding.residentSegments), candidateBinding.clipGeneration,
+				candidateBinding.streamedSegmentPayloads);
+			if(viewStatus != AnimationStatus::Ok) return viewStatus;
 
 			const AnimationControllerRollbackState& controller = snapshot.controllers.front();
 			candidateBinding.stateId = controller.activeStateId;
@@ -1335,6 +1371,7 @@ namespace TerraEngine::Animation {
 			// Every allocation and compatibility check above completed before this
 			// protected all-or-none replacement of animation-owned live state.
 			record.binding = std::move(candidateBinding);
+			record.clipView = std::move(candidateClipView);
 			record.playback = candidatePlayback;
 			record.eventStream = std::move(candidateEventStream);
 			record.graphState = std::move(candidateGraph);
@@ -1349,6 +1386,10 @@ namespace TerraEngine::Animation {
 			record.appliedMotionQueryId = candidateMotionQueryId;
 			record.latestMotionCandidate = candidateMotion;
 			record.hasMotionCandidate = candidateHasMotion;
+			if(clipChanged) record.executionModeState = {};
+			// Compact admission proofs are keyed by this content generation. A
+			// restored binding must never reuse the pre-restore publication's proof.
+			++record.contentGeneration;
 			++record.historyGeneration;
 			++record.stateGeneration;
 			++record.parameterGeneration;
@@ -1399,33 +1440,53 @@ namespace TerraEngine::Animation {
 					continue;
 				}
 
-				const AnimationRollbackRestoreRequirements requirements{record->handle, BuildDeterministicFingerprint(*record),
-																		record->contentGeneration,
-																		BuildRollbackGenerations(*record, *published)};
+				AnimationRollbackRestoreRequirements requirements{record->handle, BuildDeterministicFingerprint(*record),
+					record->contentGeneration, BuildRollbackGenerations(*record, *published)};
 				AnimationStatus lookupStatus = AnimationStatus::InvalidArgument;
-				if(request.operation == NativeAnimationDeterminismOperation::Restore) {
-					lookupStatus = persistentReuse.rollbackHistory
-									   .LookupDetailed(record->handle, request.sourceTick, requirements, completion.sourceSnapshot)
-									   .status;
-				} else if(request.operation == NativeAnimationDeterminismOperation::ReplaySeek) {
-					AnimationReplayRequest replay;
-					replay.mode = AnimationReplayMode::ReplaySeek;
-					replay.animator = record->handle;
-					replay.seekTick = request.targetTick;
-					replay.requirements = requirements;
-					replay.eventPolicy = (request.flags & 1U) != 0U ? AnimationReplayEventPolicy::ReplayHistorical
-																	: AnimationReplayEventPolicy::SuppressHistorical;
-					// Production keeps seek publication atomic by requiring the exact
-					// retained tick. The standalone replay helper remains available for
-					// host-owned bounded catch-up/resimulation.
-					replay.requireExactTick = true;
-					const AnimationReplayResult replayResult = ResolveAnimationReplay(persistentReuse.rollbackHistory, replay);
-					lookupStatus = replayResult.status;
-					if(lookupStatus == AnimationStatus::Ok) {
-						completion.sourceSnapshot = replayResult.resumeSnapshot;
+				if(request.operation == NativeAnimationDeterminismOperation::Restore
+					|| request.operation == NativeAnimationDeterminismOperation::ReplaySeek) {
+					const auto lookupTick = request.operation == NativeAnimationDeterminismOperation::Restore
+						? request.sourceTick : request.targetTick;
+					auto lookup = persistentReuse.rollbackHistory.LookupDetailed(record->handle, lookupTick,
+						requirements, completion.sourceSnapshot);
+					if(lookup.outcome == AnimationHistoryLookupOutcome::FingerprintMismatch) {
+						// Crossfade changes the active clip, not the dependency set. Only
+						// exact CURRENT controller dependencies may qualify a historical
+						// candidate; externally retained obsolete owners are never searched.
+						AnimatorPlaybackBinding candidate = record->binding;
+						for(const auto& dependency : record->binding.controllerClips) {
+							if(!dependency.clip || dependency.clipGeneration == 0U
+								|| dependency.deterministicContentFingerprint == 0U) continue;
+							candidate.clip = dependency.clip;
+							candidate.clipGeneration = dependency.clipGeneration;
+							candidate.clipDeterministicContentFingerprint = dependency.deterministicContentFingerprint;
+							candidate.residentSegments = dependency.residentSegments;
+							candidate.streamedSegmentPayloads = dependency.streamedSegmentPayloads;
+							requirements.fingerprint = BuildBindingDeterministicFingerprint(record->descriptor, candidate);
+							lookup = persistentReuse.rollbackHistory.LookupDetailed(record->handle, lookupTick,
+								requirements, completion.sourceSnapshot);
+							// A matching fingerprint must still pass every generation and
+							// integrity check. Do not retry those consequential rejections.
+							if(lookup.outcome != AnimationHistoryLookupOutcome::FingerprintMismatch) break;
+						}
 					}
-				} else {
-					lookupStatus = AnimationStatus::InvalidArgument;
+					lookupStatus = lookup.status;
+					if(lookupStatus == AnimationStatus::Ok
+						&& request.operation == NativeAnimationDeterminismOperation::ReplaySeek) {
+						AnimationReplayRequest replay;
+						replay.mode = AnimationReplayMode::ReplaySeek;
+						replay.animator = record->handle;
+						replay.seekTick = request.targetTick;
+						replay.requirements = requirements;
+						replay.eventPolicy = (request.flags & 1U) != 0U ? AnimationReplayEventPolicy::ReplayHistorical
+							: AnimationReplayEventPolicy::SuppressHistorical;
+						// Preserve the existing exact-tick/event replay contract after the
+						// same strict dependency/generation preflight as ordinary restore.
+						replay.requireExactTick = true;
+						const auto replayResult = ResolveAnimationReplay(persistentReuse.rollbackHistory, replay);
+						lookupStatus = replayResult.status;
+						if(lookupStatus == AnimationStatus::Ok) completion.sourceSnapshot = replayResult.resumeSnapshot;
+					}
 				}
 
 				if(lookupStatus == AnimationStatus::Ok && request.expectedChecksum != 0U &&

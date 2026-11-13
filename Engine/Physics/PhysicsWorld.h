@@ -428,6 +428,10 @@ namespace TerraEngine::Physics {
 		PhysicsHandleStatus Status(PhysicsCharacterHandle handle) const;
 
 	private:
+		friend class PhysicsFrameRegistry;
+		// Only the owning persistent registry may seed a newly allocated frame
+		// world's first lifetime; zero selects the ordinary primary-world policy.
+		bool CreateForLifetime(const PhysicsSettings& settings, PhysicsGeneration initialGeneration);
 		static PhysicsGeneration NextNonzeroGeneration(PhysicsGeneration generation) noexcept;
 		bool CanAccessRegistriesLocked() const noexcept;
 		PhysicsWorldHandle ActiveHandleLocked() const noexcept;

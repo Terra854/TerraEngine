@@ -431,8 +431,25 @@ namespace TerraEngine::Animation {
                                               right.stableInstanceId,
                                               right.workPacketIndex);
                             });
-                  publication->BuildOwnerObjectLookup();
+				  publication->BuildOwnerObjectLookup();
                 }
+				// A compact dynamic shell may have changed object ownership without
+				// changing GPU topology. Publish only a complete exact owner mapping;
+				// otherwise the entire generation takes the established safe path.
+				// The hash index is optional: allocation failure preserves the sorted
+				// exact mappings used by FindFirstOwnerObjectMapping's binary search.
+				// Count validation still rejects missing or ambiguous lowered owners.
+				if(publication->OwnerObjectMappings().size() != publication->plan.WorkPackets().size()) {
+					publication->ownerObjectMappings.clear();
+					publication->ownerObjectLookupIndices.clear();
+					publication->retainedOwnerObjectMappings.reset();
+					publication->retainedOwnerObjectLookupIndices.reset();
+					publication->ownerObjectLookupMask = 0U;
+					publication->plan = {};
+					publication->topology = {};
+					publication->topologyDynamicState = {};
+					publication->safeFallback = true;
+				}
               } catch (const std::bad_alloc &) {
                 // An incomplete owner map cannot safely enter GPU-only
                 // rendering.

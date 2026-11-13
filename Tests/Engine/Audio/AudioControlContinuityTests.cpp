@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <map>
@@ -38,6 +39,21 @@ namespace TerraEngine::Tests {
 			auto previous = peak.load();
 			while(previous < value && !peak.compare_exchange_weak(previous, value)) {}
 		}
+		// A failed assertion still participates in the retry rendezvous by dropping
+		// this worker. Otherwise surviving producers wait forever for a thrown task.
+		struct RetryPhaseParticipant {
+			std::barrier<>& rendezvous;
+			std::atomic<std::size_t>& active;
+			bool pending = true;
+			~RetryPhaseParticipant() {
+				if(pending) rendezvous.arrive_and_drop();
+				--active;
+			}
+			void CompleteRetryChecks() {
+				pending = false;
+				rendezvous.arrive_and_wait();
+			}
+		};
 		struct ProducerEvidence {
 			std::size_t producers, requests, applied, pendingPeak, completedPeak, evictions, duplicateApplications, terminalOutcomes;
 		};
@@ -78,6 +94,7 @@ namespace TerraEngine::Tests {
 				auto task = pool->createTask([&, producer]() {
 					RaisePeak(peakActive, ++active);
 					start.arrive_and_wait();
+					RetryPhaseParticipant participant{start, active};
 					for(std::size_t index = producer; index < requestCount; index += producerCount) {
 						auto request = Request("matrix-" + std::to_string(index), producer + 1U);
 						request.commands.front().scalarValue = static_cast<float>(index);
@@ -95,7 +112,7 @@ namespace TerraEngine::Tests {
 							// Keep these first owners pending until every producer has
 							// checked its retry, avoiding any assumption about retention
 							// after an arbitrarily long operating-system deschedule.
-							start.arrive_and_wait();
+							participant.CompleteRetryChecks();
 						}
 						const auto sampled = queue.Statistics();
 						RaisePeak(pendingPeak, sampled.pendingCommands);
@@ -111,13 +128,19 @@ namespace TerraEngine::Tests {
 							++settled;
 						}
 					}
-					--active;
 				});
 				futures.push_back(task->getFuture());
 				pool->enqueue(task, requestCount / producerCount);
 			}
-			for(auto& future : futures) future.get();
+			// Observe every producer before reporting the first failure so task inputs
+			// and barrier ownership remain alive until all surviving workers settle.
+			std::exception_ptr firstFailure;
+			for(auto& future : futures) {
+				try { future.get(); }
+				catch(...) { if(!firstFailure) firstFailure = std::current_exception(); }
+			}
 			pool->shutdown();
+			if(firstFailure) std::rethrow_exception(firstFailure);
 			const auto final = queue.Statistics();
 			RaisePeak(completedPeak, final.completedRecords);
 			context.ExpectEqual(producerCount, peakActive.load(), "All requested producers must actually run concurrently.");
@@ -133,6 +156,31 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterAudioControlContinuityTests(TestRegistry& registry) {
+		registry.Add("Audio.ControlContinuity.FailedProducerReleasesRetryRendezvous", [](TestContext& context) {
+			auto pool = ThreadPool::CreateOwned(2U);
+			std::barrier start(2);
+			std::atomic<std::size_t> active{0U};
+			std::vector<std::future<void>> futures;
+			for(unsigned producer = 0U; producer < 2U; ++producer) {
+				auto task = pool->createTask([&, producer]() {
+					++active;
+					start.arrive_and_wait();
+					RetryPhaseParticipant participant{start, active};
+					context.Expect(producer != 0U, "Seeded producer prerequisite failure.");
+					participant.CompleteRetryChecks();
+				});
+				futures.push_back(task->getFuture());
+				pool->enqueue(task);
+			}
+			unsigned failures = 0U;
+			for(auto& future : futures) {
+				try { future.get(); }
+				catch(const TestFailure&) { ++failures; }
+			}
+			pool->shutdown();
+			context.ExpectEqual(1U, failures, "The seeded assertion must propagate after its peer settles.");
+			context.ExpectEqual(std::size_t{0U}, active.load(), "Both producer owners must retire after failure.");
+		});
 		registry.Add("Audio.ControlContinuity.Request4097RemainsAdmissible", [](TestContext& context) {
 			Audio::AudioControlQueue queue;
 			for(std::size_t index = 0U; index < 4097U; ++index) {

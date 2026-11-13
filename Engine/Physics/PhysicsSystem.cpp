@@ -1,12 +1,15 @@
 // PhysicsSystem.cpp - seven declared workloads over the shared Jolt 5.6 world.
 
 #include "PhysicsSystem.h"
+#include "PhysicsReviewTestAccess.h"
 
 #include "Animation/Ragdoll/RagdollActivation.h"
 #include "Animation/Runtime/RootMotion.h"
 
 #include "Backend/JoltPhysicsBackend.h"
 #include "Components/Physics/CharacterControllerComponent.h"
+#include "Components/Physics/ColliderSetComponent.h"
+#include "Components/Physics/RigidBodyComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "Physics/Assets/PhysicsAssetChangeJournal.h"
@@ -20,6 +23,7 @@
 #include "Resource/ResourceManager.h"
 #include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
+#include "ThreadPool/ScopedTaskSettlement.h"
 
 #include <algorithm>
 #include <array>
@@ -35,6 +39,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 
@@ -58,6 +63,37 @@ namespace TerraEngine::Physics {
 		std::uint64_t NanosecondsFromMilliseconds(double milliseconds) {
 			if(!std::isfinite(milliseconds) || milliseconds <= 0.0) return 0U;
 			return static_cast<std::uint64_t>(milliseconds * 1'000'000.0);
+		}
+
+		// Native creation requires initial speeds to fit their authored caps. Use
+		// double length arithmetic so large finite input cannot overflow before
+		// scaling. Invalid inputs still reject; they are never repaired into zeros.
+		bool PrepareInitialVelocities(Backend::PhysicsBodyCreateRequest& request) {
+			const auto bounded = [](PhysicsVector3 value, float maximum) -> std::optional<PhysicsVector3> {
+				if(!value.IsFinite() || !std::isfinite(maximum) || maximum <= 0.0F) return std::nullopt;
+				const double length = std::hypot(static_cast<double>(value.x), static_cast<double>(value.y), static_cast<double>(value.z));
+				// Leave float dot/sqrt rounding headroom for the provider's SIMD norm.
+				const double safeMaximum = static_cast<double>(maximum) * (1.0 - 8.0 * std::numeric_limits<float>::epsilon());
+				if(length > safeMaximum) {
+					const double scale = safeMaximum / length;
+					const auto towardZero = [scale](float component) {
+						const double exact = static_cast<double>(component) * scale;
+						float rounded = static_cast<float>(exact);
+						if(std::abs(static_cast<double>(rounded)) > std::abs(exact)) rounded = std::nextafter(rounded, 0.0F);
+						return rounded;
+					};
+					value = {towardZero(value.x), towardZero(value.y), towardZero(value.z)};
+				}
+				// A finite but unrepresentable native squared norm must also reject
+				// normally rather than reaching a vendor assertion or infinity.
+				if(!std::isfinite(value.x * value.x + value.y * value.y + value.z * value.z)) return std::nullopt;
+				return value;
+			};
+			const auto linear = bounded(request.linearVelocity, request.maximumLinearVelocity);
+			const auto angular = bounded(request.angularVelocity, request.maximumAngularVelocity);
+			if(!linear || !angular) return false;
+			request.linearVelocity = *linear; request.angularVelocity = *angular;
+			return true;
 		}
 
 		bool SamePose(const PhysicsPose& left, const PhysicsPose& right) {
@@ -170,6 +206,13 @@ namespace TerraEngine::Physics {
 			TerrainCollisionPublication publication;
 		};
 
+		// One globally bounded deferred owner. A failed post-commit release must
+		// not be forgotten or allow every later replacement to add another orphan.
+		struct PendingTerrainShapeRetirement {
+			PhysicsShapeHandle shape;
+			bool providerReleased = false;
+		};
+
 		struct PreparedBody {
 			PhysicsBodyDescriptor body;
 			std::vector<PhysicsColliderDescriptor> colliders;
@@ -252,7 +295,7 @@ namespace TerraEngine::Physics {
 			: backend(std::make_unique<Backend::JoltPhysicsBackend>(ThreadPool::instance())) {
 		}
 
-		FrameWorkloadActivation InspectFrameWorkloadActivationLocked(float deltaTime) const {
+		FrameWorkloadActivation InspectFrameWorkloadActivationLocked(float deltaTime) {
 			FrameWorkloadActivation activation;
 			const bool worldActive = world.Handle().IsValid();
 			const PhysicsCommandQueueDiagnostics commands = world.CommandQueueDiagnostics();
@@ -263,7 +306,7 @@ namespace TerraEngine::Physics {
 			activation.providerItems = world.RegistryStatistics().bodyCount;
 			activation.authoringItems = authoring ? authoring->Data().bodies.size() : activation.providerItems;
 
-			bool authoringChanged = pendingSettings.has_value() || !authoring || !authoringSceneRevisionValid;
+			bool authoringChanged = pendingSettings.has_value() || !authoring || !authoringSceneRevisionValid || !secondaryAdmissionRetries.empty();
 			if (worldActive && !authoringChanged)
 			{
 				const auto packet = ObjectManager::instance().LoadPublishedSceneChangePacketShared();
@@ -274,14 +317,34 @@ namespace TerraEngine::Physics {
 			}
 
 			const PhysicsWorldTimingState timing = world.Timing();
-			const PhysicsSettings settings = worldActive ? world.Settings() : configuredSettings;
-			const bool explicitStep = timing.pendingExplicitStepCount > 0U;
-			const bool accumulating = worldActive && !world.IsPaused() && deltaTime > 0.0F;
-			const bool predictedStep = explicitStep || (accumulating
-				&& timing.accumulator + deltaTime >= settings.fixedTimeStep);
+			// Declarations only inspect clocks. Planning here would consume ticks or
+			// paused requests a second time when PhysicsPrepare executes its callback.
+			const auto predictsStep = [deltaTime](const PhysicsWorld& owner) {
+				const auto clock = owner.Timing();
+				if(owner.IsPaused()) return clock.pendingExplicitStepCount > 0U;
+				const auto policy = owner.Settings();
+				const float elapsed = std::isfinite(deltaTime) && deltaTime > 0.0F ? deltaTime : 0.0F;
+				return std::min(clock.accumulator + elapsed, policy.maxAccumulatedTime) >= policy.fixedTimeStep;
+			};
+			bool explicitStep = timing.pendingExplicitStepCount > 0U;
+			bool accumulating = worldActive && !world.IsPaused() && std::isfinite(deltaTime) && deltaTime > 0.0F;
+			// Snapshot may replace primary timing policy before Prepare consumes it.
+			// Keep the existing downstream phases for that one settings transition;
+			// they safely do empty work if the restarted world remains paused.
+			bool predictedStep = worldActive && (pendingSettings.has_value() || predictsStep(world));
+			for(const auto& [id, frame] : frameBackends) {
+				(void)id;
+				const PhysicsWorld* owner = frameRegistry.FindWorldForProtectedAccess(frame.frame);
+				if(!owner) continue;
+				explicitStep = explicitStep || owner->Timing().pendingExplicitStepCount > 0U;
+				accumulating = accumulating || (!owner->IsPaused() && std::isfinite(deltaTime) && deltaTime > 0.0F);
+				predictedStep = predictedStep || predictsStep(*owner);
+				activation.providerItems += owner->RegistryStatistics().bodyCount;
+				activation.queryItems += owner->QueryDiagnostics().queuedDepth;
+			}
 			const bool preparationWork = worldActive
 				&& (authoringChanged || accumulating || explicitStep || activation.commandItems > 0U
-					|| activation.ragdollItems > 0U);
+					|| activation.queryItems > 0U || activation.ragdollItems > 0U);
 
 			// Snapshot remains protected because it observes live scene generations.
 			// Every later phase is activated only when its prerequisite can produce
@@ -313,8 +376,10 @@ namespace TerraEngine::Physics {
 			// restart occurs entirely inside PhysicsSnapshot's protected boundary;
 			// the same frame then captures authoring and stages every runtime record
 			// against the new world generation before publication.
-			if(!StopWorldLocked()) return false;
-			return StartWorldLocked(configuredSettings);
+			const bool wasPaused = world.IsPaused();
+			if(!StopWorldLocked() || !StartWorldLocked(configuredSettings)) return false;
+			// A policy edit replaces provider state, not the user's playback mode.
+			return !wasPaused || world.SetPaused(true);
 		}
 
 		bool StartWorldLocked(const PhysicsSettings& requestedSettings) {
@@ -367,6 +432,31 @@ namespace TerraEngine::Physics {
 			return false;
 		}
 
+		bool RetryTerrainShapeRetirementLocked() {
+			if(!pendingTerrainShapeRetirement) return true;
+			auto& pending = *pendingTerrainShapeRetirement;
+			const auto current = world.Handle();
+			if(!backend || pending.shape.worldId != current.worldId
+				|| pending.shape.worldGeneration != current.worldGeneration) return false;
+			// Existing protected Before Physics/lifecycle boundary, system -> backend
+			// lock order. Old body removal already settled; other native bodies own
+			// their own RefConst<Shape>. Workers retain copied handles, not this ref.
+			try {
+				if(!pending.providerReleased) {
+					if(!backend->DestroyShape(pending.shape).Succeeded()) return false;
+					pending.providerReleased = true;
+				}
+				if(world.Status(pending.shape) == PhysicsHandleStatus::Alive
+					&& !world.Release(pending.shape)) return false;
+				pendingTerrainShapeRetirement.reset();
+				return true;
+			} catch(...) {
+				// The replacement is already committed. Keep one owner and refuse
+				// further terrain admission instead of claiming rollback or growing.
+				return false;
+			}
+		}
+
 		bool StopWorldLocked() {
 			const PhysicsWorldHandle handle = world.Handle();
 			if(!handle.IsValid()) return true;
@@ -383,6 +473,7 @@ namespace TerraEngine::Physics {
 			// collision system retains the desired recipe and republishes fresh handles
 			// after StartWorldLocked creates the replacement world.
 			terrainCollisions.clear();
+			pendingTerrainShapeRetirement.reset();
 			runtimeBodies.clear();
 			bodyObjects.clear();
 			runtimeConstraints.clear();
@@ -413,6 +504,12 @@ namespace TerraEngine::Physics {
 			authoring.reset();
 			authoringGeneration.reset();
 			preparationPlan.reset();
+			// Migration overrides name a concrete primary lifetime. Keep independent
+			// live islands, but never stamp the next primary world with this old one.
+			std::erase_if(frameMembershipOverrides, [handle](const auto& entry) {
+				return entry.second.world == handle
+					&& entry.second.frame == PhysicsFrameHandle{kPrimaryPhysicsFrameId, handle.worldGeneration};
+			});
 			observedPhysicsAssetGeneration = 0U;
 			lastAuthoringSceneGeneration = 0U;
 			lastAuthoringScenePublicationRevision = 0U;
@@ -442,6 +539,19 @@ namespace TerraEngine::Physics {
 			return destroyed.Succeeded() && completed;
 		}
 
+		// Resolve accepted output through its exact provider frame lifetime; local
+		// body slots and object UUIDs alone cannot identify an isolated world.
+		RuntimeBody* FindRuntimeBodyLocked(const TerraEngine::UUID& objectId, PhysicsFrameHandle frame) {
+			if(frame == PhysicsFrameHandle{kPrimaryPhysicsFrameId, world.Handle().worldGeneration}) {
+				const auto found = runtimeBodies.find(objectId);
+				return found == runtimeBodies.end() ? nullptr : &found->second;
+			}
+			const auto owner = frameBackends.find(frame.frameId.value);
+			if(owner == frameBackends.end() || owner->second.frame != frame) return nullptr;
+			const auto found = owner->second.runtimeBodies.find(objectId);
+			return found == owner->second.runtimeBodies.end() ? nullptr : &found->second;
+		}
+
 		void SnapshotLocked() {
 			authoringSnapshotReused = false;
 			if(!ApplyPendingSettingsLocked()) {
@@ -457,7 +567,10 @@ namespace TerraEngine::Physics {
 				PhysicsAssetChangeJournal::Instance().SnapshotSince(observedPhysicsAssetGeneration);
 			const bool packetValid = scenePacket != nullptr
 				&& scenePacket->Validate(objects.GetSceneGeneration()).valid;
-			const bool packetContinuous = authoring && packetValid
+			// Provider lifecycle changes can invalidate membership without a scene
+			// edit. Neither unchanged-packet reuse nor asset-only retention may use
+			// the old stamped snapshot until a protected recapture restores validity.
+			const bool packetContinuous = authoring && authoringSceneRevisionValid && packetValid
 				&& scenePacket->SceneGeneration() == lastAuthoringSceneGeneration
 				&& scenePacket->PublicationRevision() == lastAuthoringScenePublicationRevision + 1U;
 			const auto packetAffectsAuthoring = [this, &objects, &scenePacket]() {
@@ -468,10 +581,15 @@ namespace TerraEngine::Physics {
 						// A successful physics transform receipt already copied this exact
 						// revision into RuntimeBody. It is output feedback, not new scene
 						// authoring, so recapturing it would create a self-invalidating loop.
-						const auto runtime = runtimeBodies.find(record.objectId);
-						if(transforms && runtime != runtimeBodies.end()
-							&& runtime->second.hasPublishedPose
-							&& runtime->second.objectTransformRevision == record.transformRevision) continue;
+						const auto membership = frameMembershipOverrides.find(record.objectId);
+						const auto frame = membership == frameMembershipOverrides.end()
+							? PhysicsFrameHandle{kPrimaryPhysicsFrameId, world.Handle().worldGeneration}
+							: membership->second.frame;
+						const RuntimeBody* runtime = FindRuntimeBodyLocked(record.objectId, frame);
+						if(transforms && runtime && runtime->hasPublishedPose
+							&& runtime->objectGeneration == record.lifetimeGeneration
+							&& runtime->componentGeneration == record.componentGeneration
+							&& runtime->objectTransformRevision == record.transformRevision) continue;
 						changed.insert(record.objectId);
 					}
 				};
@@ -488,17 +606,20 @@ namespace TerraEngine::Physics {
 				}
 				if(std::any_of(authoring->Data().characters.begin(), authoring->Data().characters.end(),
 					[&changed](const PhysicsCharacterDescriptor& character) { return changed.contains(character.objectId); })) return true;
-				// The previous snapshot has no descriptor after a controller was
-				// removed. Check changed live objects too, or a re-added controller
-				// would be mistaken for unrelated scene work and never captured.
-				const auto hasNewCharacter = [&objects](const auto& records) {
+				// Previous descriptors cannot name newly added owners. Census every
+				// authored physics family on changed live objects before reusing a packet.
+				const auto hasNewPhysicsOwner = [&objects](const auto& records) {
 					return std::any_of(records.begin(), records.end(), [&objects](const auto& record) {
 						const auto* character = objects.GetComponent<CharacterControllerComponent>(record.object);
-						return character != nullptr && character->active;
+						const auto* rigid = objects.GetComponent<RigidBodyComponent>(record.object);
+						const auto* colliders = objects.GetComponent<ColliderSetComponent>(record.object);
+						const auto* constraints = objects.GetComponent<ConstraintSetComponent>(record.object);
+						return (character && character->active) || (rigid && rigid->active)
+							|| (colliders && colliders->active) || (constraints && constraints->active);
 					});
 				};
-				return hasNewCharacter(scenePacket->Added())
-					|| hasNewCharacter(scenePacket->ComponentChanged());
+				return hasNewPhysicsOwner(scenePacket->Added())
+					|| hasNewPhysicsOwner(scenePacket->ComponentChanged());
 			};
 			const bool sceneAffectsPhysics = packetAffectsAuthoring();
 			if(authoring && packetContinuous && !sceneAffectsPhysics && assetChanges.Empty()) {
@@ -837,6 +958,16 @@ namespace TerraEngine::Physics {
 			for(auto& [id, frame] : frameBackends) {
 				(void)id;
 				frame.preparedBodies.clear();
+				frame.plannedSteps = {};
+				frame.preparedQueries = {};
+				frame.executedQueries.clear();
+				if(auto* owner = frameRegistry.FindWorldForProtectedAccess(frame.frame)) {
+					// Prepare copied requests with the same world's fixed-step plan.
+					// Simulation consumes this plan rather than advancing its clock twice.
+					frame.plannedSteps = owner->PlanFixedSteps(deltaTime);
+					if(!frame.plannedSteps.requests.empty())
+						frame.preparedQueries = owner->PrepareQueries(frame.plannedSteps.requests.back().tick);
+				}
 			}
 			preparedRemovals.clear();
 			preparedConstraints.clear();
@@ -935,7 +1066,25 @@ namespace TerraEngine::Physics {
 					}
 				}
 			}
-			if(!isNewAuthoringGeneration) {
+			// Retired or migrated objects cannot retain terminal retry evidence forever.
+			if(isNewAuthoringGeneration) std::erase_if(secondaryAdmissionRetryAttempts, [this](const auto& entry) {
+				const auto* descriptor = authoring->FindBodyDescriptorIndex(entry.first);
+				return !descriptor || descriptor->colliderCount == 0U
+					|| authoring->Data().bodies[descriptor->bodyVectorIndex].frameMembership.world == world.Handle();
+			});
+			// Reconcile rejected secondary packets even when the immutable scene did not change.
+			for(auto iterator = secondaryAdmissionRetries.begin(); iterator != secondaryAdmissionRetries.end();) {
+				const auto* descriptor = authoring->FindBodyDescriptorIndex(*iterator);
+				if(!descriptor || descriptor->colliderCount == 0U || authoring->Data().bodies[descriptor->bodyVectorIndex].frameMembership.world == world.Handle()) {
+					// Removed or migrated primary bodies no longer belong to this retry owner.
+					secondaryAdmissionRetryAttempts.erase(*iterator);
+					iterator = secondaryAdmissionRetries.erase(iterator); continue;
+				}
+				if(bodiesToPrepare.insert(*iterator).second) bodyPreparationOrder.push_back(*iterator);
+				bodyPreparationReasons.try_emplace(*iterator, PhysicsAuthoringChangeReason::HierarchyDependency);
+				++iterator;
+			}
+			if(!isNewAuthoringGeneration && bodyPreparationOrder.empty()) {
 				// The fixed step, commands, queries, and extraction still proceed, but
 				// an unchanged immutable authoring generation owns no body/collider/
 				// constraint/character reconciliation work. Returning here is what
@@ -954,15 +1103,50 @@ namespace TerraEngine::Physics {
 						++diagnosticCounters.rejectedCount;
 						continue;
 					}
+					const auto reasons = bodyPreparationReasons.find(body.objectId);
+					const RuntimeBody* runtime = FindRuntimeBodyLocked(body.objectId, body.frameMembership.frame);
+					if(reasons != bodyPreparationReasons.end()
+						&& reasons->second == PhysicsAuthoringChangeReason::Transform
+						&& runtime && runtime->objectGeneration == body.objectGeneration
+						&& runtime->componentGeneration == body.componentGeneration
+						&& runtime->hasPublishedPose && SamePose(runtime->lastPublishedPose, body.worldPose)) {
+						// A forced capture can contain our own accepted secondary pose.
+						// Preserve the solver body and velocity instead of reauthoring it.
+						continue;
+					}
 					PreparedBody prepared;
 					prepared.body = body;
+					// Recapture and forced planning are not new authored input. Key the
+					// budget to exact owner/component/dependency identities instead.
+					SecondaryAdmissionRetryKey retryKey;
+					retryKey.objectGeneration = body.objectGeneration;
+					retryKey.componentGeneration = body.componentGeneration;
+					retryKey.frame = body.frameMembership.frame; retryKey.world = body.frameMembership.world;
+					retryKey.assetGeneration = observedPhysicsAssetGeneration;
+					retryKey.settingsGeneration = settingsGeneration;
+					retryKey.transformRevision = body.sourceTransformRevision;
+					if(const auto prior = secondaryAdmissionRetryAttempts.find(body.objectId);
+						prior != secondaryAdmissionRetryAttempts.end() && runtime && runtime->hasPublishedPose
+						&& SamePose(runtime->lastPublishedPose, body.worldPose)) {
+						// Solver publication may advance Transform revisions each frame.
+						// It cannot grant another budget to an unchanged rejected recipe.
+						retryKey.transformRevision = prior->second.key.transformRevision;
+					}
 					prepared.colliders.reserve(descriptor->colliderCount);
 					for(std::uint32_t index = descriptor->colliderBegin;
 						index < descriptor->colliderBegin + descriptor->colliderCount; ++index) {
 						const PhysicsColliderDescriptor& collider = authoring->Data().colliders[index];
+						retryKey.colliders.emplace_back(collider.recordId, collider.recordGeneration,
+							collider.componentGeneration, collider.stableRecipeHash);
 						if(collider.enabled) prepared.colliders.push_back(collider);
 					}
-					if(prepared.colliders.empty()) continue;
+					if(prepared.colliders.empty()) {
+						secondaryAdmissionRetries.erase(body.objectId); secondaryAdmissionRetryAttempts.erase(body.objectId);
+						continue;
+					}
+					auto& retry = secondaryAdmissionRetryAttempts[body.objectId];
+					if(retry.key != retryKey) retry = {std::move(retryKey), 0U};
+					if(retry.attempts >= 3U) continue;
 					prepared.shapeRecipe = MakeShapeRecipeLocked(prepared.colliders, prepared.diagnostic);
 					prepared.material = ResolveBodyMaterialLocked(prepared.colliders, prepared.diagnostic);
 					frame->second.preparedBodies.push_back(std::move(prepared));
@@ -1400,6 +1584,15 @@ namespace TerraEngine::Physics {
 				request.allowSleeping = profileBody.allowSleep;
 				request.startAwake = active && profileBody.startAwake;
 				request.enabled = active;
+				if(!PrepareInitialVelocities(request)) {
+					diagnostic = "Ragdoll initial velocities or caps cannot be represented safely by the provider.";
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				// The first bridge snapshot must report the same capped velocities
+				// as native admission, before a later extraction replaces these copies.
+				staged.bodies.back().lastLinearVelocity = {request.linearVelocity.x, request.linearVelocity.y, request.linearVelocity.z};
+				staged.bodies.back().lastAngularVelocity = {request.angularVelocity.x, request.angularVelocity.y, request.angularVelocity.z};
 				result = backend->CreateBody(request, staging);
 				if(!result.Succeeded()) {
 					diagnostic = result.message;
@@ -1926,15 +2119,36 @@ namespace TerraEngine::Physics {
 			for(auto& [id, frame] : frameBackends) {
 				(void)id;
 				if(frame.preparedBodies.empty()) continue;
+				// Prepared work is one-shot even when a later frame skips preparation.
+				// Keep vector capacity, but never replay a consumed rejected batch.
+				struct ConsumePreparedBodies {
+					std::vector<PreparedBody>& values;
+					~ConsumePreparedBodies() { values.clear(); }
+				} consumed{frame.preparedBodies};
+				// Keep retry intent until every staged body in this frame is admitted.
+				for(const auto& body : frame.preparedBodies) secondaryAdmissionRetries.insert(body.body.objectId);
+				const auto recordRejection = [this, &frame]() {
+					++diagnosticCounters.rejectedCount;
+					for(const auto& prepared : frame.preparedBodies) {
+						auto& retry = secondaryAdmissionRetryAttempts.at(prepared.body.objectId);
+						if(++retry.attempts < 3U) continue;
+						// Preserve all prior provider owners atomically, then suspend this
+						// rejected batch until a new authored/dependency change replans it.
+						secondaryAdmissionRetries.erase(prepared.body.objectId);
+						TERRAENGINE_LOG(LogLevel::Warning, "Secondary physics admission suspended after 3 attempts for object "
+							<< TerraEngine::ToHexString(prepared.body.objectId) << "; edit its body, collider, material or frame settings to retry.");
+					}
+				};
 				PhysicsWorld* frameWorld = frameRegistry.FindWorldForProtectedAccess(frame.frame);
-				if(frameWorld == nullptr) continue;
+				if(frameWorld == nullptr) { recordRejection(); continue; }
+				const PhysicsSettings frameSettings = frameWorld->Settings();
 				Backend::PhysicsBackendAdmissionReservation reservation;
 				reservation.world = frameWorld->Handle();
 				reservation.shapeCount = static_cast<std::uint32_t>(frame.preparedBodies.size());
 				reservation.bodyCount = static_cast<std::uint32_t>(frame.preparedBodies.size());
 				Backend::PhysicsBackendPreparedAdmission admission;
 				if(!frame.backend->ReserveAdmission(reservation, admission).Succeeded()) {
-					++diagnosticCounters.rejectedCount;
+					recordRejection();
 					continue;
 				}
 				std::vector<RuntimeBody> staged;
@@ -1956,14 +2170,28 @@ namespace TerraEngine::Physics {
 					request.objectGeneration = prepared.body.objectGeneration;
 					request.componentGeneration = prepared.body.componentGeneration;
 					request.shape = shape; request.motionType = prepared.body.motionType;
-					request.motionQuality = prepared.body.motionQuality; request.pose = prepared.body.worldPose;
+					request.motionQuality = PhysicsSettings::ResolveMotionQuality(
+						frameSettings.continuousCollisionEnabled, prepared.body.motionQuality);
+					request.pose = prepared.body.worldPose;
 					request.linearVelocity = prepared.body.initialLinearVelocity;
 					request.angularVelocity = prepared.body.initialAngularVelocity;
 					request.mass = prepared.body.mass; request.friction = prepared.material->dynamicFriction;
 					request.restitution = prepared.material->restitution; request.collisionLayer = prepared.colliders.front().collisionLayer;
+					// Secondary admission consumes the same authored body/material packet
+					// as primary admission; isolation must not silently restore defaults.
+					request.linearDamping = prepared.body.linearDamping;
+					request.angularDamping = prepared.body.angularDamping;
+					request.maximumLinearVelocity = prepared.body.maximumLinearVelocity;
+					request.maximumAngularVelocity = prepared.body.maximumAngularVelocity;
+					request.allowedDegreesOfFreedom = prepared.body.allowedDegreesOfFreedom;
+					request.frictionCombine = prepared.material->frictionCombineMode;
+					request.restitutionCombine = prepared.material->restitutionCombineMode;
+					request.sensor = std::all_of(prepared.colliders.begin(), prepared.colliders.end(),
+						[](const PhysicsColliderDescriptor& collider) { return collider.trigger; });
 					request.collisionMask = prepared.body.collisionMask; request.useGravity = prepared.body.useGravity;
 					request.allowSleeping = prepared.body.allowSleeping; request.startAwake = prepared.body.startAwake;
 					request.enabled = prepared.body.enabled;
+					if(!PrepareInitialVelocities(request)) rejected = true;
 					requests.push_back(request);
 					RuntimeBody runtime{prepared.body.objectId, prepared.body.objectGeneration,
 						prepared.body.componentGeneration, body, shape, prepared.body.motionType,
@@ -1975,14 +2203,22 @@ namespace TerraEngine::Physics {
 					runtime.parentTransformRevision = prepared.body.parentTransformRevision;
 					runtime.frameMembership = prepared.body.frameMembership;
 					staged.push_back(std::move(runtime));
+					if(rejected) break;
 				}
 				if(!rejected && !frame.backend->CreateBodies(requests, admission.staging).Succeeded()) rejected = true;
+				// Test-only one-shot failure occurs after real provider staging, so rollback
+				// and a same-generation retry exercise the actual ownership path.
+				if(frame.failAdmissionOnce) { frame.failAdmissionOnce = false; rejected = true; }
 				if(!rejected && !frame.backend->CommitStaging(admission.staging).Succeeded()) rejected = true;
 				if(rejected) {
 					(void)frame.backend->RollbackStaging(admission.staging);
 					for(const RuntimeBody& runtime : staged) { frameWorld->Release(runtime.body); frameWorld->Release(runtime.shape); }
-					++diagnosticCounters.rejectedCount;
+					recordRejection();
 					continue;
+				}
+				for(const auto& body : frame.preparedBodies) {
+					secondaryAdmissionRetries.erase(body.body.objectId);
+					secondaryAdmissionRetryAttempts.erase(body.body.objectId);
 				}
 				for(RuntimeBody& runtime : staged) {
 					const auto old = frame.runtimeBodies.find(runtime.objectId);
@@ -1998,8 +2234,46 @@ namespace TerraEngine::Physics {
 			}
 		}
 
+		void RetireRemovedSecondaryBodiesLocked(const std::unordered_set<TerraEngine::UUID>& replacements) {
+			if(preparedRemovals.empty()) return;
+			for(auto& [id, frame] : frameBackends) {
+				(void)id;
+				auto* owner = frameRegistry.FindWorldForProtectedAccess(frame.frame);
+				if(!owner) continue;
+				for(const auto& objectId : preparedRemovals) {
+					if(replacements.contains(objectId)) continue;
+					const auto found = frame.runtimeBodies.find(objectId);
+					if(found == frame.runtimeBodies.end()) continue;
+					// Secondary frames currently own rigid bodies, not constraints. The
+					// protected commit owns these exact handles until both retirements end.
+					const auto body = frame.backend->DestroyBody(found->second.body);
+					if(!body.Succeeded()) {
+						++diagnosticCounters.rejectedCount;
+						AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, owner->Timing().tick,
+							"Secondary body retirement failed: " + body.message);
+						continue;
+					}
+					(void)frame.backend->DestroyShape(found->second.shape);
+					frame.bodyObjects.erase(found->second.body.slotIndex);
+					owner->Release(found->second.body); owner->Release(found->second.shape);
+					frame.runtimeBodies.erase(found);
+					frameMembershipOverrides.erase(objectId);
+				}
+			}
+		}
+
 		void CommitLocked() {
 			const Clock::time_point start = Clock::now();
+			// Allocate replacement membership before any provider changes. A same-ID
+			// replacement is owned by staged admission, including its rollback path.
+			std::unordered_set<TerraEngine::UUID> removalReplacements;
+			if(!preparedRemovals.empty()) {
+				for(const auto& prepared : preparedBodies) removalReplacements.insert(prepared.body.objectId);
+				for(const auto& [id, frame] : frameBackends) {
+					(void)id;
+					for(const auto& prepared : frame.preparedBodies) removalReplacements.insert(prepared.body.objectId);
+				}
+			}
 			CommitSecondaryFrameBodiesLocked();
 			CommitRagdollRequestsLocked();
 			commandResults.clear();
@@ -2164,7 +2438,10 @@ namespace TerraEngine::Physics {
 					request.enabled = prepared.body.enabled;
 					request.sensor = std::all_of(prepared.colliders.begin(), prepared.colliders.end(),
 						[](const PhysicsColliderDescriptor& collider) { return collider.trigger; });
-					bodyAdmissionPacket.push_back(std::move(request));
+					if(!PrepareInitialVelocities(request)) {
+						result = {PhysicsResultStatus::Rejected, Backend::PhysicsBackendErrorCode::InvalidArgument,
+							"Authored initial velocities or caps cannot be represented safely by the provider."};
+					} else bodyAdmissionPacket.push_back(std::move(request));
 				}
 				if(!result.Succeeded()) {
 					// Track both handles before rolling back so provider and engine handle
@@ -2618,6 +2895,9 @@ namespace TerraEngine::Physics {
 				runtimeConstraints.swap(nextRuntimeConstraints);
 				runtimeCharacters.swap(nextRuntimeCharacters);
 				bodyObjects.swap(nextBodyObjects);
+				// Scene removals become provider-visible only after this protected
+				// transaction succeeds. No later simulation can observe a ghost body.
+				RetireRemovedSecondaryBodiesLocked(removalReplacements);
 			}
 
 			const PhysicsTick inclusiveTick = !plannedSteps.requests.empty()
@@ -2859,7 +3139,8 @@ namespace TerraEngine::Physics {
 						.expectedParentLifetimeGeneration = body.parentObjectGeneration,
 						.expectedParentTransformRevision = body.parentTransformRevision,
 						.canonicalFrameOrigin = descriptor->canonicalOrigin, .localPose = update.state.worldPose,
-						.worldPoseReceipt = update.state.worldPose, .poseChanged = true});
+						.worldPoseReceipt = update.state.worldPose, .poseChanged = !body.hasPublishedPose
+							|| !SamePose(body.lastPublishedPose, update.state.worldPose)});
 				}
 				if(sources.empty()) continue;
 				TransformPublicationPacket packet = PrepareTransformPublicationPacket(
@@ -2869,6 +3150,9 @@ namespace TerraEngine::Physics {
 					configuredSettings.transformPublicationChunkSize,
 					TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive()
 						? TransformPublicationVisibilityBoundary::AfterPhysics : TransformPublicationVisibilityBoundary::FrameEnd);
+				// Full extraction includes unchanged bodies. An empty prepared packet
+				// owns no deferred mutation and must not advance scene revisions.
+				if(packet.entries.empty()) continue;
 				if(!ValidateTransformPublicationPacket(packet).accepted) { ++diagnosticCounters.rejectedCount; continue; }
 				Scene::TransactionPublicationGroup group = BuildTransformPublicationGroup(packet);
 				pendingTransformPublications.push_back({packet, group.groupId, {}, frame.backend.get()});
@@ -2878,6 +3162,7 @@ namespace TerraEngine::Physics {
 
 		void ExtractLocked() {
 			ExtractSecondaryFramesLocked();
+			ExecuteSecondaryQueriesLocked();
 			if(completedSteps.empty()) return;
 			const Clock::time_point extractionStart = Clock::now();
 			extraction = {};
@@ -2969,19 +3254,9 @@ namespace TerraEngine::Physics {
 					if(runtime == runtimeBodies.end() || runtime->second.body != update.state.handle
 						|| runtime->second.motionType != PhysicsMotionType::Dynamic) continue;
 					const RuntimeBody& body = runtime->second;
-					PhysicsPose localPose = update.state.worldPose;
-					if(body.hasParent) {
-						glm::vec3 position = ToGlmPosition(update.state.worldPose.position);
-						glm::quat rotation = ToGlmRotation(update.state.worldPose.rotation);
-						const glm::vec3 parentPosition = ToGlmPosition(body.parentWorldPose.position);
-						const glm::quat parentRotation = ToGlmRotation(body.parentWorldPose.rotation);
-						const glm::vec3 parentScale = ToGlmPosition(body.parentWorldScale);
-						position = glm::inverse(parentRotation) * (position - parentPosition);
-						position = {position.x / parentScale.x, position.y / parentScale.y, position.z / parentScale.z};
-						rotation = glm::normalize(glm::inverse(parentRotation) * rotation);
-						localPose = {{position.x, position.y, position.z},
-							{rotation.x, rotation.y, rotation.z, rotation.w}};
-					}
+					// The packet carries a frame-local WORLD pose. The protected
+					// scene transaction derives parent-relative coordinates exactly once.
+					const PhysicsPose localPose = update.state.worldPose;
 					preparedTransformSources.push_back({
 						.objectId = body.objectId,
 						.body = body.body,
@@ -3019,19 +3294,9 @@ namespace TerraEngine::Physics {
 				// The body loop already skipped this object when it owns both provider
 				// families, so character authority is deterministic without a costly
 				// vector search in the physics hot path.
-				PhysicsPose localPose = provider.pose;
-				if(character.hasParent) {
-					glm::vec3 position = ToGlmPosition(provider.pose.position);
-					glm::quat rotation = ToGlmRotation(provider.pose.rotation);
-					const glm::vec3 parentPosition = ToGlmPosition(character.parentWorldPose.position);
-					const glm::quat parentRotation = ToGlmRotation(character.parentWorldPose.rotation);
-					const glm::vec3 parentScale = ToGlmPosition(character.parentWorldScale);
-					position = glm::inverse(parentRotation) * (position - parentPosition);
-					position = {position.x / parentScale.x, position.y / parentScale.y, position.z / parentScale.z};
-					rotation = glm::normalize(glm::inverse(parentRotation) * rotation);
-					localPose = {{position.x, position.y, position.z},
-						{rotation.x, rotation.y, rotation.z, rotation.w}};
-				}
+				// The packet carries a frame-local WORLD pose. The protected
+				// scene transaction derives parent-relative coordinates exactly once.
+				const PhysicsPose localPose = provider.pose;
 				preparedTransformSources.push_back({
 					.objectId = character.objectId,
 					.authority = TransformPublicationAuthority::Character,
@@ -3071,57 +3336,42 @@ namespace TerraEngine::Physics {
 			return converted;
 		}
 
-		void ExecutePreparedQueriesLocked() {
-			const Clock::time_point start = Clock::now();
-			backendQueryRequests.clear();
-			executedQueries.clear();
-			if(preparedQueries.queries.empty()) {
-				diagnosticTimings.queryMs = 0.0;
-				return;
-			}
-			backendQueryRequests.reserve(preparedQueries.queries.size());
-			for(const PhysicsPreparedQuery& query : preparedQueries.queries) {
-				backendQueryRequests.push_back(MakeBackendQueryRequest(query.request));
-			}
-			executedQueries.resize(backendQueryRequests.size());
+		void ExecuteOwnedQueryBatch(Backend::IPhysicsBackend& adapter,
+			std::span<const Backend::PhysicsBackendQueryRequest> requests,
+			std::span<Backend::PhysicsBackendQueryResult> results) {
+			// Every frame uses the same disjoint worker ranges. Small bounded batches
+			// stay on the current worker to avoid more task overhead than query work.
+			const auto run = [&adapter, requests, results](std::size_t begin, std::size_t end) {
+				const auto selected = results.subspan(begin, end - begin);
+				const auto result = adapter.QueryBatch(requests.subspan(begin, end - begin), selected);
+				if(!result.Succeeded()) for(auto& output : selected) output = {result, {}, false};
+			};
 			ThreadPool& pool = ThreadPool::instance();
-			const std::size_t workerCount = pool.getThreadCount();
-			if(workerCount <= 1U || backendQueryRequests.size() < 64U) {
-				const Backend::PhysicsBackendResult batch = backend->QueryBatch(
-					backendQueryRequests, executedQueries);
-				if(!batch.Succeeded()) {
-					for(Backend::PhysicsBackendQueryResult& result : executedQueries) {
-						result = {batch, {}, false};
-					}
-				}
-				diagnosticTimings.queryMs = MillisecondsSince(start);
-				return;
-			}
-
-			// Each task writes a disjoint result range and all backend calls take a
-			// shared read lock after simulation has joined. No task touches scene data.
-			const std::size_t taskCount = std::min(workerCount - 1U, backendQueryRequests.size());
-			const std::size_t chunkSize = (backendQueryRequests.size() + taskCount - 1U) / taskCount;
+			const auto workers = pool.getThreadCount();
+			if(workers <= 1U || requests.size() < 64U) { run(0U, requests.size()); return; }
+			const auto taskCount = std::min(workers - 1U, requests.size());
+			const auto chunk = (requests.size() + taskCount - 1U) / taskCount;
 			std::vector<std::future<void>> futures;
 			futures.reserve(taskCount);
-			for(std::size_t begin = 0U; begin < backendQueryRequests.size(); begin += chunkSize) {
-				const std::size_t end = std::min(backendQueryRequests.size(), begin + chunkSize);
-				auto task = pool.createTask([this, begin, end]() {
-					const std::span<const Backend::PhysicsBackendQueryRequest> requests(
-						backendQueryRequests.data() + begin, end - begin);
-					const std::span<Backend::PhysicsBackendQueryResult> results(
-						executedQueries.data() + begin, end - begin);
-					const Backend::PhysicsBackendResult batch = backend->QueryBatch(requests, results);
-					if(!batch.Succeeded()) {
-						for(Backend::PhysicsBackendQueryResult& result : results) {
-							result = {batch, {}, false};
-						}
-					}
-				});
-				futures.push_back(task->getFuture());
-				pool.enqueue(task);
+			// Submission/child failures must settle every admitted range before the
+			// borrowed request/result spans can leave this worker-owned scope.
+			TerraEngine::Tasks::ScopedTaskSettlement<void> settlement(futures);
+			for(std::size_t begin = 0; begin < requests.size(); begin += chunk) {
+				const auto end = std::min(requests.size(), begin + chunk);
+				settlement.CreateAndEnqueue(pool, [run, begin, end] { run(begin, end); });
 			}
-			for(std::future<void>& future : futures) future.get();
+			settlement.GetAll();
+		}
+
+		void ExecutePreparedQueriesLocked() {
+			const Clock::time_point start = Clock::now();
+			backendQueryRequests.clear(); executedQueries.clear();
+			if(!preparedQueries.queries.empty()) {
+				backendQueryRequests.reserve(preparedQueries.queries.size());
+				for(const auto& query : preparedQueries.queries) backendQueryRequests.push_back(MakeBackendQueryRequest(query.request));
+				executedQueries.resize(backendQueryRequests.size());
+				ExecuteOwnedQueryBatch(*backend, backendQueryRequests, executedQueries);
+			}
 			diagnosticTimings.queryMs = MillisecondsSince(start);
 		}
 
@@ -3140,21 +3390,33 @@ namespace TerraEngine::Physics {
 		std::vector<PhysicsQueryHit> ConvertQueryHits(
 			const Backend::PhysicsBackendQueryResult& provider,
 			std::uint64_t& staleCount,
-			PhysicsFrameHandle frame = {}) const {
+			PhysicsFrameHandle frame = {}) {
+			const PhysicsWorld* owner = &world;
+			const auto* registry = &runtimeBodies;
+			const auto* indexes = &bodyObjects;
+			if(frame.IsValid() && frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId, world.Handle().worldGeneration}) {
+				const auto selected = frameBackends.find(frame.frameId.value);
+				owner = frameRegistry.FindWorldForProtectedAccess(frame);
+				if(!owner || selected == frameBackends.end() || selected->second.frame != frame) {
+					staleCount += provider.hits.size(); return {};
+				}
+				registry = &selected->second.runtimeBodies;
+				indexes = &selected->second.bodyObjects;
+			}
 			std::vector<PhysicsQueryHit> hits;
 			hits.reserve(provider.hits.size());
 			for(const Backend::PhysicsBackendQueryHit& source : provider.hits) {
-				if(world.Status(source.body) != PhysicsHandleStatus::Alive) {
+				if(owner->Status(source.body) != PhysicsHandleStatus::Alive) {
 					++staleCount;
 					continue;
 				}
-				const auto indexed = bodyObjects.find(source.body.slotIndex);
-				if(indexed == bodyObjects.end()) {
+				const auto indexed = indexes->find(source.body.slotIndex);
+				if(indexed == indexes->end()) {
 					++staleCount;
 					continue;
 				}
-				const auto runtime = runtimeBodies.find(indexed->second);
-				if(runtime == runtimeBodies.end() || runtime->second.body != source.body
+				const auto runtime = registry->find(indexed->second);
+				if(runtime == registry->end() || runtime->second.body != source.body
 					|| runtime->second.objectId != source.objectId
 					|| runtime->second.objectGeneration != source.objectGeneration
 					|| runtime->second.componentGeneration != source.componentGeneration) {
@@ -3246,6 +3508,7 @@ namespace TerraEngine::Physics {
 
 		void PublishLocked() {
 			const Clock::time_point start = Clock::now();
+			PublishSecondaryQueriesLocked();
 			if(completedSteps.empty()) return;
 			bool statePublicationAccepted = !preparedBodyStateBatch.has_value();
 			if(preparedBodyStateBatch) {
@@ -3687,13 +3950,13 @@ namespace TerraEngine::Physics {
 				TerraEngine::Scheduling::SameFramePhysicsPublicationStateSnapshot();
 			scheduler->push_back({"PhysicsSnapshot", "Physics", "SceneGraph,PhysicsSettings", "PhysicsAuthoringSnapshot", "protected snapshot", false,
 				true, "active physics frame", "", authoringDiagnostics.changedObjects});
-			scheduler->push_back({"PhysicsPrepare", "Physics", "PhysicsAuthoringSnapshot,PhysicsQueryQueue", "PhysicsPreparedWork,PhysicsPreparedQueries", "none", true,
+			scheduler->push_back({"PhysicsPrepare", "Physics", "PhysicsAuthoringSnapshot,PhysicsQueryQueue,PhysicsFrameRegistry", "PhysicsPreparedWork,PhysicsPreparedQueries,PhysicsWorld", "none", true,
 				true, "snapshot or fixed-step input available", "PhysicsSnapshot", preparationDiagnostics.estimatedWorkItems});
 			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork,RagdollPhysicsQueue,PhysicsCharacterMotionLeases,CharacterMotionTargets,SceneChangePublication,NavigationAgentState,NavigationAgentGuidance,NavigationRouteValidity", "PhysicsWorld,RagdollPhysicsSnapshots,RagdollPhysicsResults", "hard boundary: typed ragdoll, character authority, and producer-evidence validation", false,
 				true, "prepared provider mutation, command, or ragdoll request work available", "PhysicsPrepare", diagnosticCounters.commandCount + ragdollPhysicsBridge.PendingCount()});
 			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld,PhysicsCharacterMotionLeases,CharacterMotionTargets", "PhysicsWorld", "provider ownership", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no fixed step planned" : "fixed step planned", "PhysicsCommandCommit", completedSteps.size()});
-			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsCharacterStatePackets,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
+			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries,PhysicsFrameRegistry", "PhysicsPublishedSnapshots,PhysicsCharacterStatePackets,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no completed provider step" : "provider step completed", "PhysicsSimulate", extractionDiagnostics.extractedBodies});
 			scheduler->push_back({"PhysicsPublish", "Physics", "PhysicsPublishedSnapshots,PhysicsCharacterStatePackets,PhysicsEventSubscriptions", "PhysicsQueryResults,PhysicsEventPackets,PhysicsTransformTransactions", "hard boundary", false,
 				!completedSteps.empty(), completedSteps.empty() ? "no extracted packet" : "extracted packet ready", "PhysicsExtract", publicationDiagnostics.currentEntries});
@@ -3824,11 +4087,11 @@ namespace TerraEngine::Physics {
 						for(const TransformPublicationEntryReceipt& acknowledged : receipt.acknowledgedEntries) {
 							const auto object = ObjectManager::instance().getObject(acknowledged.objectId);
 							if(acknowledged.authority == TransformPublicationAuthority::Body) {
-								auto runtime = runtimeBodies.find(acknowledged.objectId);
-								if(runtime == runtimeBodies.end() || runtime->second.body != acknowledged.body) continue;
-								runtime->second.lastPublishedPose = acknowledged.worldPose;
-								runtime->second.hasPublishedPose = true;
-								if(object) runtime->second.objectTransformRevision =
+								RuntimeBody* runtime = FindRuntimeBodyLocked(acknowledged.objectId, publication.packet.snapshot.frame);
+								if(!runtime || runtime->body != acknowledged.body) continue;
+								runtime->lastPublishedPose = acknowledged.worldPose;
+								runtime->hasPublishedPose = true;
+								if(object) runtime->objectTransformRevision =
 									ObjectManager::instance().GetObjectTransformRevision(*object);
 							} else if(acknowledged.authority == TransformPublicationAuthority::Character) {
 								auto runtime = runtimeCharacters.find(acknowledged.objectId);
@@ -3876,19 +4139,80 @@ namespace TerraEngine::Physics {
 			pendingFlushSteps.clear();
 		}
 
-		void AdvanceSecondaryFramesLocked(float deltaTime) {
+		void ExecuteSecondaryQueriesLocked() {
+			// Existing PhysicsExtract worker ownership: inputs/results are copied and
+			// each adapter owns a separate provider lock; no live ECS reads occur here.
+			for(auto& [id, record] : frameBackends) {
+				(void)id;
+				auto* owner = frameRegistry.FindWorldForProtectedAccess(record.frame);
+				if(!owner || record.preparedQueries.queries.empty()) continue;
+				record.queryRequests.clear();
+				for(const auto& query : record.preparedQueries.queries) record.queryRequests.push_back(MakeBackendQueryRequest(query.request));
+				record.executedQueries.resize(record.queryRequests.size());
+				Backend::PhysicsBackendResult result;
+				if(owner->Timing().completedTick < record.preparedQueries.tick)
+					result = {PhysicsResultStatus::ProviderFailure, Backend::PhysicsBackendErrorCode::InvalidState,
+						"The selected frame did not complete its query tick."};
+				else ExecuteOwnedQueryBatch(*record.backend, record.queryRequests, record.executedQueries);
+				if(!result.Succeeded())
+					for(auto& output : record.executedQueries) output = {result, {}, false};
+			}
+		}
+
+		void PublishSecondaryQueriesLocked() {
+			// Only the existing protected PhysicsPublish phase makes completed query
+			// values visible. Prepare, execution, conversion and completion share owner.
+			for(auto& [id, record] : frameBackends) {
+				(void)id;
+				auto* owner = frameRegistry.FindWorldForProtectedAccess(record.frame);
+				if(!owner || record.executedQueries.size() != record.preparedQueries.queries.size()) continue;
+				for(std::size_t index = 0; index < record.executedQueries.size(); ++index) {
+					const auto& output = record.executedQueries[index];
+					std::uint64_t stale = 0;
+					const auto hits = ConvertQueryHits(output, stale, record.frame);
+					diagnosticCounters.staleCount += stale;
+					diagnosticCounters.queryHitCount += hits.size();
+					diagnosticCounters.queryTruncatedCount += output.truncated ? 1U : 0U;
+					owner->CompleteQuery(record.preparedQueries.queries[index], record.preparedQueries.tick,
+						output.result.Succeeded() ? PhysicsResultStatus::Success : PhysicsResultStatus::ProviderFailure,
+						hits, output.truncated, output.result.message);
+				}
+				diagnosticCounters.queryCount += record.executedQueries.size();
+				record.preparedQueries = {}; record.executedQueries.clear();
+			}
+		}
+
+		PhysicsWorld* QueryOwnerLocked(PhysicsQueryHandle handle) {
+			const PhysicsWorldHandle requested{handle.worldId, handle.worldGeneration};
+			if(world.Handle() == requested) return &world;
+			for(const auto& [id, record] : frameBackends) {
+				(void)id;
+				if(auto* owner = frameRegistry.FindWorldForProtectedAccess(record.frame); owner && owner->Handle() == requested) return owner;
+			}
+			return nullptr;
+		}
+
+		void AdvanceSecondaryFramesLocked() {
 			// Each island has its own provider adapter, so stepping one frame cannot
 			// share broad-phase, query, or callback state with a distant frame.
 			for(auto& [id, record] : frameBackends) {
 				(void)id;
 				PhysicsWorld* frameWorld = frameRegistry.FindWorldForProtectedAccess(record.frame);
 				if(frameWorld == nullptr) continue;
-				const PhysicsFixedStepPlan plan = frameWorld->PlanFixedSteps(deltaTime);
-				for(const PhysicsFixedStepRequest& request : plan.requests) {
+				record.stepAttempts = 0U;
+				for(const PhysicsFixedStepRequest& request : record.plannedSteps.requests) {
+					++record.stepAttempts;
+					if(record.failStepOrdinal != 0U && record.stepAttempts == record.failStepOrdinal) {
+						record.failStepOrdinal = 0U; (void)frameWorld->MarkFailed(); break;
+					}
 					const Backend::PhysicsBackendResult stepped = record.backend->Step({
 						.world = request.world, .tick = request.tick, .deltaTime = request.deltaTime});
 					if(stepped.Succeeded()) (void)frameWorld->MarkStepCompleted(request);
-					else (void)frameWorld->MarkFailed();
+					else {
+						// Later ticks depend on this tick completing; stop at the first provider failure.
+						(void)frameWorld->MarkFailed();
+						break;
+					}
 				}
 			}
 		}
@@ -3897,14 +4221,32 @@ namespace TerraEngine::Physics {
 		PhysicsWorld world;
 		// Secondary islands own distinct Jolt adapter instances. Jolt's private
 		// state is therefore never shared across unrelated canonical origins.
+		std::unordered_set<TerraEngine::UUID> secondaryAdmissionRetries;
+		struct SecondaryAdmissionRetryKey {
+			PhysicsGeneration objectGeneration = 0U, componentGeneration = 0U;
+			PhysicsFrameHandle frame{}; PhysicsWorldHandle world{};
+			std::uint64_t assetGeneration = 0U, settingsGeneration = 0U, transformRevision = 0U;
+			std::vector<std::tuple<TerraEngine::UUID, PhysicsGeneration, PhysicsGeneration, std::uint64_t>> colliders;
+			bool operator==(const SecondaryAdmissionRetryKey&) const = default;
+		};
+		struct SecondaryAdmissionRetryState { SecondaryAdmissionRetryKey key; std::uint8_t attempts = 0U; };
+		// Retain terminal input identities until authoring changes or the owner retires.
+		// This prevents full recapture from accidentally resurrecting a failed recipe.
+		std::unordered_map<TerraEngine::UUID, SecondaryAdmissionRetryState> secondaryAdmissionRetryAttempts;
 		struct FrameBackendRecord {
 			PhysicsFrameHandle frame;
 			std::unique_ptr<Backend::IPhysicsBackend> backend;
 			std::vector<PreparedBody> preparedBodies;
+			PhysicsFixedStepPlan plannedSteps;
+			PhysicsPreparedQueryBatch preparedQueries;
+			std::vector<Backend::PhysicsBackendQueryRequest> queryRequests;
+			std::vector<Backend::PhysicsBackendQueryResult> executedQueries;
 			std::unordered_map<TerraEngine::UUID, RuntimeBody> runtimeBodies;
 			std::unordered_map<PhysicsSlotIndex, TerraEngine::UUID> bodyObjects;
 			std::uint64_t migrationAcceptedCount = 0U;
 			std::uint64_t migrationRolledBackCount = 0U;
+			bool failAdmissionOnce = false;
+			std::uint32_t failStepOrdinal = 0U, stepAttempts = 0U;
 		};
 		PhysicsFrameRegistry frameRegistry;
 		std::map<std::uint64_t, FrameBackendRecord> frameBackends;
@@ -4004,6 +4346,7 @@ namespace TerraEngine::Physics {
 		PhysicsTick lastAggregateDiagnosticsTick = 0U;
 		std::uint64_t explicitStepPublicationCount = 0U;
 		std::vector<RuntimeTerrainCollision> terrainCollisions;
+		std::optional<PendingTerrainShapeRetirement> pendingTerrainShapeRetirement;
 		CharacterMotionTraceBuffer characterMotionTrace;
 		std::uint64_t characterMotionTraceBatch = 0U;
 		mutable std::mutex mutex;
@@ -4059,7 +4402,7 @@ namespace TerraEngine::Physics {
 		{
 			std::lock_guard<std::mutex> lock(impl->mutex);
 			impl->SimulateLocked();
-			impl->AdvanceSecondaryFramesLocked(deltaTime);
+			impl->AdvanceSecondaryFramesLocked();
 			impl->ExtractLocked();
 			impl->PublishLocked();
 			impl->PublicationBarrierLocked();
@@ -4076,6 +4419,8 @@ namespace TerraEngine::Physics {
 			if(descriptor) (void)impl->frameRegistry.Destroy(record.frame);
 		}
 		impl->frameBackends.clear();
+		impl->secondaryAdmissionRetries.clear();
+		impl->secondaryAdmissionRetryAttempts.clear();
 		impl->StopWorldLocked();
 		if(impl->backendInitialized) impl->backend->Shutdown();
 		impl->backendInitialized = false;
@@ -4143,8 +4488,8 @@ namespace TerraEngine::Physics {
 				{"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue"},
 				{"PhysicsSettings", "PhysicsWorld", "PhysicsAuthoringSnapshot"}, false, WorkerSystemPhaseKind::Snapshot);
 			configure(descriptors[1], "PhysicsPrepare",
-				{"PhysicsAuthoringSnapshot", "PhysicsPublishedSnapshots", "PhysicsQueryQueue"},
-				{"PhysicsPreparedWork", "PhysicsPreparedQueries"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+				{"PhysicsAuthoringSnapshot", "PhysicsPublishedSnapshots", "PhysicsQueryQueue", kResourcePhysicsFrameRegistry},
+				{"PhysicsPreparedWork", "PhysicsPreparedQueries", "PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[2], "PhysicsCommandCommit",
 				{"PhysicsPreparedWork", "PhysicsWorld", "RagdollPhysicsQueue", kResourcePhysicsCharacterMotionLeases, kResourceCharacterMotionTargets,
 					kResourceRootMotionIntervals, kResourceSceneChangePublication,
@@ -4159,10 +4504,10 @@ namespace TerraEngine::Physics {
 					kResourceRootMotionIntervals, kResourceTerrainPublishedCollision},
 				{"PhysicsWorld", kResourceRootMotionIntervals, kResourceRootMotionResults}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[4], "PhysicsExtract",
-				{"PhysicsWorld", "PhysicsPreparedQueries"},
+				{"PhysicsWorld", "PhysicsPreparedQueries", kResourcePhysicsFrameRegistry},
 				{"PhysicsPublishedSnapshots", kResourcePhysicsCharacterStatePackets, "PhysicsBackendQueryResults", "PhysicsRawEvents"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[5], "PhysicsPublish",
-				{"PhysicsPublishedSnapshots", kResourcePhysicsCharacterStatePackets, "PhysicsBackendQueryResults", "PhysicsRawEvents", "PhysicsEventSubscriptions"},
+				{"PhysicsPublishedSnapshots", kResourcePhysicsCharacterStatePackets, "PhysicsBackendQueryResults", "PhysicsRawEvents", "PhysicsEventSubscriptions", kResourcePhysicsFrameRegistry},
 				{"PhysicsQueryResults", "PhysicsEventPackets", "PhysicsTransformTransactions", "SceneMutationQueue"}, false, WorkerSystemPhaseKind::ProtectedCommit);
 			configure(descriptors[6], "PhysicsPublicationBarrier",
 				{"PhysicsTransformTransactions"}, {"PhysicsPublishedSnapshots"}, false, WorkerSystemPhaseKind::Barrier);
@@ -4217,7 +4562,7 @@ namespace TerraEngine::Physics {
 			RevalidateCharacterMotionTargets();
 			RevalidateRootMotionIntervals();
 		};
-		workloads[3].work = [this, deltaTime](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->SimulateLocked(); impl->AdvanceSecondaryFramesLocked(deltaTime); };
+		workloads[3].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->SimulateLocked(); impl->AdvanceSecondaryFramesLocked(); };
 		workloads[4].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->ExtractLocked(); };
 		workloads[5].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PublishLocked(); };
 		workloads[6].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PublicationBarrierLocked(); };
@@ -4329,13 +4674,108 @@ namespace TerraEngine::Physics {
 		if(!frame.IsValid() || found == impl->frameBackends.end() || found->second.frame != frame) {
 			return false;
 		}
+		// A queued publication borrows this provider until the existing protected
+		// receipt boundary settles it. Reject retirement atomically instead of
+		// freeing that borrower or silently dropping its deferred scene mutation.
+		if(std::any_of(impl->pendingTransformPublications.begin(), impl->pendingTransformPublications.end(),
+			[frame](const auto& publication) { return publication.packet.snapshot.frame == frame; })) return false;
 		const std::optional<PhysicsFrameDescriptor> descriptor = impl->frameRegistry.Find(frame);
 		if(!descriptor) return false;
 		const Backend::PhysicsBackendResult destroyed = found->second.backend->DestroyWorld(descriptor->world);
 		if(!destroyed.Succeeded()) return false;
 		(void)found->second.backend->Shutdown();
 		impl->frameBackends.erase(found);
+		// A retired island's objects return to primary-frame authoring. Cached
+		// descriptors still stamp the old membership, so force a protected capture
+		// even when no scene edit accompanies this provider-lifecycle operation.
+		std::erase_if(impl->frameMembershipOverrides, [frame](const auto& entry) {
+			return entry.second.frame == frame;
+		});
+		impl->authoringSceneRevisionValid = false;
 		return impl->frameRegistry.Destroy(frame);
+	}
+
+	std::optional<TerrainShapeOwnershipSnapshot> PhysicsReviewTestAccess::ReadTerrainShapeOwnership(PhysicsSystem& system)
+	{
+		// Follow the existing system -> backend lock order used by protected commits.
+		// No query/body/shape map is changed by this bounded copied observation.
+		std::lock_guard<std::mutex> lock(system.impl->mutex);
+		const auto* backend = dynamic_cast<const Backend::JoltPhysicsBackend*>(system.impl->backend.get());
+		if(!backend || !system.impl->world.Handle().IsValid()) return std::nullopt;
+		const auto typed = system.impl->world.RegistryStatistics();
+		const auto provider = backend->OwnershipForTesting();
+		return TerrainShapeOwnershipSnapshot{system.impl->world.Handle(), typed.shapeCount, typed.shapeCapacity,
+			typed.bodyCount, provider.shapeRecords, provider.bodyRecords, provider.stagedShapeRecords,
+			provider.stagedBodyRecords, provider.strongCacheEntries, system.impl->terrainCollisions.size()};
+	}
+
+	std::optional<PhysicsReviewTestAccess::BodyOwnership> PhysicsReviewTestAccess::ReadFrameBodyOwnership(
+		PhysicsSystem& system, PhysicsFrameHandle frame) {
+		std::lock_guard<std::mutex> lock(system.impl->mutex);
+		for(const auto& [id, secondary] : system.impl->frameBackends) {
+			(void)id;
+			if(secondary.frame != frame) continue;
+			const auto* owner = system.impl->frameRegistry.FindWorldForProtectedAccess(frame);
+			const auto* provider = dynamic_cast<const Backend::JoltPhysicsBackend*>(secondary.backend.get());
+			if(!owner || !provider) return std::nullopt;
+			const auto typed = owner->RegistryStatistics();
+			const auto native = provider->OwnershipForTesting();
+			return BodyOwnership{secondary.runtimeBodies.size(), secondary.bodyObjects.size(),
+				typed.bodyCount, typed.shapeCount, native.bodyRecords, native.shapeRecords};
+		}
+		return std::nullopt;
+	}
+
+	std::optional<PhysicsReviewTestAccess::FrameClock> PhysicsReviewTestAccess::ReadFrameClock(
+		PhysicsSystem& system, PhysicsFrameHandle frame) {
+		std::lock_guard<std::mutex> lock(system.impl->mutex);
+		const auto* owner = frame == PhysicsFrameHandle{kPrimaryPhysicsFrameId, system.impl->world.Handle().worldGeneration}
+			? &system.impl->world : system.impl->frameRegistry.FindWorldForProtectedAccess(frame);
+		if(!owner || !owner->Handle().IsValid()) return std::nullopt;
+		const auto timing = owner->Timing();
+		return FrameClock{timing.tick, timing.completedTick, timing.accumulator, timing.clampedTime,
+			timing.droppedTime, timing.pendingExplicitStepCount};
+	}
+
+	bool PhysicsReviewTestAccess::ArmSecondaryFailure(PhysicsSystem& system, PhysicsFrameHandle frame, bool admission, std::uint32_t stepOrdinal) {
+		std::lock_guard lock(system.impl->mutex);
+		const auto found = system.impl->frameBackends.find(frame.frameId.value);
+		if(found == system.impl->frameBackends.end() || found->second.frame != frame) return false;
+		found->second.failAdmissionOnce = admission; found->second.failStepOrdinal = stepOrdinal; return true;
+	}
+	std::optional<std::uint32_t> PhysicsReviewTestAccess::ReadSecondaryStepAttempts(PhysicsSystem& system, PhysicsFrameHandle frame) {
+		std::lock_guard lock(system.impl->mutex);
+		const auto found = system.impl->frameBackends.find(frame.frameId.value);
+		if(found == system.impl->frameBackends.end() || found->second.frame != frame) return std::nullopt;
+		return found->second.stepAttempts;
+	}
+	bool PhysicsReviewTestAccess::SetFramePaused(PhysicsSystem& system, PhysicsFrameHandle frame, bool paused) {
+		// Match production lock ordering: system lifecycle, then owned world clock.
+		std::lock_guard<std::mutex> lock(system.impl->mutex);
+		auto* owner = system.impl->frameRegistry.FindWorldForProtectedAccess(frame);
+		return owner && owner->SetPaused(paused);
+	}
+
+	bool PhysicsReviewTestAccess::RequestFrameExplicitStep(PhysicsSystem& system, PhysicsFrameHandle frame) {
+		std::lock_guard<std::mutex> lock(system.impl->mutex);
+		auto* owner = system.impl->frameRegistry.FindWorldForProtectedAccess(frame);
+		return owner && owner->RequestExplicitPausedStep();
+	}
+
+	bool PhysicsReviewTestAccess::AssignFixtureFrame(PhysicsSystem& system,
+		const TerraEngine::UUID& object, PhysicsFrameHandle frame)
+	{
+		// Protected fixture setup only: this bypasses the migration producer, never
+		// the actual authoring capture, provider construction, or query validation.
+		std::lock_guard<std::mutex> lock(system.impl->mutex);
+		const auto live = ObjectManager::instance().getObject(object);
+		const auto descriptor = system.impl->frameRegistry.Find(frame);
+		const auto provider = system.impl->frameBackends.find(frame.frameId.value);
+		if(!live || !ObjectManager::instance().GetCanonicalWorldPose(*live) || !descriptor
+			|| provider == system.impl->frameBackends.end() || provider->second.frame != frame
+			|| system.impl->authoring || system.impl->runtimeBodies.contains(object)) return false;
+		system.impl->frameMembershipOverrides[object] = {frame, descriptor->world, 1U};
+		return true;
 	}
 
 	std::vector<PhysicsFrameDescriptor> PhysicsSystem::FrameDescriptors() const {
@@ -4365,13 +4805,33 @@ namespace TerraEngine::Physics {
 					"A source physics frame is absent or stale."};
 			}
 		}
+		// This callback packet can transfer pre-admission membership, but it has
+		// no ownership of this system's live provider handles. Refuse live-owner
+		// transfers before invoking ANY callback: pretending source release worked
+		// would admit a second destination body on the next snapshot. Native body
+		// migration needs a provider-owned staged transfer/rollback API, not a bool
+		// supplied by an external caller. Rejection leaves all source maps intact.
+		for(const auto& member : request.members) {
+			bool admitted = impl->runtimeBodies.contains(member.objectId)
+				|| impl->runtimeCharacters.contains(member.objectId);
+			for(const auto& [id, frame] : impl->frameBackends) {
+				(void)id; admitted = admitted || frame.runtimeBodies.contains(member.objectId);
+			}
+			if(admitted) return {false, PhysicsFrameMigrationState::PreflightFailed, 0U,
+				"Live provider bodies cannot migrate through membership callbacks; the source remains authoritative."};
+		}
+		// Allocate the complete projected membership map before callbacks commit.
+		// The final swap is non-fallible, so allocation cannot partially publish a
+		// connected closure after external destination staging has succeeded.
+		auto projectedMemberships = impl->frameMembershipOverrides;
+		for(const auto& member : request.members) projectedMemberships[member.objectId] = {
+			request.destinationFrame, destination->world, request.expectedDestinationResidencyGeneration};
 		PhysicsFrameMigrationReceipt receipt = CommitPhysicsFrameMigration(request, operations);
 		if(receipt.accepted) {
-			for(const PhysicsFrameMigrationMember& member : request.members) {
-				impl->frameMembershipOverrides[member.objectId] = {
-					request.destinationFrame, destination->world,
-					request.expectedDestinationResidencyGeneration};
-			}
+			impl->frameMembershipOverrides.swap(projectedMemberships);
+			// Provider-only migration changes descriptor authority even when the
+			// scene packet is empty. Reconcile at the next protected snapshot.
+			impl->authoringSceneRevisionValid = false;
 		}
 		const auto backend = impl->frameBackends.find(request.destinationFrame.frameId.value);
 		if(backend != impl->frameBackends.end()) {
@@ -4388,6 +4848,11 @@ namespace TerraEngine::Physics {
 		if(!impl->backend || !impl->world.Handle().IsValid() || packet.recipe.terrainAssetId == TerraEngine::EMPTY_UUID) {
 			rejected.retainedLastKnownGood = true;
 			rejected.message = "Terrain collision replacement requires an active primary physics world and terrain identity.";
+			return rejected;
+		}
+		if(!impl->RetryTerrainShapeRetirementLocked()) {
+			rejected.retainedLastKnownGood = true;
+			rejected.message = "Prior committed terrain shape retirement is pending; current collision remains active and new admission is withheld.";
 			return rejected;
 		}
 		const auto prior = std::find_if(impl->terrainCollisions.begin(), impl->terrainCollisions.end(), [&](const Impl::RuntimeTerrainCollision& value) {
@@ -4420,12 +4885,17 @@ namespace TerraEngine::Physics {
 			packet.recipe.authoredGeneration, packet.recipe.authoredHash,
 			packet.recipe.sampleSpacingMetres};
 		if(prior != impl->terrainCollisions.end()) {
-			// The helper already retired the provider body. Releasing only its typed
-			// body handle makes stale packets fail while retaining the old shape for
-			// deferred provider-safe retirement and last-known-good diagnostics.
+			// The transaction helper committed the fresh body and successfully
+			// retired the old native body. Only now may its shape owner be released.
+			// Keep a bounded explicit owner BEFORE overwriting the current record.
 			(void)impl->world.Release(prior->body);
+			impl->pendingTerrainShapeRetirement = Impl::PendingTerrainShapeRetirement{prior->shape, false};
 			prior->shape = packet.replacementShape; prior->body = packet.replacementBody.handle;
 			prior->publication = publication;
+			// The typed pending owner already records a cleanup refusal. Preserve
+			// the truthful committed receipt without allocating a diagnostic after
+			// publication; the next admission reports any unresolved retirement.
+			(void)impl->RetryTerrainShapeRetirementLocked();
 		} else {
 			impl->terrainCollisions.push_back({packet.recipe.terrainAssetId, packet.recipe.areaX, packet.recipe.areaZ, packet.replacementShape, packet.replacementBody.handle, publication});
 		}
@@ -4443,6 +4913,8 @@ namespace TerraEngine::Physics {
 	bool PhysicsSystem::RemoveTerrainCollisions(TerraEngine::UUID terrainAssetId) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
 		if(terrainAssetId == TerraEngine::EMPTY_UUID) return false;
+		// Never drop the last tracked retired owner while cleanup is unresolved.
+		if(!impl->RetryTerrainShapeRetirementLocked()) return false;
 		bool removed = false;
 		for(auto collision = impl->terrainCollisions.begin(); collision != impl->terrainCollisions.end();) {
 			if(collision->terrainAssetId != terrainAssetId) {
@@ -5154,6 +5626,8 @@ namespace TerraEngine::Physics {
 
 	PhysicsQueryReceipt PhysicsSystem::SubmitQuery(PhysicsQueryRequest request) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(request.frame == PhysicsFrameHandle{kPrimaryPhysicsFrameId, impl->world.Handle().worldGeneration}
+			&& request.world == impl->world.Handle()) return impl->world.SubmitQuery(std::move(request));
 		if(request.frame.IsValid()) {
 			PhysicsWorld* frameWorld = impl->frameRegistry.FindWorldForProtectedAccess(request.frame);
 			if(frameWorld == nullptr || request.world != frameWorld->Handle()) {
@@ -5168,6 +5642,12 @@ namespace TerraEngine::Physics {
 	PhysicsQueryBatchSubmission PhysicsSystem::SubmitQueryBatch(
 		std::span<const PhysicsQueryRequest> requests) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!requests.empty() && requests.front().frame == PhysicsFrameHandle{kPrimaryPhysicsFrameId, impl->world.Handle().worldGeneration}) {
+			if(!std::all_of(requests.begin(), requests.end(), [this, frame = requests.front().frame](const auto& request) {
+				return request.frame == frame && request.world == impl->world.Handle();
+			})) return {false, PhysicsQueryRejectionReason::StaleWorld, {}};
+			return impl->world.SubmitQueryBatch(requests);
+		}
 		if(!requests.empty() && requests.front().frame.IsValid()) {
 			const PhysicsFrameHandle frame = requests.front().frame;
 			PhysicsWorld* frameWorld = impl->frameRegistry.FindWorldForProtectedAccess(frame);
@@ -5184,19 +5664,21 @@ namespace TerraEngine::Physics {
 
 	bool PhysicsSystem::CancelQuery(PhysicsQueryHandle handle) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
-		return impl->world.CancelQuery(handle);
+		auto* owner = impl->QueryOwnerLocked(handle);
+		return owner ? owner->CancelQuery(handle) : false;
 	}
 
 	PhysicsQueryResult PhysicsSystem::ReadQuery(PhysicsQueryHandle handle) const {
 		std::lock_guard<std::mutex> lock(impl->mutex);
-		return impl->world.ReadQuery(handle);
+		const auto* owner = impl->QueryOwnerLocked(handle);
+		return owner ? owner->ReadQuery(handle) : impl->world.ReadQuery(handle);
 	}
 
 	PhysicsQueryResult PhysicsSystem::QueryImmediate(PhysicsQueryRequest request) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
 		PhysicsWorld* targetWorld = &impl->world;
 		Backend::IPhysicsBackend* targetBackend = impl->backend.get();
-		if(request.frame.IsValid()) {
+		if(request.frame.IsValid() && request.frame != PhysicsFrameHandle{kPrimaryPhysicsFrameId, impl->world.Handle().worldGeneration}) {
 			const std::optional<PhysicsFrameDescriptor> frame = impl->frameRegistry.Find(request.frame);
 			const auto backend = impl->frameBackends.find(request.frame.frameId.value);
 			if(!frame || backend == impl->frameBackends.end() || backend->second.frame != request.frame) {

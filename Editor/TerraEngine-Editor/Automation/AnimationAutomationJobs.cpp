@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <limits>
 #include <unordered_map>
 
 namespace TerraEngine::Editor::Automation
@@ -34,10 +35,15 @@ namespace TerraEngine::Editor::Automation
 			// These objects have no window owner. Their lifetime is instead tied to the
 			// durable job service, which prevents a closed or reconfigured editor panel
 			// from cancelling an MCP-requested worker build.
-			std::unique_ptr<TerraEngine::Editor::Animation::MotionDatabaseProductionAuthoringHost> host;
+			std::unique_ptr<TerraEngine::Editor::Animation::MotionDatabaseAuthoringHost> host;
 			std::unique_ptr<TerraEngine::AssetPipeline::MotionDatabaseAuthoringSession> session;
 			TerraEngine::AssetPipeline::MotionDatabaseAuthoringDocument document;
 			std::filesystem::path outputPath;
+			std::uint64_t lastProtectedVisit = 0U;
+		};
+		struct MotionDatabaseBuildOwner final {
+			std::unordered_map<std::string, MotionDatabaseBuildSession> sessions;
+			std::uint64_t visitSequence = 0U;
 		};
 
 		// EditorAutomationService creates a lightweight adapter for each request.
@@ -48,7 +54,7 @@ namespace TerraEngine::Editor::Automation
 			std::unordered_map<std::string, RecordingSession>> g_recordingSessions;
 		std::mutex g_motionDatabaseMutex;
 		std::unordered_map<EditorAutomationJobService*,
-			std::unordered_map<std::string, MotionDatabaseBuildSession>> g_motionDatabaseSessions;
+			MotionDatabaseBuildOwner> g_motionDatabaseSessions;
 
 		bool IsTerminal(AutomationJobState state)
 		{
@@ -183,8 +189,8 @@ namespace TerraEngine::Editor::Automation
 			const auto owner = g_motionDatabaseSessions.find(&jobs_);
 			if(owner != g_motionDatabaseSessions.end())
 			{
-				const auto motion = owner->second.find(std::string(jobId));
-				if(motion != owner->second.end())
+				const auto motion = owner->second.sessions.find(std::string(jobId));
+				if(motion != owner->second.sessions.end())
 				{
 					// The session's cancellation token is observed by source resolution and
 					// cooking work before its atomic publish callback can run.
@@ -206,10 +212,8 @@ namespace TerraEngine::Editor::Automation
 
 	AutomationDispatchResult AnimationAutomationJobs::Get(std::string_view jobId) const
 	{
-		// Job reads are the reconnect-safe polling boundary for motion builds. The
-		// pump performs no synchronous cooking; it only observes a completed worker
-		// future and performs the session's checked atomic publication step.
-		(void)const_cast<AnimationAutomationJobs*>(this)->PumpMotionDatabaseBuild(jobId);
+		// Reads are observational: the editor-owned protected frame advances every
+		// motion build even after its submitting client disconnects.
 		AutomationDispatchResult result;
 		const std::optional<AutomationJobSnapshot> job = jobs_.Get(jobId);
 		if (!job)
@@ -269,6 +273,24 @@ namespace TerraEngine::Editor::Automation
 		const std::filesystem::path& authoringPath,
 		const std::filesystem::path& outputPath)
 	{
+		return StartMotionDatabaseBuildImpl(request, authoringPath, outputPath, nullptr);
+	}
+
+	AutomationDispatchResult AnimationAutomationJobs::StartMotionDatabaseBuild(
+		const AutomationJobCreateRequest& request,
+		const std::filesystem::path& authoringPath,
+		const std::filesystem::path& outputPath,
+		std::unique_ptr<Animation::MotionDatabaseAuthoringHost> host)
+	{
+		return StartMotionDatabaseBuildImpl(request, authoringPath, outputPath, std::move(host));
+	}
+
+	AutomationDispatchResult AnimationAutomationJobs::StartMotionDatabaseBuildImpl(
+		const AutomationJobCreateRequest& request,
+		const std::filesystem::path& authoringPath,
+		const std::filesystem::path& outputPath,
+		std::unique_ptr<Animation::MotionDatabaseAuthoringHost> host)
+	{
 		AutomationDispatchResult result;
 		if(request.capability != "animation.motion_database.build"
 			|| authoringPath.extension() != ".json" || outputPath.extension() != ".temotiondb")
@@ -288,7 +310,9 @@ namespace TerraEngine::Editor::Automation
 				+ MotionDatabaseStatusName(loaded) + ".";
 			return result;
 		}
-		auto host = std::make_unique<TerraEngine::Editor::Animation::MotionDatabaseProductionAuthoringHost>();
+		// Preserve production ordering: no default host or executor is constructed
+		// until the existing request and sidecar validation have both succeeded.
+		if(!host) host = std::make_unique<TerraEngine::Editor::Animation::MotionDatabaseProductionAuthoringHost>();
 		auto session = std::make_unique<TerraEngine::AssetPipeline::MotionDatabaseAuthoringSession>(
 			host->GetMotionDatabaseCompileExecutor());
 		const TerraEngine::Animation::AnimationStatus queued = session->RequestBuild(document,
@@ -314,8 +338,11 @@ namespace TerraEngine::Editor::Automation
 		(void)jobs_.SetState(jobId, AutomationJobState::Running, "motion_database_build");
 		{
 			std::scoped_lock motionLock(g_motionDatabaseMutex);
-			g_motionDatabaseSessions[&jobs_].emplace(jobId, MotionDatabaseBuildSession{
-				std::move(host), std::move(session), std::move(document), outputPath});
+			auto& owner = g_motionDatabaseSessions[&jobs_];
+			// New arrivals start behind previously waiting sessions, including a slow
+			// worker that must retain its next turn while other builds finish.
+			owner.sessions.emplace(jobId, MotionDatabaseBuildSession{
+				std::move(host), std::move(session), std::move(document), outputPath, owner.visitSequence});
 		}
 		AutomationDispatchResult accepted = started;
 		accepted.message = "Queued the copied motion database build for worker cooking and checked atomic publication.";
@@ -325,6 +352,37 @@ namespace TerraEngine::Editor::Automation
 		return accepted;
 	}
 
+	void AnimationAutomationJobs::PumpActiveMotionDatabaseBuilds()
+	{
+		std::string selectedJobId;
+		{
+			std::scoped_lock motionLock(g_motionDatabaseMutex);
+			const auto found = g_motionDatabaseSessions.find(&jobs_);
+			if(found == g_motionDatabaseSessions.end() || found->second.sessions.empty()) return;
+			auto& owner = found->second;
+			auto lessVisited = [](const auto& left, const auto& right) {
+				return left.second.lastProtectedVisit != right.second.lastProtectedVisit
+					? left.second.lastProtectedVisit < right.second.lastProtectedVisit : left.first < right.first;
+			};
+			if(owner.visitSequence == std::numeric_limits<std::uint64_t>::max()) {
+				// Rebase at most 16 ranks before incrementing; fairness must never wrap.
+				std::vector<decltype(owner.sessions.begin())> ranks;
+				for(auto entry = owner.sessions.begin(); entry != owner.sessions.end(); ++entry) ranks.push_back(entry);
+				std::sort(ranks.begin(), ranks.end(), [&](auto left, auto right) { return lessVisited(*left, *right); });
+				owner.visitSequence = 0U;
+				for(auto entry : ranks) entry->second.lastProtectedVisit = owner.visitSequence++;
+			}
+			const auto selected = std::min_element(owner.sessions.begin(), owner.sessions.end(), lessVisited);
+			selectedJobId = selected->first;
+			selected->second.lastProtectedVisit = ++owner.visitSequence;
+		}
+		// One typed publication attempt is the frame's work budget. Least-visited
+		// selection gives every retained job a turn within the bounded 16 sessions,
+		// even when new clients arrive or an earlier worker remains unfinished.
+		// Cooking, complete validation and staging have already run on workers.
+		(void)PumpMotionDatabaseBuild(selectedJobId);
+	}
+
 	AutomationDispatchResult AnimationAutomationJobs::PumpMotionDatabaseBuild(
 		std::string_view jobId)
 	{
@@ -332,8 +390,8 @@ namespace TerraEngine::Editor::Automation
 		std::scoped_lock motionLock(g_motionDatabaseMutex);
 		const auto owner = g_motionDatabaseSessions.find(&jobs_);
 		if(owner == g_motionDatabaseSessions.end()) return result;
-		const auto found = owner->second.find(std::string(jobId));
-		if(found == owner->second.end()) return result;
+		const auto found = owner->second.sessions.find(std::string(jobId));
+		if(found == owner->second.sessions.end()) return result;
 		MotionDatabaseBuildSession& build = found->second;
 		if(jobs_.IsCancellationRequested(jobId)) build.session->CancelBuild();
 		const TerraEngine::AssetPipeline::MotionDatabaseBuildProgress progress = build.session->GetBuildProgress();
@@ -372,8 +430,8 @@ namespace TerraEngine::Editor::Automation
 			(void)jobs_.CompleteFailed(jobId, {{"status", MotionDatabaseStatusName(status)},
 				{"lastGoodPreserved", true}});
 		}
-		owner->second.erase(found);
-		if(owner->second.empty()) g_motionDatabaseSessions.erase(owner);
+		owner->second.sessions.erase(found);
+		if(owner->second.sessions.empty()) g_motionDatabaseSessions.erase(owner);
 		result.ok = true;
 		return result;
 	}
@@ -742,7 +800,7 @@ namespace TerraEngine::Editor::Automation
 			const auto owner = g_motionDatabaseSessions.find(&jobs_);
 			if(owner != g_motionDatabaseSessions.end())
 			{
-				for(auto& [jobId, session] : owner->second)
+				for(auto& [jobId, session] : owner->second.sessions)
 				{
 					// Project reset must not let a detached worker publish into the next
 					// project generation. The session retains the last known-good output.

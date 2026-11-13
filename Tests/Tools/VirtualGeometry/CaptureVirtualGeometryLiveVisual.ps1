@@ -161,7 +161,7 @@ if(-not (Test-Path -LiteralPath $projectPath -PathType Container))
 if($CreateValidationScene -and $CleanupValidationScene)
 {
 	# Interrupted runs can leave their disposable scene behind. Before creating a
-	# replacement, remove only an exact FramePublication-* scene under the
+	# replacement, remove only an exact agreed validation scene under the
 	# project's Assets/Scenes directory; authored scenes are never candidates.
 	$scenesBoundary = [IO.Path]::GetFullPath(
 		(Join-Path $projectPath 'Assets/Scenes')).TrimEnd('\', '/') +
@@ -173,9 +173,11 @@ if($CreateValidationScene -and $CleanupValidationScene)
 	}
 	$relativeCandidate = $validationCandidate.Substring(
 		$projectPath.Length + 1).Replace('\', '/')
-	if($relativeCandidate -notmatch '^Assets/Scenes/FramePublication-[^/]+\.tescene$')
+	# Pressure samples use the same producer-owned numeric sample/process suffix;
+	# admitting that exact workload does not grant cleanup of other scene names.
+	if($relativeCandidate -notmatch '^Assets/Scenes/(?:FramePublication-[^/]+|[.]terra-validation/virtual-geometry-(?:repeated-static|ten-renderable|low-poly-unique-direct|low-poly-repeated-direct|low-poly-forced-virtual-geometry|low-poly-automatic-routing|animated-hero|animated-crowd|page-residency-pressure)-[0-9]+-[0-9]+)\.tescene$')
 	{
-		throw 'ValidationScenePath must be an exact disposable Assets/Scenes/FramePublication-*.tescene path.'
+		throw 'ValidationScenePath must be an exact agreed disposable FramePublication or .terra-validation virtual-geometry raw/animated path.'
 	}
 	foreach($stalePath in @($validationCandidate, "$validationCandidate.meta"))
 	{
@@ -1023,7 +1025,7 @@ try
 	{
 		# Some source fixtures use runtime-oriented scene JSON that the editor
 		# intentionally does not open. Create a disposable editor-native scene
-		# and camera so the normal RenderSystem path—not only custom readback—
+		# and camera so the normal RenderSystem path and custom readback
 		# advances page demand, decode, upload, and residency publication.
 		Start-Sleep -Milliseconds 500
 		$validationScene = Invoke-McpTool 'scene.create' ([ordered]@{

@@ -64,6 +64,8 @@ void main(uint3 id : SV_DispatchThreadID)
 	uint hierarchyCount = 0u;
 	uint hierarchyStride = 0u;
 	traversalInstances.GetDimensions(hierarchyCount, hierarchyStride);
+	// The declared root prefix must also fit its actual descriptor-backed packet.
+	if(id.x >= hierarchyCount) return;
 	const TraversalInstance rootInstance = traversalInstances[id.x];
 	if(rootInstance.generation != Traversal.expectedGeneration
 		|| rootInstance.root >= hierarchyCount)
@@ -83,8 +85,19 @@ void main(uint3 id : SV_DispatchThreadID)
 	uint pendingClusters[kMaximumTraversalStack];
 	uint pendingCount = 1u;
 	pendingClusters[0] = rootInstance.root;
+	// A valid tree visits each packet record at most once. A decreasing budget
+	// avoids overflowing counters and bounds cycles even when pending depth is
+	// one; stack capacity alone cannot terminate a self/ancestor cycle.
+	uint remainingVisits = hierarchyCount;
 	while(pendingCount > 0u)
 	{
+		if(remainingVisits == 0u)
+		{
+			InterlockedOr(traversalCounters[1], TE_VIRTUAL_GEOMETRY_DIAGNOSTIC_QUEUE_OVERFLOW);
+			EmitTraversalRequest(id.x, rootInstance.root, TE_VIRTUAL_GEOMETRY_PACKET_FLAG_FAIL_OPEN);
+			break;
+		}
+		--remainingVisits;
 		const uint clusterIndex = pendingClusters[--pendingCount];
 		if(clusterIndex >= hierarchyCount)
 		{

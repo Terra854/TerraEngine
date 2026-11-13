@@ -130,10 +130,13 @@ namespace TerraEngine::EditorTests
 			frame.samples.push_back(sample(4u, 1u, "Wrong Thread", "", "Worker", 2.0, 1.0, 20u));
 
 			const auto hierarchy = BuildProfilerSampleHierarchy(frame, ProfilerModuleId::CpuEngine);
-			auto findNode = [&hierarchy](std::uint64_t sampleId) -> const TerraEngine::EditorProfiling::ProfilerSampleHierarchyNode& {
+			auto findNode = [&hierarchy, &context](std::uint64_t sampleId) -> const TerraEngine::EditorProfiling::ProfilerSampleHierarchyNode& {
 				const auto found = std::find_if(hierarchy.nodes.begin(), hierarchy.nodes.end(), [&hierarchy, sampleId](const auto& node) {
-					return hierarchy.samples[node.sampleIndex].sampleId == sampleId;
+					return node.sampleIndex < hierarchy.samples.size()
+						&& hierarchy.samples[node.sampleIndex].sampleId == sampleId;
 				});
+				// Missing output is a failed contract, never an iterator to dereference.
+				context.Expect(found != hierarchy.nodes.end(), "Expected sample is absent from the rebuilt hierarchy.");
 				return *found;
 			};
 

@@ -92,7 +92,11 @@ namespace TerraEngine::Editor::Automation
 			if (descriptor.name == "route.lock")
 			{
 				descriptor.description = "Read or set a transient representation-route lock for validation captures.";
-				descriptor.inputSchema = {{"type", "object"}, {"properties", {{"route", {{"type", "string", "enum", {"automatic", "direct", "virtual-hardware", "virtual-compute"}}}}, {"enabled", {{"type", "boolean"}}}}}};
+				// Type and enum are separate schema members; merging their initializer
+				// makes the property an array instead of a valid schema object.
+				descriptor.inputSchema = {{"type", "object"}, {"properties", {
+					{"route", {{"type", "string"}, {"enum", {"automatic", "direct", "virtual-hardware", "virtual-compute"}}}},
+					{"enabled", {{"type", "boolean"}}}}}};
 				descriptor.resultSchema = {{"type", "object"}, {"properties", {{"route", {{"type", "string"}}}, {"locked", {{"type", "boolean"}}}}}};
 				descriptor.execution.visibilityBoundary = "immutable_snapshot";
 			}
@@ -139,6 +143,23 @@ namespace TerraEngine::Editor::Automation
 
 			const std::string toolName = descriptor.name;
 			AutomationHandler handler = resolver(toolName);
+			if (toolName == "diagnostics.snapshot" || toolName == "capture.provenance")
+			{
+				// These names have no native immutable snapshot/provenance producer
+				// yet. Keep discovery honest and callable without forwarding into an
+				// unsupported compatibility operation or inventing measured evidence.
+				descriptor.availability.available = false;
+				descriptor.availability.reason = "The native immutable evidence producer is unavailable.";
+				handler = [toolName](const AutomationRequestContext&) {
+					const auto fields = toolName == "diagnostics.snapshot"
+						? nlohmann::json::array({"snapshotId"})
+						: nlohmann::json::array({"commandHash", "runtimeRevision", "graphicsPath"});
+					nlohmann::json data = {{"unavailableMetrics", fields}};
+					for (const auto& field : fields) data[field.get<std::string>()] = nullptr;
+					return AutomationDispatchResult{false, ErrorCategory::Unavailable,
+						"The native immutable evidence producer is unavailable for " + toolName + ".", std::move(data)};
+				};
+			}
 			if (toolName == "route.lock")
 			{
 				// Keep the public diagnostics operation stable while delegating to the

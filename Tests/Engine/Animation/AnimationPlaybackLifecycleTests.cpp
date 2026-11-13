@@ -9,6 +9,8 @@
 #include "Core/Scheduling/FrameWorkload.h"
 #include "Scripting/ScriptingSystem.h"
 
+// Lifecycle assertions use none_of; include its contract directly.
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>

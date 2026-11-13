@@ -5,6 +5,7 @@
 // This module provides the backend support for optimizing fragment shading frequency during rendering.
 
 #include "VulkanVRS.h"
+#include "Core/Logger/Logger.h"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -44,6 +45,20 @@ void VulkanVRS::Create(VkDevice device, VkPhysicalDevice physicalDevice, VmaAllo
 	imageInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	// Recheck this actual extent before native allocation. An unsupported
+	// optional attachment leaves the new owner empty; normal-rate rendering
+	// remains available because attachment consumers also require a live view.
+	VkImageFormatProperties supportedImage{};
+	const VkResult support = vkGetPhysicalDeviceImageFormatProperties(physicalDevice,
+		imageInfo.format, imageInfo.imageType, imageInfo.tiling, imageInfo.usage, imageInfo.flags, &supportedImage);
+	if (support != VK_SUCCESS || width > supportedImage.maxExtent.width || height > supportedImage.maxExtent.height
+		|| supportedImage.maxExtent.depth < 1u || supportedImage.maxMipLevels < 1u || supportedImage.maxArrayLayers < 1u
+		|| !(supportedImage.sampleCounts & imageInfo.samples)) {
+		width = height = 0u;
+		TERRAENGINE_LOG(LogLevel::Warning, "Optional VRS attachment unavailable for the requested image extent/usage.");
+		return;
+	}
 
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;

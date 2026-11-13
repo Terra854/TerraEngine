@@ -111,6 +111,8 @@ namespace TerraEngine::Tests
 			TerraEngine::Renderer::Terrain::TerrainViewPacket view{};
 			view.assetId = asset; view.authoredHash = input.authoredHash; view.authoredGeneration = 8u; view.pageSourceIdentity = cook.sourceIdentity; view.frameId = 1u;
 			const auto fresh = TerraEngine::Renderer::Terrain::PrepareTerrainRenderPacket(view, cook, {});
+			// Never dereference a failed preparation while constructing last-known-good evidence.
+			context.Expect(fresh.has_value(), "Fresh cooked terrain must prepare a packet before residency is copied.");
 			TerraEngine::Resource::VirtualGeometryPagePublication lkg{};
 			lkg.candidateId = fresh->candidate.candidateId; lkg.publicationGeneration = fresh->candidate.publicationGeneration; lkg.key = fresh->candidate.key;
 			lkg.payload = fresh->candidate.payload;

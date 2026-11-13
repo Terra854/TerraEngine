@@ -1596,6 +1596,48 @@ namespace TerraEngine::Tests {
 				"A retired root must preserve capacity and be safely republished for a later frame.");
 		});
 
+		registry.Add("Animation.GpuPlan.SharedFollowersRefreshWithTypedOptIn", [](TestContext& context) {
+			auto program = std::make_shared<EvaluationProgram>();
+			program->stableHash = 0x4400U;
+			program->compatibilityFingerprint = 0x5400U;
+			program->scratchPlan.byteCount = 20U;
+			program->scratchPlan.alignmentBytes = kGpuAnimationArenaAlignment;
+			const auto payload = MakeAtlasResidentPayload(1.0F);
+			std::vector<GpuAnimationLoweringInput> inputs{
+				MakeSharedPayloadLoweringInput(MakeAtlasRequest(100U, 10U, MakeAtlasRenderIdentity(1U, 71U)), program, payload),
+				MakeSharedPayloadLoweringInput(MakeAtlasRequest(200U, 10U, MakeAtlasRenderIdentity(2U, 72U)), program, payload)};
+			for(auto& input : inputs) input.allowSharedVisualEvaluation = true;
+			const auto signature = [&inputs] {
+				GpuAnimationLoweringTopologySignatureBuilder builder;
+				for(const auto& input : inputs) builder.Include(input);
+				return builder.Complete();
+			};
+			GpuAnimationArena scratch, palette;
+			ConfigureArenas(scratch, palette);
+			GpuAnimationPlan initial, refreshed;
+			GpuAnimationLoweredPlanResult firstResult, secondResult;
+			context.Expect(BuildLoweredGpuAnimationPlan(inputs, 91U, scratch, palette, initial, firstResult,
+				{}, nullptr, nullptr, {}, signature()) == GpuAnimationLoweringStatus::Ok
+				&& initial.EvaluationSourcePacketIndices().size() == 2U
+				&& initial.EvaluationSourcePacketIndices()[1] == 0U,
+				"Equal evaluation inputs with distinct output owners must create a real shared follower.");
+			context.Expect((inputs[0].visual.diagnosticIndex & 0x80000000U) == 0U
+				&& (inputs[1].visual.diagnosticIndex & 0x80000000U) == 0U,
+				"The original visual inputs must not contain the private lowered-request opt-in bit.");
+			context.Expect(BuildLoweredGpuAnimationPlan(inputs, 92U, scratch, palette, refreshed, secondResult,
+				{}, nullptr, &initial, {}, signature()) == GpuAnimationLoweringStatus::Ok
+				&& secondResult.topologyReused && secondResult.workRequests.empty()
+				&& refreshed.EvaluationSourcePacketIndices()[1] == 0U,
+				"Typed sharing consent must permit the actual cached refresh without temporary request rebuilding.");
+			// Withdrawing consent changes the topology proof; the full checked path
+			// must rebuild private evaluation rather than preserve an unauthorized follower.
+			inputs[1].allowSharedVisualEvaluation = false;
+			GpuAnimationPlan privatePlan; GpuAnimationLoweredPlanResult privateResult;
+			context.Expect(BuildLoweredGpuAnimationPlan(inputs, 93U, scratch, palette, privatePlan, privateResult,
+				{}, nullptr, &refreshed, {}, signature()) == GpuAnimationLoweringStatus::Ok
+				&& !privateResult.topologyReused && privatePlan.EvaluationSourcePacketIndices()[1] == 1U,
+				"Opt-out must retain a valid independently evaluated owner.");
+		});
 		registry.Add("Animation.GpuPlan.SharedPayloadRefreshAvoidsTemporaryRequestVectors", [](TestContext& context) {
 			auto program = std::make_shared<EvaluationProgram>();
 			program->stableHash = 0x4400U;

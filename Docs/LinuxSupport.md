@@ -9,7 +9,7 @@ desktop development packages required by GLFW.
 ## Prerequisites
 
 - Git with submodule support.
-- CMake 3.22.1 or newer.
+- CMake 3.24 or newer, required for the whole-archive target link expression.
 - Ninja for the checked-in `Debug` preset. Unix Makefiles are acceptable for
   local validation when Ninja is unavailable.
 - A C++20 compiler such as GCC or Clang.

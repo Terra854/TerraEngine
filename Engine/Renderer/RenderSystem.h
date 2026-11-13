@@ -78,6 +78,7 @@ namespace TerraEngine::Renderer::Frame {
 	struct GroupedSubmissionMembershipCacheState;
 }
 
+namespace TerraEngine::Tests::Review { struct RenderPublicationIdentityAccess; struct RendererAnimatedDemandReviewAccess; }
 namespace TerraEngine::Renderer {
 	struct RendererEfficiencyResolvedFixtureCamera;
 	struct RenderFrameScratchValidationCallbacks;
@@ -483,6 +484,11 @@ private:
 	void ApplyQueuedRuntimeRenderSettings();
 	friend struct TerraEngine::Renderer::SyntheticCaptureTestAccess;
 	friend struct TerraEngine::Renderer::RenderCaptureBackendTestAccess;
+	// Validation access invokes the existing protected topology operation and
+	// copies its sidecars; it does not expose a mutable runtime control surface.
+	friend struct TerraEngine::Tests::Review::RenderPublicationIdentityAccess;
+	// Test-only copied diagnostics; no mutation or renderer lifetime ownership.
+	friend struct TerraEngine::Tests::Review::RendererAnimatedDemandReviewAccess;
 	struct CaptureOperation;
 	std::string QueueCaptureRequestInternal(TerraEngine::Renderer::RenderCaptureRequest request, std::string& errorMessage, std::string& admissionId);
 	std::optional<TerraEngine::Renderer::RenderCaptureResult> PollCaptureAdmission(std::string_view admissionId);

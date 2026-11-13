@@ -18,6 +18,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:workerEvidenceAggregates = @()
 
+function Get-ObservedPhysicsBenchmarkWorkerCount($LiveSummary, $NativeResolution) {
+	# Identity belongs to the measured process. A present live summary with a
+	# missing count must not borrow worker identity from a different native run.
+	$value = if($null -ne $LiveSummary) { $LiveSummary.actualWorkerCount } elseif($null -ne $NativeResolution) { $NativeResolution.resolved } else { $null }
+	$count = 0
+	if($null -eq $value -or -not [int]::TryParse([string]$value, [ref]$count) -or $count -lt 1) { return $null }
+	return $count
+}
+
 function Get-TextSha256 {
 	param([Parameter(Mandatory=$true)][string]$Text)
 	$sha = [Security.Cryptography.SHA256]::Create()
@@ -150,14 +159,15 @@ function Convert-StressSummaryToRun {
 }
 
 function Invoke-InstalledStress {
-	param([object]$Workload,[int]$RunNumber,[string]$Root,[string]$Worker,[object]$Quality,[int]$MeasuredSteps,[string]$VariantId,[string]$Runner)
+	param([object]$Workload,[int]$RunNumber,[string]$Root,[string]$Worker,[object]$Quality,[int]$MeasuredSteps,[int]$WarmupSteps,[string]$VariantId,[string]$Runner)
 	$workRoot = Join-Path $Root ("{0:D2}-{1}" -f $RunNumber,$VariantId)
 	New-Item -ItemType Directory -Force -Path $workRoot | Out-Null
 	try {
 		$scenario = if($Workload.id -eq 'physics-worker-large-v1' -or $Workload.id -eq 'physics-unchanged-10000-v1') { 'large' } else { 'canonical' }
+		# WarmupSteps is resolved once by the caller, including manifest fallback.
 		# Live captures are routed only through the installed sibling runner. This
 		# prevents a source-tree harness from being mistaken for installed evidence.
-		& $Runner -InstallRoot $resolvedInstallRoot -WorkRoot $workRoot -ObjectCount ([int]$Workload.population) -ActiveDynamicCount ([int]$Workload.activeBodies) -ExplicitStepCount ($MeasuredSteps + $Workload.warmupSteps) -WorkerCount $Worker -WorkerScalingScenario $scenario -VelocityIterations ([int]$Quality.velocityIterations) -PositionIterations ([int]$Quality.positionIterations) -AllowLiveStress:$AllowLiveStress *> (Join-Path $workRoot 'runner.log')
+		& $Runner -InstallRoot $resolvedInstallRoot -WorkRoot $workRoot -CanonicalFixture ([string]$Workload.id) -ObjectCount ([int]$Workload.population) -ActiveDynamicCount ([int]$Workload.activeBodies) -ExplicitStepCount ($MeasuredSteps + $WarmupSteps) -WarmupStepCount $WarmupSteps -WorkerCount $Worker -WorkerScalingScenario $scenario -VelocityIterations ([int]$Quality.velocityIterations) -PositionIterations ([int]$Quality.positionIterations) -AllowLiveStress:$AllowLiveStress *> (Join-Path $workRoot 'runner.log')
 	} catch { return $null }
 	$summaryPath = Join-Path $workRoot 'evidence/summary.json'
 	if (Test-Path -LiteralPath $summaryPath) { try { return Get-Content -Raw $summaryPath | ConvertFrom-Json } catch {} }
@@ -284,7 +294,7 @@ foreach ($workload in $manifestObject.workloads) {
 				continue
 			}
 			if ($canRouteLiveWorkload) {
-				$liveSummary = Invoke-InstalledStress -Workload $workload -RunNumber $runNumber -Root $OutputDirectory -Worker $worker -Quality $quality -MeasuredSteps $measuredSteps -VariantId $variantId -Runner $installedRunnerPath
+				$liveSummary = Invoke-InstalledStress -Workload $workload -RunNumber $runNumber -Root $OutputDirectory -Worker $worker -Quality $quality -MeasuredSteps $measuredSteps -WarmupSteps $warmupSteps -VariantId $variantId -Runner $installedRunnerPath
 			}
 			$summaryInstallPath = if ($liveSummary -and $liveSummary.installRoot -and (Test-Path -LiteralPath $liveSummary.installRoot -PathType Container)) {
 				(Resolve-Path -LiteralPath $liveSummary.installRoot).Path
@@ -321,15 +331,17 @@ foreach ($workload in $manifestObject.workloads) {
 		$lastQuality = if ($lastSample.Count) { $lastSample[0].quality } else { $null }
 		$lastJobs = if ($lastSample.Count) { $lastSample[0].jobs } else { $null }
 		$nativeWorkerResolution = if ($lastNativeSource) { $lastNativeSource.workerResolution } else { $null }
-		$resolvedWorkers = if ($lastLiveSummary) { [int]$lastLiveSummary.actualWorkerCount } elseif ($nativeWorkerResolution -and $null -ne $nativeWorkerResolution.resolved) { [int]$nativeWorkerResolution.resolved } elseif ($worker -eq 'max') { [Math]::Max(1,[Environment]::ProcessorCount) } else { [int]$worker }
-		$nativeAdapterLimit = if ($nativeWorkerResolution -and $null -ne $nativeWorkerResolution.adapterLimit) { [int]$nativeWorkerResolution.adapterLimit } else { $resolvedWorkers }
+		# Live worker identity belongs to that live process; null remains unavailable.
+		$resolvedWorkers = Get-ObservedPhysicsBenchmarkWorkerCount $lastLiveSummary $nativeWorkerResolution
+		$nativeAdapterLimit = if($lastLiveSummary) { $resolvedWorkers } elseif ($nativeWorkerResolution -and $null -ne $nativeWorkerResolution.adapterLimit) { [int]$nativeWorkerResolution.adapterLimit } else { $resolvedWorkers }
 		# Clean same-revision parents predate provider-applied quality telemetry.
 		# Their requested default 10/2 profile is still a valid performance parent;
 		# only candidates and alternate profiles must prove the applied bit.
 		if($BaselineIsSameRevisionParent -and [int]$quality.velocityIterations -eq 10 -and [int]$quality.positionIterations -eq 2 -and $nativeRunCount -eq $effectiveRuns) {
 			$profileApplied = $true
 		}
-		$captureComplete = ($nativeRunCount -eq $effectiveRuns) -or ($canRouteLiveWorkload -and $liveRunCount -eq $effectiveRuns)
+		$captureComplete = (($nativeRunCount -eq $effectiveRuns) -or ($canRouteLiveWorkload -and $liveRunCount -eq $effectiveRuns)) -and $null -ne $resolvedWorkers
+		if($null -eq $resolvedWorkers) { $profileApplied = $false; $workloadUnavailableReason = "Actual worker count was not observed in the measured process." }
 		# Keep an actual collection object even when there are no failures. PowerShell
 		# otherwise enumerates an empty array produced by an `if` expression to `$null`,
 		# which violates the evidence schema's required JSON-array contract.
@@ -345,7 +357,7 @@ foreach ($workload in $manifestObject.workloads) {
 				workload=[ordered]@{ id=$workload.id; version=[int]$workload.version; manifestSha256=$manifestHash; sceneSha256=(Get-TextSha256 $workloadJson); population=[int]$workload.population; activeBodies=[int]$workload.activeBodies }
 				# The schema intentionally keeps bounded worker requests numeric while
 				# preserving the special hardware-derived "max" request as a string.
-				workers=[ordered]@{ requested=if($worker -eq 'max'){'max'}else{[int]$worker}; resolved=$resolvedWorkers; adapterLimit=if($lastJobs){[int]$lastJobs.workerLimit}else{$nativeAdapterLimit} }
+				workers=[ordered]@{ requested=if($worker -eq 'max'){'max'}else{[int]$worker}; resolved=$resolvedWorkers; adapterLimit=if($lastJobs -and $null -ne $lastJobs.workerLimit){[int]$lastJobs.workerLimit}else{$nativeAdapterLimit} }
 				quality=[ordered]@{ settingsSchemaVersion=if($lastQuality){[int]$lastQuality.settingsSchemaVersion}elseif($lastNativeSource.quality.settingsSchemaVersion){[int]$lastNativeSource.quality.settingsSchemaVersion}else{1}; settingsGeneration=if($lastQuality){[UInt64]$lastQuality.settingsGeneration}elseif($lastNativeSource.quality.settingsGeneration){[UInt64]$lastNativeSource.quality.settingsGeneration}else{1}; worldGeneration=if($lastQuality){[UInt64]$lastQuality.worldGeneration}elseif($lastNativeSource.quality.worldGeneration){[UInt64]$lastNativeSource.quality.worldGeneration}else{1}; velocityIterations=[int]$quality.velocityIterations; positionIterations=[int]$quality.positionIterations; applied=[bool]$profileApplied }
 				protocol=[ordered]@{ warmupSteps=$warmupSteps; measuredSteps=$measuredSteps; runCount=$effectiveRuns; fixedDeltaSeconds=[double]$manifestObject.fixedDeltaSeconds; captureSettingsSha256=$captureSettingsHash }
 			}

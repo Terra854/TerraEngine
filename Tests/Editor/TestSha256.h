@@ -7,6 +7,9 @@
 #pragma once
 
 #include <array>
+#include <stdexcept>
+#include <limits>
+#include <cstring>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -43,24 +46,34 @@ namespace TerraEngine::EditorTests
 		std::array<std::uint32_t, 8U> state = {
 			0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
 			0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
-		std::vector<std::uint8_t> bytes(input.begin(), input.end());
-		const std::uint64_t bitLength = static_cast<std::uint64_t>(bytes.size()) * 8ULL;
-		bytes.push_back(0x80U);
-		while ((bytes.size() % 64U) != 56U)
+		// SHA256 consumes the caller's immutable complete blocks directly. Only
+		// the final one/two padded blocks live on the stack, so hashing a large
+		// artifact never duplicates its full input or grows a padding vector.
+		if (input.size() > std::numeric_limits<std::uint64_t>::max() / 8u
+			|| input.size() > std::numeric_limits<std::size_t>::max() - 128u)
 		{
-			bytes.push_back(0U);
+			throw std::length_error("SHA256 input length exceeds its exact bit count.");
 		}
-		for (int shift = 56; shift >= 0; shift -= 8)
+		const std::uint64_t bitLength = static_cast<std::uint64_t>(input.size()) * 8u;
+		const std::size_t completeBlocks = input.size() / 64u;
+		const std::size_t remainder = input.size() % 64u;
+		std::array<std::uint8_t, 128U> tail{};
+		if (remainder != 0u) std::memcpy(tail.data(), input.data() + completeBlocks * 64u, remainder);
+		tail[remainder] = 0x80u;
+		const std::size_t tailBytes = remainder < 56u ? 64u : 128u;
+		for (unsigned index = 0u; index < 8u; ++index)
 		{
-			bytes.push_back(static_cast<std::uint8_t>((bitLength >> shift) & 0xffULL));
+			tail[tailBytes - 1u - index] = static_cast<std::uint8_t>(bitLength >> (index * 8u));
 		}
-
-		for (std::size_t block = 0U; block < bytes.size(); block += 64U)
+		for (std::size_t block = 0U; block < completeBlocks + tailBytes / 64u; ++block)
 		{
+			const auto* bytes = block < completeBlocks
+				? reinterpret_cast<const std::uint8_t*>(input.data()) + block * 64u
+				: tail.data() + (block - completeBlocks) * 64u;
 			std::array<std::uint32_t, 64U> words{};
 			for (std::size_t index = 0U; index < 16U; ++index)
 			{
-				const std::size_t offset = block + index * 4U;
+				const std::size_t offset = index * 4U;
 				words[index] = (static_cast<std::uint32_t>(bytes[offset]) << 24U)
 					| (static_cast<std::uint32_t>(bytes[offset + 1U]) << 16U)
 					| (static_cast<std::uint32_t>(bytes[offset + 2U]) << 8U)

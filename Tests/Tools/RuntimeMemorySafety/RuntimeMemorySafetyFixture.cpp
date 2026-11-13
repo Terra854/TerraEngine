@@ -1,3 +1,4 @@
+#include "RuntimeMemorySafetyAcquireEvidence.h"
 // Installed preflight, original empty-frame red probe, and actual Vulkan lanes.
 // Usage: --mode vulkan --scenario <frozen lane> --iterations <positive count>
 //   --install-root <absolute Build> --output <fresh absolute json>.
@@ -53,25 +54,8 @@ namespace
 	// Null VkResults distinguish that rejection from a genuine driver return.
 	Json NativeReceipt(const EmptyReceipt& value)
 	{
-		return {{"sequence", value.sequence}, {"correlationId", value.correlationId}, {"generation", value.generation},
-			{"frameSlot", value.frameSlot}, {"imageIndex", value.imageIndex}, {"acquired", value.acquired},
-			{"swapchainImageCount", value.swapchainImageCount}, {"frameSlotCount", value.frameSlotCount},
-			{"forcedEmpty", value.forcedEmpty}, {"commandBufferCount", value.commandBufferCount},
-			{"recordEnded", value.recordEnded}, {"acquireWaitConsumedBefore", value.acquireWaitConsumedBefore},
-			{"acquireWaitConsumed", value.acquireWaitConsumedBefore}, {"fallbackCommandSubmitted", value.forcedEmpty && value.submitAccepted && value.commandBufferCount == 1U},
-			{"resetAttempted", value.resetAttempted}, {"resetResult", value.resetAttempted ? Json(value.resetResult) : Json(nullptr)},
-			{"fenceResetAccepted", value.fenceResetAccepted}, {"submitAttempted", value.submitAttempted},
-			{"submitResult", value.submitAttempted ? Json(value.submitResult) : Json(nullptr)}, {"submitAccepted", value.submitAccepted},
-			{"presentAttempted", value.presentAttempted}, {"presentResult", value.presentAttempted ? Json(value.presentResult) : Json(nullptr)},
-			{"waitIdleAttempted", value.waitIdleAttempted}, {"waitIdleResult", value.waitIdleAttempted ? Json(value.waitIdleResult) : Json(nullptr)},
-			{"waitIdleCompletionObserved", value.waitIdleCompletionObserved}, {"ordinarySubmitAccepted", value.ordinarySubmitAccepted},
-			{"ordinarySubmissionSerial", value.ordinarySubmissionSerial}, {"ordinaryCompletionObserved", value.ordinaryCompletionObserved},
-			{"acquisitionDrainSubmitted", value.acquisitionDrainSubmitted}, {"acquisitionDrainCompleted", value.acquisitionDrainCompleted},
-			{"recoverySuspended", value.recoverySuspended}, {"rejectedCheckpoint", static_cast<unsigned>(value.rejectedCheckpoint)},
-			{"candidateRejected", value.candidateRejected}, {"candidateCheckpoint", static_cast<unsigned>(value.candidateCheckpoint)},
-			{"candidateFallbackPassCreated", value.candidateFallbackPassCreated}, {"candidatePartialCleanupCompleted", value.candidatePartialCleanupCompleted},
-			{"candidateOldSwapchainConsumed", value.candidateOldSwapchainConsumed}, {"maintenanceEnabled", value.maintenanceEnabled},
-			{"validationErrorsBefore", value.validationErrorsBefore}, {"validationErrorsAfter", value.validationErrorsAfter}};
+		return TerraEngine::Validation::RuntimeMemorySafety::FormatNativeAcquireReceipt(value, value.acquireWaitConsumedAfterObserved
+			? std::optional<bool>(value.acquireWaitConsumedAfter) : std::nullopt);
 	}
 	bool Presented(const EmptyReceipt& value)
 	{

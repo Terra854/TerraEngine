@@ -2,7 +2,7 @@
 	"format": "TerraPrefabUnboundedV1",
 	"sourceId": "navigation-hard-break-agent",
 	"objects": [{
-		"uuid": "580000000000000000000000000004",
+		"uuid": "58000000000000000000000000000004",
 		"name": "Supported Navigation Agent Prefab Object",
 		"components": {"NavigationAgentComponent": {"active": true, "radiusMetres": 0.4, "heightMetres": 1.8}}
 	}]

@@ -175,6 +175,7 @@ UIElement::Ptr UIElement::Clone() const
 	clone->text = text;
 	clone->source = source;
 	clone->styleSheetSources = styleSheetSources;
+	clone->hasExplicitStyleSheetSources = hasExplicitStyleSheetSources;
 	clone->attributes = attributes;
 	clone->inlineStyle = inlineStyle;
 	clone->computedStyle = computedStyle;

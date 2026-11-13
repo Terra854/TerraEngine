@@ -490,7 +490,22 @@ BuildProfileCollectionResult SaveBuildProfileToCollection(
 		return { false, "Build profile identity contains unsafe path characters.", std::nullopt };
 	}
 
-	const std::filesystem::path path = directory / (profile.id + ".json");
+	// Loaded profiles retain their authored filename. Reuse it only when it is
+	// a direct JSON member of this collection, including after symlink resolution.
+	const std::filesystem::path path = profile.filePath.empty()
+		? directory / (profile.id + ".json") : profile.filePath;
+	std::error_code pathError;
+	const auto collectionPath = std::filesystem::weakly_canonical(directory, pathError);
+	if (pathError) return { false, "Build profile collection path could not be resolved.", std::nullopt };
+	const auto resolvedPath = std::filesystem::weakly_canonical(path, pathError);
+	if (pathError || resolvedPath.parent_path() != collectionPath || path.extension() != ".json") {
+		return { false, "Build profile persistence path must be a JSON file inside its collection.", std::nullopt };
+	}
+	// A stale or caller-edited path must not overwrite a different stable ID.
+	const bool existing = std::filesystem::exists(path, pathError);
+	if (pathError || (existing && LoadBuildProfile(path).id != profile.id)) {
+		return { false, "Build profile persistence path belongs to another identity or cannot be read.", std::nullopt };
+	}
 	if (!SaveBuildProfile(profile, path)) {
 		return { false, "Build profile could not be persisted.", std::nullopt };
 	}
@@ -506,7 +521,15 @@ BuildProfileCollectionResult RemoveBuildProfileFromCollection(
 		return { false, "A safe build profile identity is required.", std::nullopt };
 	}
 
-	BuildProfileCollectionResult found = FindBuildProfileInCollection(directory, profileId);
+	// Interactive Find accepts names, but destructive removal resolves only the
+	// selected stable identity. A colliding display name cannot select a file.
+	BuildProfileCollectionResult found{ false, "Build profile was not found.", std::nullopt };
+	for (BuildProfile profile : LoadAllBuildProfiles(directory)) {
+		if (profile.id == profileId) {
+			found = { true, {}, std::move(profile) };
+			break;
+		}
+	}
 	if (!found.succeeded || !found.profile.has_value()) {
 		return found;
 	}

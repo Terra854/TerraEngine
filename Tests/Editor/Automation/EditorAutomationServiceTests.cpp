@@ -559,6 +559,11 @@ namespace TerraEngine::EditorTests
 			context.Expect(compact["data"]["parallelFrame"].contains("executionTelemetry"), "Compact diagnostics should preserve the additive scheduler telemetry envelope.");
 			context.Expect(!compact["data"]["parallelFrame"]["executionTelemetry"].value("detailIncluded", true), "Compact diagnostics should avoid retaining workload and worker history arrays.");
 			context.Expect(compact["data"]["parallelFrame"]["executionTelemetry"]["executionRecords"].empty(), "Compact diagnostics should omit workload decision records.");
+			// The installed child must report its own hardware hint even in compact
+			// mode; runners cannot substitute the launcher's CPU count for this fact.
+			const auto& compactTelemetry = compact["data"]["parallelFrame"]["executionTelemetry"];
+			context.Expect(compactTelemetry.contains("hardwareConcurrency") && compactTelemetry["hardwareConcurrency"].is_number_unsigned(), "Child hardware concurrency should be an unsigned hint, including zero when unknown.");
+			context.Expect(compactTelemetry.value("hardwareConcurrencySource", std::string{}) == "child-std-thread-hardware-concurrency", "Diagnostics should identify the child hardware hint source.");
 			const nlohmann::json detailed = service.HandleTool("diagnostics.get_summary", {{"includeDetails", true}}, WriteMode::ReadOnly, "diag-parallel");
 			context.Expect(detailed.value("ok", false), "Engine-backed diagnostics should succeed.");
 			context.Expect(detailed["data"]["parallelFrame"].value("available", false), "Parallel-frame diagnostics should be available when an engine is attached.");

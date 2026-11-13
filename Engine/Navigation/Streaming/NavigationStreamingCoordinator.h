@@ -51,27 +51,36 @@ namespace TerraEngine::Navigation
 		std::uint64_t leaseGeneration = 0U;
 	};
 
+	struct NavigationCoveragePublicationTicket { NavigationCoverageKey key{}; std::uint64_t epoch = 0U; };
+
 	class TERRAENGINE_API NavigationStreamingCoordinator final
 	{
 	public:
 		explicit NavigationStreamingCoordinator(std::size_t maximumCoverage = 4096U);
 		[[nodiscard]] std::vector<NavigationCoverageKey> RequestInterest(const NavigationCoverageInterest& interest);
 		[[nodiscard]] NavigationStreamingObservation Observe(const NavigationCoverageKey& key) const;
-		[[nodiscard]] bool PublishReady(const NavigationCoverageKey& key, NavigationGeneration generation, std::size_t chargedBytes);
+		// Capture before starting provider work; retirement/invalidation revokes this ticket.
+		[[nodiscard]] NavigationCoveragePublicationTicket BeginPublication(const NavigationCoverageKey& key);
+		[[nodiscard]] bool PublishReady(const NavigationCoveragePublicationTicket& ticket, NavigationGeneration generation, std::size_t chargedBytes);
 		[[nodiscard]] bool MarkInvalidated(const NavigationCoverageKey& key);
 		[[nodiscard]] bool AcquireRouteLease(const NavigationCoverageKey& key, std::string leaseId, std::uint64_t expiresAtFrame);
 		[[nodiscard]] bool ReleaseRouteLease(const NavigationCoverageKey& key, const std::string& leaseId);
 		[[nodiscard]] std::size_t RetireExpired(std::uint64_t frame);
+		// Copy only the retained entry count under its owner lock. Diagnostics and
+		// lifecycle tests can observe capacity without retaining mutable map entries.
+		[[nodiscard]] std::size_t RetainedCoverageCount() const;
 
 	private:
 		struct Entry
 		{
 			NavigationCoverageRecord record{};
+			std::uint64_t epoch = 0U;
 			std::unordered_map<std::string, std::uint64_t> leases;
 		};
 
 		mutable std::mutex mutex;
 		std::size_t maximumCoverage = 0U;
+		std::uint64_t nextEpoch = 1U;
 		std::unordered_map<NavigationCoverageKey, Entry, NavigationCoverageKeyHash> entries;
 	};
 }

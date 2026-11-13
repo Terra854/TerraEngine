@@ -17,6 +17,8 @@
 #include "VulkanEmptyFramePolicy.h"
 #include "VulkanReadbackValidation.h"
 
+namespace TerraEngine::Tests::Review { struct VulkanLifecycleReviewAccess; struct VulkanTextureReviewAccess; struct VulkanDiscardedPrimaryReviewAccess; }
+
 class TERRAENGINE_API VulkanContext : public RHIContext
 {
 public:
@@ -24,6 +26,9 @@ public:
 	~VulkanContext() override;
 
 	void Initialize(WindowSystem& windowSystem) override;
+	// A minimized startup waits for a drawable extent at the protected boundary.
+	bool IsReady() const;
+	bool IsInitializationDeferred() const;
 	void BeginFrame() override;
 
 	void RenderFrame(std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> publication, std::uint32_t viewIndex) override;
@@ -155,6 +160,9 @@ public:
 		std::uint64_t finalUseSerial);
 
 private:
+	friend struct TerraEngine::Tests::Review::VulkanLifecycleReviewAccess;
+	friend struct TerraEngine::Tests::Review::VulkanTextureReviewAccess;
+	friend struct TerraEngine::Tests::Review::VulkanDiscardedPrimaryReviewAccess;
 	// Publishes the compute/deformation work sealed inside a frame publication.
 	// Keeping this helper private prevents a second externally callable frame
 	// hand-off from drifting away from the immutable publication root.

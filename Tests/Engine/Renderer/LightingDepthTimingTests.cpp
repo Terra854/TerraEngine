@@ -1,5 +1,7 @@
 #include "TestHarness.h"
 #include "Renderer/RHI/Vulkan/VulkanLightingDepthTiming.h"
+#include <array>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -42,7 +44,8 @@ namespace TerraEngine::Tests
 		registry.Add("Renderer.Efficiency.LightingDepthTiming.OrderedSubmitAndExactCompletion", [](TestContext& t) {
 			TimingState s; const auto o=MakeOwner(); Start(t,s,o); auto wrong=o; wrong.outputId=1; t.Expect(!s.End(wrong),"Different output cannot end an owner.");
 			t.Expect(s.End(o),"Record end."); const std::array duplicate{o.commandSerial,o.commandSerial}; t.Expect(!s.ConfirmSubmitted(duplicate,20),"Duplicate queue command receipt rejects atomically.");
-			const std::array commands{99ULL,o.commandSerial}; t.Expect(s.ConfirmSubmitted(commands,20),"Other primary commands may share the actual ordered submission.");
+			// Provider serial types stay identical on LLP64 and LP64 toolchains.
+			const std::array<std::uint64_t, 2> commands{99u,o.commandSerial}; t.Expect(s.ConfirmSubmitted(commands,20),"Other primary commands may share the actual ordered submission.");
 			t.Expect(!s.ConfirmSubmitted(commands,22) && !s.CompleteSubmission(20,19),"Wrong submit and older completion do not advance ownership.");
 			Result result; t.Expect(!s.Resolve(o,{10,30,true,true,true},true,result),"Queries cannot be read before completion.");
 			t.Expect(s.CompleteSubmission(20,21) && s.Resolve(o,{10,30,true,true,true},true,result) && result.status==Status::Valid && result.rawTicks==20 && result.durationNanoseconds==40 && result.submitSerial==20 && result.completionSerial==21,"Actual isolated result is completion qualified.");

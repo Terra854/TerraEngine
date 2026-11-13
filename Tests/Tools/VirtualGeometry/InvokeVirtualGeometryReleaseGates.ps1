@@ -15,11 +15,14 @@ param(
 	[string]$PackageEvidence = '',
 	[string]$RuntimeAdapter = '',
 	[switch]$SkipBuildInstallPackage,
+	[switch]$ValidateInstalledRunners,
 	[switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Dry-run cannot attest installed runner validation; reject the contradictory request.
+if($DryRun -and $ValidateInstalledRunners) { throw 'DryRun cannot be combined with ValidateInstalledRunners.' }
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 
@@ -49,6 +52,19 @@ function Get-Sha256([string]$Path)
 {
 	return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.
 		ToLowerInvariant()
+}
+
+function Get-InstalledVirtualGeometryRunnerPaths([string]$Root)
+{
+	# Normal release dispatch and bounded discovery share these maintained paths.
+	# Resolve names only here; callers retain their existing unavailable/failure
+	# handling rather than silently falling back to legacy Tools executables.
+	$directory = Join-Path $Root 'Tests/Tools/VirtualGeometry'
+	return [pscustomobject]@{
+		codec = Join-Path $directory 'TerraEngineVirtualGeometryCodecExperiment.exe'
+		parity = Join-Path $directory 'TerraEngineVirtualGeometryBenchmark.exe'
+		codecWrapper = Join-Path $directory 'RunCodecExperiment.ps1'
+	}
 }
 
 function Get-OptionalProperty($Value, [string]$Name)
@@ -462,8 +478,7 @@ $buildRoot = Resolve-RepositoryPath $BuildDirectory
 $installedTree = Resolve-RepositoryPath $InstalledRoot
 $engineTests = Join-Path $buildRoot 'TerraEngine-EngineTests.exe'
 $editorTests = Join-Path $buildRoot 'TerraEngine-EditorTests.exe'
-$codecRunner = Join-Path $installedTree (
-	'Tools/TerraEngineVirtualGeometryCodecExperiment.exe')
+$codecRunner = (Get-InstalledVirtualGeometryRunnerPaths $installedTree).codec
 $benchmarkCompare = Join-Path $PSScriptRoot 'CompareVirtualGeometryPerformance.ps1'
 $imageCompare = Join-Path $PSScriptRoot 'CompareVisibilityImages.ps1'
 $backendMatrix = Join-Path $PSScriptRoot 'RunBackendParityMatrix.ps1'
@@ -479,6 +494,85 @@ if($DryRun)
 	}
 	Write-Output 'validated Vulkan-only production capability-gate orchestration (dry run)'
 	exit 0
+}
+
+if($ValidateInstalledRunners)
+{
+	# This explicit CPU-only procedure exercises real installed executables and
+	# the codec wrapper, without starting the broad release gate or a Vulkan lane.
+	# Its receipt proves discovery/CLI usability, never GPU parity or release readiness.
+	if(Test-Path -LiteralPath $outputRoot) { throw 'Installed-runner validation requires a fresh output directory.' }
+	$discoveryPaths = Get-InstalledVirtualGeometryRunnerPaths $installedTree
+	$discoveryMesh = Resolve-RepositoryPath $CodecInputMesh
+	foreach($required in @($discoveryPaths.codec, $discoveryPaths.parity,
+		$discoveryPaths.codecWrapper, $discoveryMesh))
+	{
+		if([string]::IsNullOrWhiteSpace($required) -or
+			-not (Test-Path -LiteralPath $required -PathType Leaf))
+		{
+			throw "Installed-runner validation input is missing: $required"
+		}
+	}
+	$discoveryCodecOutput = Join-Path $outputRoot 'codec output'
+	# Use this actual host executable, keeping script and input paths separate
+	# arguments. The normal release gate's historical host selection is unchanged.
+	$discoveryHost = (Get-Process -Id $PID).Path
+	$discoveryCodec = Invoke-GateCommand 'installed-runner-discovery' 'codec-page-sizes' $discoveryHost @(
+		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $discoveryPaths.codecWrapper,
+		'-InputMesh', $discoveryMesh, '-ExperimentExecutable', $discoveryPaths.codec,
+		'-OutputDirectory', $discoveryCodecOutput)
+	$discoveryParity = Invoke-GateCommand 'installed-runner-discovery' 'parity-runner-cli' $discoveryPaths.parity @('--help')
+	$discoveryManifestPath = Join-Path $discoveryCodecOutput 'experiment-manifest.json'
+	$discoveryCodecValid = $false
+	if($discoveryCodec.status -eq 'passed' -and
+		(Test-Path -LiteralPath $discoveryManifestPath -PathType Leaf))
+	{
+		$discoveryManifest = Get-Content -Raw -LiteralPath $discoveryManifestPath | ConvertFrom-Json
+		$experiments = @($discoveryManifest.experiments)
+		$discoveryCodecValid = $discoveryManifest.status -eq 'measured-result-published' -and
+			$discoveryManifest.identity.executableSha256 -eq (Get-Sha256 $discoveryPaths.codec) -and
+			$experiments.Count -eq 3 -and
+			(@($experiments.pageSizeKiB | Sort-Object) -join ',') -eq '32,64,128'
+		foreach($experiment in $experiments)
+		{
+			# Installed wrappers store relative artifact paths when output is below
+			# Build; absolute paths are retained for external evidence directories.
+			$discoveryArtifact = [string]$experiment.artifact.path
+			if(-not [IO.Path]::IsPathRooted($discoveryArtifact))
+			{
+				$discoveryArtifact = Join-Path $installedTree $discoveryArtifact
+			}
+			$discoveryCodecValid = $discoveryCodecValid -and
+				$experiment.status -eq 'measured-result-published' -and
+				$experiment.measuredCandidates -ge 2 -and $experiment.offlineOnlyCandidates -eq 1 -and
+				(Test-Path -LiteralPath $discoveryArtifact -PathType Leaf) -and
+				(Get-Sha256 $discoveryArtifact) -eq $experiment.artifact.sha256
+		}
+	}
+	$discoveryHelp = [string](Get-Content -Raw -LiteralPath $discoveryParity.result.stdout.path)
+	$discoveryParityValid = $discoveryParity.status -eq 'passed' -and
+		$discoveryHelp.Contains('--runtime-adapter') -and $discoveryHelp.Contains('--workloads') -and
+		$discoveryHelp.Contains('--duration-seconds')
+	$discoveryPassed = $discoveryCodecValid -and $discoveryParityValid
+	$discoveryReceipt = [ordered]@{
+		schemaVersion = 1
+		status = if($discoveryPassed) { 'validated-installed-runner-discovery' } else { 'failed' }
+		scope = 'installed-codec-execution-and-parity-runner-cli-only'
+		gpuParityMeasured = $false; fullReleaseAccepted = $false
+		installedRoot = $installedTree
+		producer = [ordered]@{ path = $PSCommandPath; sha256 = Get-Sha256 $PSCommandPath }
+		codecWrapper = [ordered]@{ path = $discoveryPaths.codecWrapper; sha256 = Get-Sha256 $discoveryPaths.codecWrapper }
+		runners = @(
+			[ordered]@{ role = 'codec'; path = $discoveryPaths.codec; sha256 = Get-Sha256 $discoveryPaths.codec }
+			[ordered]@{ role = 'parity'; path = $discoveryPaths.parity; sha256 = Get-Sha256 $discoveryPaths.parity })
+		input = [ordered]@{ path = $discoveryMesh; sha256 = Get-Sha256 $discoveryMesh }
+		codecValidated = $discoveryCodecValid; parityCliValidated = $discoveryParityValid
+		commands = @($discoveryCodec, $discoveryParity)
+	}
+	Write-JsonFile (Join-Path $outputRoot 'installed-runner-discovery.json') $discoveryReceipt
+	$discoveryReceipt | ConvertTo-Json -Depth 16 | Write-Output
+	if(-not $discoveryPassed) { exit 1 }
+	return
 }
 
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
@@ -596,7 +690,7 @@ $matrixOutput = Join-Path $outputRoot 'vendor-portability/vendor/backend-parity.
 $matrixArguments = @(
 	'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $backendMatrix,
 	'-Matrix', (Join-Path $PSScriptRoot 'hardware-matrix.json'),
-	'-Runner', (Join-Path $installedTree 'Tools/TerraEngineVirtualGeometryBenchmark.exe'),
+	'-Runner', (Get-InstalledVirtualGeometryRunnerPaths $installedTree).parity,
 	'-Output', $matrixOutput,
 	'-Workloads', (Join-Path $PSScriptRoot 'workloads.json'),
 	'-Quality', (Join-Path $PSScriptRoot 'quality-profiles.json'))

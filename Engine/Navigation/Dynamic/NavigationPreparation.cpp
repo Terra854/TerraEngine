@@ -41,7 +41,15 @@ namespace TerraEngine::Navigation
 
 		std::lock_guard<std::mutex> lock(mutex_);
 		if(request.estimatedBytes > limits_.maximumPreparationBytes - std::min(preparationBytesReserved_, limits_.maximumPreparationBytes)) return {};
-		const void* callerIdentity = request.copiedInput.get();
+		// Retire cache ownership after the source lifetime ends. Pending packets
+		// keep their own immutable copies, so cleanup never invalidates worker data.
+		for(auto entry = frozenInputs_.begin(); entry != frozenInputs_.end();) {
+			if(entry->first.owner.expired()) {
+				sharedInputBytesCharged_ -= entry->second->size();
+				entry = frozenInputs_.erase(entry);
+			} else ++entry;
+		}
+		const FrozenInputKey callerIdentity{request.copiedInput, request.copiedInput.get()};
 		auto frozen = frozenInputs_.find(callerIdentity);
 		std::shared_ptr<const std::vector<std::byte>> frozenInput;
 		if(frozen == frozenInputs_.end()) {

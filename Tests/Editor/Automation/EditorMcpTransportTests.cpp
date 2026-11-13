@@ -913,7 +913,6 @@ namespace TerraEngine::EditorTests
 						}
 						std::this_thread::sleep_for(std::chrono::milliseconds(100));
 					}
-					slowDripElapsed = std::chrono::steady_clock::now() - slowStart;
 					std::array<char, 256> responseBuffer{};
 					for (;;)
 					{
@@ -924,6 +923,8 @@ namespace TerraEngine::EditorTests
 						}
 						slowDripResponse.append(responseBuffer.data(), static_cast<std::size_t>(received));
 					}
+					// Include the blocking receive: the deadline concerns the whole request.
+					slowDripElapsed = std::chrono::steady_clock::now() - slowStart;
 				}
 			}
 

@@ -62,7 +62,9 @@ namespace TerraEngine::Physics {
 
 	std::optional<PhysicsFrameDescriptor> PhysicsFrameRegistry::Create(
 		const PhysicsFrameCreateRequest& request) {
-		if(!request.frameId.IsValid() || !request.settings.Validate().accepted
+		// Primary routing owns this reserved ID outside the secondary registry.
+		// Reject it before consuming a generation or allocating a provider world.
+		if(!request.frameId.IsValid() || request.frameId == kPrimaryPhysicsFrameId || !request.settings.Validate().accepted
 			|| !std::isfinite(request.maximumLocalMagnitudeMetres)
 			|| request.maximumLocalMagnitudeMetres <= 0.0) {
 			return std::nullopt;
@@ -74,10 +76,12 @@ namespace TerraEngine::Physics {
 		std::lock_guard<std::mutex> lock(mutex);
 		if(frames.contains(request.frameId.value)) return std::nullopt;
 		PhysicsGeneration& cursor = generationCursors[request.frameId.value];
+		// The registry survives individual frame worlds. Its nonwrapping lifetime
+		// cursor must seed world/query identities BEFORE any queues are initialized.
+		if(cursor == std::numeric_limits<PhysicsGeneration>::max()) return std::nullopt;
 		++cursor;
-		if(cursor == 0U) ++cursor;
 		auto world = std::make_unique<PhysicsWorld>(PhysicsWorldId{request.frameId.value});
-		if(!world->Create(request.settings)) return std::nullopt;
+		if(!world->CreateForLifetime(request.settings, cursor)) return std::nullopt;
 		PhysicsFrameDescriptor descriptor;
 		descriptor.frame = {request.frameId, cursor};
 		descriptor.world = world->Handle();
@@ -140,6 +144,11 @@ namespace TerraEngine::Physics {
 	}
 
 	bool PhysicsWorld::Create(const PhysicsSettings& requestedSettings) {
+		return CreateForLifetime(requestedSettings, 0u);
+	}
+
+	bool PhysicsWorld::CreateForLifetime(const PhysicsSettings& requestedSettings,
+		PhysicsGeneration initialGeneration) {
 		if(!requestedSettings.Validate().accepted) {
 			return false;
 		}
@@ -153,10 +162,15 @@ namespace TerraEngine::Physics {
 		// cursor before a recreated world becomes visible, so reuse that reserved
 		// value instead of skipping a generation on every stop/start cycle.
 		const bool firstLifetime = state == PhysicsWorldState::Absent;
+		// Never wrap a lifetime back to an old world/query generation. Primary
+		// worlds retain their usual create/teardown sequence until exhaustion;
+		// frame worlds take the persistent registry's explicitly reserved lifetime.
+		if((initialGeneration != 0u && !firstLifetime)
+			|| (initialGeneration == 0u && ((!firstLifetime && generationCursor == 0u)
+				|| (firstLifetime && generationCursor == std::numeric_limits<PhysicsGeneration>::max())))) return false;
 		state = PhysicsWorldState::Creating;
-		activeGeneration = firstLifetime
-			? NextNonzeroGeneration(generationCursor)
-			: generationCursor;
+		activeGeneration = initialGeneration != 0u ? initialGeneration
+			: firstLifetime ? NextNonzeroGeneration(generationCursor) : generationCursor;
 		generationCursor = activeGeneration;
 		settings = requestedSettings;
 		ResetTimingLocked();
@@ -1370,8 +1384,8 @@ namespace TerraEngine::Physics {
 	}
 
 	PhysicsGeneration PhysicsWorld::NextNonzeroGeneration(PhysicsGeneration generation) noexcept {
-		++generation;
-		return generation == 0U ? 1U : generation;
+		// Zero after exhaustion is a permanent closed state, never a reusable ID.
+		return generation == std::numeric_limits<PhysicsGeneration>::max() ? 0u : generation + 1u;
 	}
 
 	bool PhysicsWorld::CanAccessRegistriesLocked() const noexcept {

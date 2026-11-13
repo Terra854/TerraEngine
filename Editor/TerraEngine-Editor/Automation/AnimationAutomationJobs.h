@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <memory>
 
+namespace TerraEngine::Editor::Animation { class MotionDatabaseAuthoringHost; }
+
 namespace TerraEngine::Editor::Automation
 {
 	class AnimationAutomationJobs final
@@ -50,14 +52,30 @@ namespace TerraEngine::Editor::Automation
 			const AutomationJobCreateRequest& request,
 			const std::filesystem::path& authoringPath,
 			const std::filesystem::path& outputPath);
+		// Qualification can supply the real production host with temporary roots
+		// and a deterministic executor; validation and job ownership stay identical.
+		[[nodiscard]] AutomationDispatchResult StartMotionDatabaseBuild(
+			const AutomationJobCreateRequest& request,
+			const std::filesystem::path& authoringPath,
+			const std::filesystem::path& outputPath,
+			std::unique_ptr<Animation::MotionDatabaseAuthoringHost> host);
 		[[nodiscard]] AutomationDispatchResult PumpMotionDatabaseBuild(
 			std::string_view jobId);
+		// Protected post-animation preparation collects bounded job IDs; the pump
+		// observes finished worker futures and publishes outputs/store receipts here.
+		// Client reads never advance work or publish a compiler result.
+		void PumpActiveMotionDatabaseBuilds();
 		// Project replacement is a protected boundary too. Cancel and release every
 		// owned recorder before its durable store is reset so an old project cannot
 		// retain a capture session or publish into a later project.
 		void CancelAllRecordings() noexcept;
 
 	private:
+		[[nodiscard]] AutomationDispatchResult StartMotionDatabaseBuildImpl(
+			const AutomationJobCreateRequest& request,
+			const std::filesystem::path& authoringPath,
+			const std::filesystem::path& outputPath,
+			std::unique_ptr<Animation::MotionDatabaseAuthoringHost> host);
 		// Version one uses the contract's conservative default. The discoverable
 		// hard ceiling remains 64 for a future explicit project configuration, but
 		// callers cannot silently consume that larger budget today.

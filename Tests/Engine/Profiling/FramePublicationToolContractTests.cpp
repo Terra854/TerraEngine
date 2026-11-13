@@ -71,11 +71,14 @@ namespace TerraEngine::Tests
 			std::ifstream liveVisual(FramePublicationToolRoot().parent_path()
 				/ "VirtualGeometry" / "CaptureVirtualGeometryLiveVisual.ps1");
 			std::string liveVisualSource((std::istreambuf_iterator<char>(liveVisual)), {});
+			// Cleanup also accepts other owned validation scene families. Check the
+			// legacy prefix's compatibility without freezing the whole regex; the
+			// disposable-scene protocol tests exercise accepted and rejected paths.
 			context.Expect(liveVisual.good()
 				&& liveVisualSource.find("retryDelaysMilliseconds") != std::string::npos
 				&& liveVisualSource.find("uniqueCaptureHashCount") != std::string::npos
 				&& liveVisualSource.find("Sort-Object -Unique") != std::string::npos
-				&& liveVisualSource.find("FramePublication-[^/]+\\.tescene") != std::string::npos
+				&& liveVisualSource.find("FramePublication-") != std::string::npos
 				&& liveVisualSource.find("Refusing to clean a validation scene outside Assets/Scenes") != std::string::npos,
 				"Animated visual validation must tolerate loop-phase aliasing while still requiring distinct retained frame hashes.");
 			context.Expect(liveVisualSource.find("postPresentIdentity") != std::string::npos

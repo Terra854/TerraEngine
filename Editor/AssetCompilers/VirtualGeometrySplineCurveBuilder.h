@@ -22,6 +22,14 @@ namespace TerraEngine::Editor
 		std::uint64_t stableIdentity = 0u;
 	};
 
+	// Borrowed synchronous observation only. A test may throw before an unsafe
+	// conversion; the observer never supplies a corrected count or changes work.
+	struct VirtualGeometrySplinePlanningObserver
+	{
+		void* context = nullptr;
+		void (*beforeSegmentCountNarrowing)(void*, double estimate, std::uint32_t spanCap, std::uint32_t totalBudget) = nullptr;
+	};
+
 	struct VirtualGeometrySplineCurveBuildRequest
 	{
 		std::span<const VirtualGeometryCurveControlPoint> controlPoints;
@@ -62,4 +70,7 @@ namespace TerraEngine::Editor
 	[[nodiscard]] VirtualGeometrySplineCurveBuildResult
 		BuildVirtualGeometrySplineCurve(
 			const VirtualGeometrySplineCurveBuildRequest &request);
+	[[nodiscard]] VirtualGeometrySplineCurveBuildResult BuildVirtualGeometrySplineCurve(
+		const VirtualGeometrySplineCurveBuildRequest& request,
+		const VirtualGeometrySplinePlanningObserver* observer);
 } // namespace TerraEngine::Editor

@@ -1,6 +1,55 @@
 # This lexer has no engine dependency: parsing source must not start a renderer
 # or depend on globally installed parser/image packages.
 set(source_review_tools "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/CodeQuality")
+# The closure checker accepts explicit registers at runtime. Its portable CTest
+# uses only labeled synthetic scope, so a clean checkout needs no ignored specs.
+# Honor an explicit toolchain override, otherwise use CMake's interpreter
+# discovery to avoid accepting a python-named executable without a version.
+if(NOT TERRAENGINE_REVIEW_PYTHON)
+	find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+	set(TERRAENGINE_REVIEW_PYTHON "${Python3_EXECUTABLE}" CACHE FILEPATH
+		"Python3.9+ interpreter for validation-only standard-library tools")
+endif()
+# Registered validator commands require a stable absolute interpreter identity.
+# Reject relative overrides before version probing can resolve them through PATH.
+if(NOT IS_ABSOLUTE "${TERRAENGINE_REVIEW_PYTHON}")
+	message(FATAL_ERROR "TERRAENGINE_REVIEW_PYTHON must be an absolute Python3.9+ executable path.")
+endif()
+# Validate overrides too. Windows Store aliases and obsolete interpreters must
+# fail at configure time, before any installed validation command is registered.
+execute_process(COMMAND "${TERRAENGINE_REVIEW_PYTHON}" -c
+	"import sys; print(sys.version.split()[0]); sys.exit(0 if sys.version_info >= (3, 9) else 1)"
+	RESULT_VARIABLE review_python_status OUTPUT_VARIABLE review_python_version
+	ERROR_VARIABLE review_python_error OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 15)
+if(NOT review_python_status STREQUAL "0" OR NOT review_python_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+")
+	message(FATAL_ERROR "Source review validation requires a working Python3.9+ interpreter. Set TERRAENGINE_REVIEW_PYTHON to its full path. ${review_python_error}")
+endif()
+install(FILES ValidateFindingClosure.py
+	DESTINATION "${source_review_tools}" COMPONENT SourceReview)
+add_test(NAME Repository.FindingClosureContracts
+	COMMAND "${TERRAENGINE_REVIEW_PYTHON}"
+	"${source_review_tools}/ValidateFindingClosure.py"
+	--fixture-register --self-test "${source_review_tools}/Fixtures/FindingClosureCases.json")
+set_tests_properties(Repository.FindingClosureContracts PROPERTIES
+	LABELS "Repository;ReviewRemediation;Closure;ParserContract"
+	ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" RUN_SERIAL TRUE TIMEOUT 90)
+if(WIN32)
+	# Standalone argv child: OS/process protocol only, no engine or managed ABI.
+	# Keep the console subsystem because the source supplies wmain; the owned
+	# hidden launch is observed by the receipt rather than a GUI entry point.
+	add_executable(TerraEngine-NativeArgvReceipt Fixtures/NativeArgvReceipt.cpp)
+	target_compile_features(TerraEngine-NativeArgvReceipt PRIVATE cxx_std_20)
+	target_include_directories(TerraEngine-NativeArgvReceipt PRIVATE
+		"${PROJECT_SOURCE_DIR}/External/json/single_include")
+	target_link_libraries(TerraEngine-NativeArgvReceipt PRIVATE user32)
+	if(MSVC)
+		set_property(TARGET TerraEngine-NativeArgvReceipt PROPERTY
+			MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+	endif()
+	install(TARGETS TerraEngine-NativeArgvReceipt
+		RUNTIME DESTINATION "${source_review_tools}" COMPONENT SourceReview)
+	include("${CMAKE_CURRENT_SOURCE_DIR}/ReviewEvidenceScripts.cmake")
+endif()
 add_executable(TerraEngine-SourceReviewAudit
 	SourceReviewAudit.cpp
 	SourceReviewAuditTests.cpp
@@ -17,6 +66,8 @@ install(TARGETS TerraEngine-SourceReviewAudit
 install(FILES acceptance-contract.json README.md
 	VerifyStageOwnership.ps1 TestStageOwnership.ps1
 	VerifySourceReviewQuality.ps1 comment-dispositions.schema.json
+	VerifySourceReviewContinuation.py TestSourceReviewContinuation.py
+	source-review-continuation.schema.json
 	DESTINATION "${source_review_tools}" COMPONENT SourceReview)
 install(DIRECTORY Baseline/ DESTINATION "${source_review_tools}/Baseline" COMPONENT SourceReview)
 install(DIRECTORY Fixtures/ DESTINATION "${source_review_tools}/Fixtures" COMPONENT SourceReview)
@@ -28,6 +79,19 @@ add_test(NAME Repository.SourceReviewAuditParser
 set_tests_properties(Repository.SourceReviewAuditParser PROPERTIES
 	PASS_REGULAR_EXPRESSION "SourceReviewAudit self-test failures=0"
 	LABELS "Repository;SourceReview;Contract" TIMEOUT 30)
+
+# Artificial roots qualify missing/stale review rejection with the real lexer.
+# The script owns a fresh retained report and enforces its nonempty case floor;
+# a successful parser contract never establishes current runtime acceptance.
+add_test(NAME Repository.SourceReviewContinuationContracts
+	COMMAND "${TERRAENGINE_REVIEW_PYTHON}"
+	"${source_review_tools}/TestSourceReviewContinuation.py"
+	--validator "${source_review_tools}/VerifySourceReviewContinuation.py"
+	--audit-executable "${source_review_tools}/TerraEngine-SourceReviewAudit${CMAKE_EXECUTABLE_SUFFIX}"
+	--minimum-cases 55)
+set_tests_properties(Repository.SourceReviewContinuationContracts PROPERTIES
+	LABELS "Repository;SourceReview;Continuation;Contract"
+	ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" RUN_SERIAL TRUE TIMEOUT 120)
 
 if(WIN32)
 	# Characterize the repaired requested-size helper separately from frame timing.
@@ -53,8 +117,8 @@ if(WIN32)
 	set_tests_properties(Repository.StageOwnershipContracts PROPERTIES
 		LABELS "Repository;FrameStages;Installed;Contract" RUN_SERIAL TRUE TIMEOUT 120)
 
-	# Portable checks use only installed manifests plus the current checkout.
-	# Independent token proof is a separate invocation with the sealed archive.
+	# Current checks join installed reviews and the checkout with exact retained
+	# historical Git objects. Independent token proof still needs its sealed archive.
 	# The wrapper chooses a fresh temporary output for each CTest invocation.
 	add_test(NAME Repository.SourceReviewQuality
 		COMMAND ${TERRAENGINE_CORRECTNESS_POWERSHELL} -NoProfile -ExecutionPolicy Bypass
@@ -66,9 +130,16 @@ if(WIN32)
 		-Dispositions "${source_review_tools}/Baseline/comment-dispositions.json"
 		-ProductionComments "${source_review_tools}/Baseline/production-comments.json"
 		-CommentBatches "${source_review_tools}/Baseline/comment-batches.json"
+		-ContinuationManifest "${source_review_tools}/Baseline/Continuation/continuation.json"
+		-HistoricalManifest "${source_review_tools}/Baseline/Continuation/historical-source-manifest.json"
+		-ContinuationValidator "${source_review_tools}/VerifySourceReviewContinuation.py"
+		-PythonExecutable "${TERRAENGINE_REVIEW_PYTHON}"
 		-Mode Portable)
 	set_tests_properties(Repository.SourceReviewQuality PROPERTIES
-		LABELS "Repository;SourceReview;FrameStages;Installed;Contract" RUN_SERIAL TRUE TIMEOUT 120)
+		# The joined corpus audit launches hundreds of Git provenance checks and
+		# verifies historical accounting too. Bound slow developer/CI hosts without
+		# treating this source-identity contract as a throughput benchmark.
+		LABELS "Repository;SourceReview;FrameStages;Installed;Contract" RUN_SERIAL TRUE TIMEOUT 600)
 
 	# This collector calls the real installed runtime. Keep its dependent DLLs
 	# beside it; the CLI checks the parent-pinned DLL path/hash before engine use.

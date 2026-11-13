@@ -871,6 +871,35 @@ namespace TerraEngine::AssetPipeline {
 		}
 	}
 
+	namespace {
+		void RemoveUnpublishedStage(const std::filesystem::path& path) noexcept {
+			if(path.empty()) return;
+			try { std::error_code error; std::filesystem::remove(path, error); }
+			catch(...) { /* Cleanup must not replace the worker's original failure. */ }
+		}
+		// Until the immutable packet takes ownership, every worker exit removes its
+		// unique staging path, including allocation failure after successful readback.
+		struct WorkerStageCleanup {
+			std::filesystem::path& path;
+			~WorkerStageCleanup() { RemoveUnpublishedStage(path); }
+		};
+		struct PreparedMotionDatabasePublication final {
+			AnimationGeneration generation;
+			std::uint64_t contentFingerprint;
+			std::shared_ptr<const MotionDatabaseAsset> asset;
+			std::filesystem::path stagedPath;
+			PreparedMotionDatabasePublication(AnimationGeneration generationValue,
+				std::uint64_t fingerprintValue, std::shared_ptr<const MotionDatabaseAsset> assetValue,
+				std::filesystem::path pathValue) noexcept
+				: generation(generationValue), contentFingerprint(fingerprintValue),
+				asset(std::move(assetValue)), stagedPath(std::move(pathValue)) {}
+			// After a successful rename the unique staged name no longer exists.
+			// Cancellation, stale rejection or owner reset instead removes that name;
+			// this owner never removes the final published destination.
+			~PreparedMotionDatabasePublication() { RemoveUnpublishedStage(stagedPath); }
+		};
+	}
+
 	struct MotionDatabaseCompiler::Job {
 		std::uint64_t sequence = 0U;
 		MotionDatabaseCompileInput input{};
@@ -881,9 +910,8 @@ namespace TerraEngine::AssetPipeline {
 		std::atomic<MotionDatabaseBuildStage> stage = MotionDatabaseBuildStage::Queued;
 		std::mutex resultMutex;
 		AnimationStatus status = AnimationStatus::NotReady;
-		MotionDatabaseAsset asset{};
-		MotionDatabaseCompileReport report{};
-		std::filesystem::path stagedPath;
+		AnimationGeneration publicationGeneration = 0U;
+		std::shared_ptr<const PreparedMotionDatabasePublication> prepared;
 	};
 
 	AnimationStatus CompileMotionDatabase(const MotionDatabaseCompileInput& input,
@@ -1047,6 +1075,10 @@ namespace TerraEngine::AssetPipeline {
 				return AnimationStatus::Rejected;
 			}
 			job->sequence = ++newestSequence_;
+			// Only the newest sequence may publish, and this mutex also protects
+			// publication. Its next successful generation cannot change after this
+			// admission unless this job first becomes stale. Do not consume it yet.
+			job->publicationGeneration = nextGeneration_;
 			jobs_.push_back(job);
 			lastProgress_ = {job->sequence, input.authoringGeneration, 0U,
 				kCompileProgressSteps, MotionDatabaseBuildStage::Queued, AnimationStatus::Queued};
@@ -1078,29 +1110,34 @@ namespace TerraEngine::AssetPipeline {
 					MotionDatabaseCompileCancellation{&job->cancelled,
 						&job->completedSteps, &job->totalSteps});
 				std::filesystem::path stagedPath;
-				if(status == AnimationStatus::Ok && !job->input.publicationPath.empty()
-					&& !job->cancelled.load(std::memory_order_acquire)) {
-					status = StageMotionDatabaseAsset(job->input.publicationPath,
-						job->sequence, asset, stagedPath);
-				}
-				if(status == AnimationStatus::Ok) {
-					job->completedSteps.store(kCompileProgressSteps, std::memory_order_release);
-				}
-				if((status != AnimationStatus::Ok
-					|| job->cancelled.load(std::memory_order_acquire)) && !stagedPath.empty()) {
-					std::error_code cleanupError;
-					std::filesystem::remove(stagedPath, cleanupError);
-					stagedPath.clear();
-				}
+				WorkerStageCleanup cleanup{stagedPath};
+				std::shared_ptr<const PreparedMotionDatabasePublication> prepared;
+				try {
+					if(status == AnimationStatus::Ok) {
+						asset.runtimeGeneration = job->publicationGeneration;
+						// Complete validation and optional serialized readback remain worker
+						// work. Protected publication only checks this immutable packet's identity.
+						status = ValidateMotionDatabaseAsset(asset);
+					}
+					if(status == AnimationStatus::Ok && !job->input.publicationPath.empty()
+						&& !job->cancelled.load(std::memory_order_acquire)) {
+						status = StageMotionDatabaseAsset(job->input.publicationPath,
+							job->sequence, asset, stagedPath);
+					}
+					if(status == AnimationStatus::Ok && !job->cancelled.load(std::memory_order_acquire)) {
+						auto immutableAsset = std::make_shared<const MotionDatabaseAsset>(std::move(asset));
+						prepared = std::make_shared<const PreparedMotionDatabasePublication>(
+							job->publicationGeneration, report.contentFingerprint, std::move(immutableAsset), std::move(stagedPath));
+						// Explicitly release the moved-from guard; path moves need not promise emptiness.
+						stagedPath.clear();
+						job->completedSteps.store(kCompileProgressSteps, std::memory_order_release);
+					}
+				} catch(...) { status = AnimationStatus::InternalError; }
 				{
 					std::scoped_lock lock(job->resultMutex);
 					job->status = job->cancelled.load(std::memory_order_acquire)
 						? AnimationStatus::Cancelled : status;
-					if(job->status == AnimationStatus::Ok) {
-						job->asset = std::move(asset);
-						job->report = std::move(report);
-						job->stagedPath = std::move(stagedPath);
-					}
+					if(job->status == AnimationStatus::Ok) job->prepared = std::move(prepared);
 				}
 				job->stage.store(job->status == AnimationStatus::Ok
 					? MotionDatabaseBuildStage::ReadyToPublish
@@ -1153,14 +1190,22 @@ namespace TerraEngine::AssetPipeline {
 					status = AnimationStatus::InternalError;
 				} else {
 					try {
-						MotionDatabaseAsset staged = job->asset;
-						staged.runtimeGeneration = nextGeneration_;
-						MotionDatabasePublishedRecord candidate{
-							nextGeneration_, job->report.contentFingerprint,
-							std::make_shared<const MotionDatabaseAsset>(std::move(staged))};
-						status = publicationValidator
-							? publicationValidator(*candidate.asset, job->stagedPath)
-							: AnimationStatus::Ok;
+						const auto& prepared = job->prepared;
+						if(!prepared || !prepared->asset || prepared->generation != nextGeneration_
+							|| prepared->asset->runtimeGeneration != prepared->generation
+							|| prepared->asset->assetId != expectedAssetId
+							|| prepared->asset->compatibilityFingerprint != expectedCompatibilityFingerprint) {
+							status = AnimationStatus::StaleHandle;
+						} else {
+							status = publicationValidator
+								? publicationValidator(*prepared->asset, prepared->stagedPath)
+								: AnimationStatus::Ok;
+						}
+						// Shared-owner installation is constant-size: the worker already
+						// allocated and froze both the asset and its validated staging packet.
+						MotionDatabasePublishedRecord candidate;
+						if(status == AnimationStatus::Ok) candidate = {
+							prepared->generation, prepared->contentFingerprint, prepared->asset};
 						if(status == AnimationStatus::Ok) {
 							published_ = std::move(candidate);
 							++nextGeneration_;
@@ -1169,10 +1214,6 @@ namespace TerraEngine::AssetPipeline {
 						status = AnimationStatus::InternalError;
 					}
 				}
-			}
-			if(status != AnimationStatus::Ok && !job->stagedPath.empty()) {
-				std::error_code cleanupError;
-				std::filesystem::remove(job->stagedPath, cleanupError);
 			}
 			lastProgress_ = {job->sequence, job->input.authoringGeneration,
 				job->completedSteps.load(std::memory_order_acquire),
@@ -1299,11 +1340,13 @@ namespace TerraEngine::AssetPipeline {
 		return compiler_.PollAndPublish(currentDocument.assetId,
 			currentDocument.compatibilityFingerprint,
 			currentDocument.authoringGeneration,
-			[outputPath, expectedGeneration, currentGeneration = currentDocument.authoringGeneration](
+			[outputPath, expectedGeneration, currentGeneration = currentDocument.authoringGeneration,
+				expectedId = currentDocument.assetId, expectedCompatibility = currentDocument.compatibilityFingerprint](
 				const MotionDatabaseAsset& asset, const std::filesystem::path& stagedPath) {
 				if(expectedGeneration != currentGeneration) return AnimationStatus::StaleHandle;
 				if(stagedPath.empty() || stagedPath.parent_path() != outputPath.parent_path()
-					|| ValidateMotionDatabaseAsset(asset) != AnimationStatus::Ok) {
+					|| asset.assetId != expectedId || asset.compatibilityFingerprint != expectedCompatibility
+					|| asset.runtimeGeneration == 0U) {
 					return AnimationStatus::Rejected;
 				}
 				return PublishStagedFile(stagedPath, outputPath)

@@ -7,6 +7,7 @@
 #include <memory>
 
 namespace TerraEngine::Audio::Backend {
+	namespace detail { struct MiniaudioOfflineProbe; }
 	class MiniaudioBackend final : public IAudioBackend {
 	public:
 		MiniaudioBackend();
@@ -16,6 +17,11 @@ namespace TerraEngine::Audio::Backend {
 		AudioResult PollObservations(std::span<AudioBackendObservation> destination, std::size_t& requiredCount) override;
 		AudioResult Shutdown() override;
 	private:
+		// Internal validation observes the actual mixer graph without an OS device.
+		// This unconditional declaration keeps the class identical in every target.
+		friend struct detail::MiniaudioOfflineProbe;
+		AudioResult InitializeInternal(const AudioBackendCreateInfo& createInfo, bool offlineProbe);
+
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 	};

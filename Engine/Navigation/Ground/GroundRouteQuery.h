@@ -113,7 +113,11 @@ namespace TerraEngine::Navigation::Ground
 			[[nodiscard]] RetainedRoute ReadRetained(NavigationRouteHandle handle) const noexcept;
 		};
 
-		[[nodiscard]] static Result Search(const Request& request, const Snapshot& snapshot, const Cancellation& cancellation = {});
+		// Keep the original explicit-cancellation signature. The separate overload
+		// constructs its default only after this enclosing class is complete, so
+		// compilers need not form a nested-type default argument here.
+		[[nodiscard]] static Result Search(const Request& request, const Snapshot& snapshot, const Cancellation& cancellation);
+		[[nodiscard]] static Result Search(const Request& request, const Snapshot& snapshot);
 		[[nodiscard]] static GroundRouteFixtureResult EvaluateFixture(const GroundRouteFixtureRequest& request);
 	};
 
@@ -128,5 +132,7 @@ namespace TerraEngine::Navigation
 	using Ground::GroundRouteResult;
 	using Ground::GroundRouteFixtureRequest;
 	using Ground::GroundRouteFixtureResult;
-	[[nodiscard]] GroundRouteResult QueryGroundRoute(const GroundRouteRequest& request);
+	// Re-export the same function entity: a second wrapper competes with Ground's
+	// argument-dependent lookup when clients use an unqualified query call.
+	using Ground::QueryGroundRoute;
 }

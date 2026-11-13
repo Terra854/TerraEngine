@@ -6,6 +6,8 @@
 #include "Physics/PhysicsCommands.h"
 
 #include <Jolt/Jolt.h>
+#include <Jolt/Core/UnorderedSet.h>
+#include <Jolt/Physics/Collision/Shape/EmptyShape.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/StreamWrapper.h>
 #include <Jolt/Core/TempAllocator.h>
@@ -319,6 +321,10 @@ namespace TerraEngine::Physics::Backend {
 			}
 
 			JPH::ShapeSettings::ShapeResult result;
+			if(recipe.terrainHeightField && recipe.terrainHeightField->cookedCollision
+				&& recipe.terrainHeightField->cookedCollision->recipeHash
+					!= TerrainCollisionRecipeHash(*recipe.terrainHeightField))
+				return ShapeError("Terrain cooked candidate no longer matches its immutable source geometry.");
 			if(recipe.cookedPayload != nullptr && !recipe.cookedPayload->empty()) {
 				// ShapeWithChildren is deliberately opaque to TerraEngine. Jolt restores
 				// the provider graph while engine-owned metadata controls compatibility,
@@ -426,8 +432,24 @@ namespace TerraEngine::Physics::Backend {
 				if (!recipe.terrainHeightField.has_value() || !recipe.terrainHeightField->IsComplete())
 					return ShapeError("Terrain heightfield recipe is incomplete.");
 				const TerrainHeightFieldRecipe& terrain = *recipe.terrainHeightField;
+				// A terrain area spans 256 cells, unlike a primitive's half extent.
+				// Share one horizontal numeric bound between both representations so
+				// an isolated hole cannot turn a valid 4-metre grid into a rejection.
+				// The fourth-root limit leaves headroom for finite squared triangle
+				// cross products (three components, each formed from two differences).
+				const float horizontalSpan = 256.0F * terrain.sampleSpacingMetres;
+				const float safeCoordinate = std::sqrt(std::sqrt(std::numeric_limits<float>::max() / 256.0F));
+				if(!std::isfinite(horizontalSpan) || horizontalSpan > safeCoordinate)
+					return ShapeError("Terrain collision horizontal span exceeds finite geometry arithmetic bounds.");
+				// Heightfields and sparse-hole meshes admit the same authored heights.
+				// Validate before selecting a representation so adding a hole cannot
+				// change acceptance at the primitive collider's unrelated extent cap.
+				for(const auto height : terrain.heightMillimetres) {
+					const float y = terrain.heightDatumMetres + 0.001f * height;
+					if(!std::isfinite(y) || std::abs(y) > safeCoordinate)
+						return ShapeError("Terrain collision height exceeds finite geometry arithmetic bounds.");
+				}
 				JPH::Array<float> samples;
-				samples.reserve(terrain.heightMillimetres.size());
 				// Jolt stores one material index per terrain cell.  Preserve the
 				// provider-neutral uint16 identities through a sorted, stable local
 				// palette instead of mutating materials on an existing heightfield.
@@ -444,13 +466,79 @@ namespace TerraEngine::Physics::Backend {
 					for(std::size_t cell = 0u; cell < terrain.materialIndices.size(); ++cell)
 						materialIndices[cell] = static_cast<std::uint8_t>(std::lower_bound(palette.begin(), palette.end(), terrain.materialIndices[cell]) - palette.begin());
 				}
+				const auto disabledCell = [&terrain](std::uint32_t x, std::uint32_t z) {
+					const auto cell = z * 256u + x;
+					return (terrain.holeBits[cell / 8u] & (1u << (cell % 8u))) != 0u;
+				};
+				std::vector<std::uint8_t> missingSamples;
+				bool exactSampleMask = true;
+				if(std::any_of(terrain.holeBits.begin(), terrain.holeBits.end(), [](std::uint8_t bits) { return bits != 0u; })) {
+					missingSamples.assign(TerrainHeightFieldRecipe::kSampleCount, 1u);
+					bool hasEnabledCell = false;
+					for(std::uint32_t z = 0u; z < 256u; ++z)
+						for(std::uint32_t x = 0u; x < 256u; ++x) {
+							if(disabledCell(x, z)) continue;
+							hasEnabledCell = true;
+							const auto a = z * 257u + x;
+							// A sample may disappear ONLY when every adjacent in-grid
+							// cell is disabled. Preserve all enabled cell endpoints.
+							missingSamples[a] = missingSamples[a + 1u] = 0u;
+							missingSamples[a + 257u] = missingSamples[a + 258u] = 0u;
+						}
+					if(!hasEnabledCell) { result = JPH::EmptyShapeSettings().Create(); break; }
+					for(std::uint32_t z = 0u; z < 256u && exactSampleMask; ++z)
+						for(std::uint32_t x = 0u; x < 256u; ++x) {
+							const auto a = z * 257u + x;
+							// Bundled Jolt uses (a,c,d) and (a,d,b), sharing NW/SE.
+							// Verify BOTH actual triangles match the requested cell mask;
+							// a surviving half-cell requires the exact mesh fallback.
+							const bool lower = !missingSamples[a] && !missingSamples[a + 257u] && !missingSamples[a + 258u];
+							const bool upper = !missingSamples[a] && !missingSamples[a + 258u] && !missingSamples[a + 1u];
+							const bool enabled = !disabledCell(x, z);
+							if(lower != enabled || upper != enabled) { exactSampleMask = false; break; }
+						}
+				}
+				if(!exactSampleMask) {
+					// A cell hole must remove exactly its two triangles. Jolt's missing
+					// sample sentinel also removes adjacent cells, so sparse terrain uses
+					// a bounded immutable mesh instead of destroying shared endpoints.
+					static_assert(TerrainHeightFieldRecipe::kSampleCount <= 66049u);
+					JPH::VertexList vertices;
+					vertices.reserve(TerrainHeightFieldRecipe::kSampleCount);
+					for(std::uint32_t z = 0u; z < 257u; ++z)
+						for(std::uint32_t x = 0u; x < 257u; ++x) {
+							const float y = terrain.heightDatumMetres + 0.001f * terrain.heightMillimetres[z * 257u + x];
+							// Terrain uses its own finite arithmetic bound in both
+							// representations, rather than a primitive half-extent.
+							if(!std::isfinite(y) || std::abs(y) > safeCoordinate)
+								return ShapeError("Terrain collision mesh exceeds the configured finite extent.");
+							vertices.emplace_back(x * terrain.sampleSpacingMetres, y, z * terrain.sampleSpacingMetres);
+						}
+					JPH::IndexedTriangleList triangles;
+					triangles.reserve(131072u);
+					for(std::uint32_t z = 0u; z < 256u; ++z)
+						for(std::uint32_t x = 0u; x < 256u; ++x) {
+							const auto cell = z * 256u + x;
+							if((terrain.holeBits[cell / 8u] & (1u << (cell % 8u))) != 0u) continue;
+							const auto origin = z * 257u + x;
+							const auto material = materialIndices.empty() ? 0u : materialIndices[cell];
+							triangles.emplace_back(origin, origin + 257u, origin + 258u, material, cell * 2u);
+							triangles.emplace_back(origin, origin + 258u, origin + 1u, material, cell * 2u + 1u);
+						}
+					// A one-sample partial area legitimately owns no complete cells. Keep
+					// it empty rather than rejecting its whole root or inventing support.
+					if(triangles.empty()) result = JPH::EmptyShapeSettings().Create();
+					else result = JPH::MeshShapeSettings(std::move(vertices), std::move(triangles), materials).Create();
+					break;
+				}
+				samples.reserve(terrain.heightMillimetres.size());
 				for (std::uint32_t z = 0u; z < TerrainHeightFieldRecipe::kGridExtent; ++z)
 					for (std::uint32_t x = 0u; x < TerrainHeightFieldRecipe::kGridExtent; ++x)
 					{
 						const std::size_t index = static_cast<std::size_t>(z) * TerrainHeightFieldRecipe::kGridExtent + x;
-						// Holes affect their cell origin. Jolt's no-collision sentinel
-						// is baked into a new shape; no live SetHeights call is ever used.
-						const bool hole = x < 256u && z < 256u && (terrain.holeBits[(z * 256u + x) / 8u] & (1u << ((z * 256u + x) % 8u))) != 0u;
+						// This verified sample mask removes both disabled-cell triangles
+						// without removing any enabled cell's endpoints.
+						const bool hole = !missingSamples.empty() && missingSamples[index] != 0u;
 						samples.push_back(hole ? JPH::HeightFieldShapeConstants::cNoCollisionValue : static_cast<float>(terrain.heightMillimetres[index]));
 					}
 				JPH::HeightFieldShapeSettings heightField(
@@ -1210,6 +1298,7 @@ namespace TerraEngine::Physics::Backend {
 			// A protected emergency clear seals this lease lifetime; an old
 			// producer cannot submit a fresh root sample after its owner vanished.
 			bool rootMotionSealed = false;
+			std::optional<CharacterResizeObservation> latestResize;
 		};
 
 		struct StagingRecord {
@@ -2150,7 +2239,12 @@ namespace TerraEngine::Physics::Backend {
 
 		try {
 			JPH::ShapeSettings::ShapeResult shapeResult;
-			if(recipe.stableRecipeHash != 0U) {
+			// Terrain keeps only the current prepared payload per owner. Do not opt
+			// its changing authored generations into the legacy world-lifetime strong
+			// cache: worker cooking already saved the expensive BVH, and retaining all
+			// retired terrain native shapes would introduce a second lifetime leak.
+			const bool cacheShape = recipe.stableRecipeHash != 0U && !recipe.terrainHeightField.has_value();
+			if(cacheShape) {
 				const auto cached = impl->shapeCache.find(recipe.stableRecipeHash);
 				if(cached != impl->shapeCache.end()) shapeResult.Set(cached->second);
 			}
@@ -2165,7 +2259,7 @@ namespace TerraEngine::Physics::Backend {
 					? std::string(shapeResult.GetError().c_str())
 					: "Jolt returned an empty shape result.");
 			}
-			if(recipe.stableRecipeHash != 0U) {
+			if(cacheShape) {
 				impl->shapeCache.try_emplace(recipe.stableRecipeHash, shapeResult.Get());
 			}
 			impl->shapes.emplace(key, Impl::ShapeRecord{handle, shapeResult.Get(), staging.value});
@@ -3653,11 +3747,13 @@ namespace TerraEngine::Physics::Backend {
 					? JPH::CapsuleShapeSettings(0.5F * (pending.resizeHeight - 2.0F * record.radius), record.radius).Create()
 					: JPH::CylinderShapeSettings(0.5F * pending.resizeHeight, record.radius).Create();
 				if(!shape.IsValid() || !record.character->SetShape(shape.Get(), pending.recoverPenetration ? FLT_MAX : 0.0F, broadPhase, objectLayer, bodyFilter, shapeFilter, *impl->temporaryAllocator)) {
-					// A one-shot resize must not poison later fixed steps when Jolt cannot
-					// apply it, for example because recovery would overlap a new obstacle.
-					return Rejected(PhysicsBackendErrorCode::ProviderFailure, "Jolt rejected the requested character resize.");
+					// Keep the old shape and consume this one-shot refusal once. Normal
+					// actor/root motion and the remaining actors still complete the tick.
+					record.latestResize = CharacterResizeObservation{record.handle, tick, pending.resizeHeight, record.height, false};
+				} else {
+					record.height = pending.resizeHeight;
+					record.latestResize = CharacterResizeObservation{record.handle, tick, pending.resizeHeight, record.height, true};
 				}
-				record.height = pending.resizeHeight;
 			}
 			const JPH::Vec3 up = ToNormalizedJoltAxis(record.settings.upDirection);
 			JPH::Vec3 velocity = ToJoltVector(pending.desiredVelocity);
@@ -4097,6 +4193,51 @@ namespace TerraEngine::Physics::Backend {
 	PhysicsBackendQueryResult JoltPhysicsBackend::Query(const PhysicsBackendQueryRequest& request) const {
 		std::shared_lock lock(impl->mutex);
 		return QueryLocked(request);
+	}
+
+	PhysicsBackendOwnershipObservation JoltPhysicsBackend::OwnershipForTesting() const
+	{
+		std::shared_lock lock(impl->mutex);
+		// Staging tokens are actual record state, not estimated allocator counts.
+		const auto stagedShapes = std::count_if(impl->shapes.begin(), impl->shapes.end(),
+			[](const auto& item) { return item.second.stagingToken != 0u; });
+		const auto stagedBodies = std::count_if(impl->bodies.begin(), impl->bodies.end(),
+			[](const auto& item) { return item.second.stagingToken != 0u; });
+		return {impl->shapes.size(), impl->bodies.size(), static_cast<std::size_t>(stagedShapes),
+			static_cast<std::size_t>(stagedBodies), impl->shapeCache.size()};
+	}
+
+	std::optional<PhysicsShapeMemoryObservation> JoltPhysicsBackend::ShapeMemoryForTesting(PhysicsShapeHandle handle) const
+	{
+		std::shared_lock lock(impl->mutex);
+		const auto found = impl->shapes.find(HandleKey(handle));
+		if(!HandleMatchesWorld(handle, impl->worldConfiguration.world) || found == impl->shapes.end()
+			|| found->second.handle != handle || found->second.stagingToken != 0u || !found->second.shape) return std::nullopt;
+		JPH::Shape::VisitedShapes visited;
+		const auto stats = found->second.shape->GetStatsRecursive(visited);
+		const auto subtype = found->second.shape->GetSubType();
+		const auto representation = subtype == JPH::EShapeSubType::HeightField ? PhysicsShapeRepresentation::HeightField
+			: subtype == JPH::EShapeSubType::Mesh ? PhysicsShapeRepresentation::TriangleMesh
+			: subtype == JPH::EShapeSubType::Empty ? PhysicsShapeRepresentation::Empty : PhysicsShapeRepresentation::Other;
+		return PhysicsShapeMemoryObservation{stats.mSizeBytes, stats.mNumTriangles, impl->shapeCache.size(), representation};
+	}
+
+	std::optional<CharacterShapeDimensions> JoltPhysicsBackend::CharacterDimensionsForTesting(PhysicsCharacterHandle handle) const
+	{
+		std::shared_lock lock(impl->mutex);
+		const auto found = impl->characters.find(HandleKey(handle));
+		if(!HandleMatchesWorld(handle, impl->worldConfiguration.world) || found == impl->characters.end()
+			|| found->second.handle != handle || !found->second.committed) return std::nullopt;
+		return CharacterShapeDimensions{found->second.radius, found->second.height};
+	}
+
+	std::optional<CharacterResizeObservation> JoltPhysicsBackend::LatestCharacterResize(PhysicsCharacterHandle handle) const
+	{
+		std::shared_lock lock(impl->mutex);
+		const auto found = impl->characters.find(HandleKey(handle));
+		if(!HandleMatchesWorld(handle, impl->worldConfiguration.world) || found == impl->characters.end()
+			|| found->second.handle != handle || !found->second.committed) return std::nullopt;
+		return found->second.latestResize;
 	}
 
 	PhysicsBackendResult JoltPhysicsBackend::QueryBatch(

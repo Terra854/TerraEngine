@@ -814,8 +814,53 @@ void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
 
 void VulkanContext::Initialize(WindowSystem& windowSystem) {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
-	// Build the Vulkan instance/device chain and prime per-frame resources.
-	impl->InitVulkan(windowSystem);
+	if (impl->initialized) return;
+	// Failed idle proof deliberately retains native owners. Settle those owners
+	// before retrying startup so CreateInstance/CreateDevice cannot overwrite them.
+	if(impl->instance != VK_NULL_HANDLE || impl->device != VK_NULL_HANDLE || impl->allocator != VK_NULL_HANDLE) {
+		impl->Cleanup();
+		if(impl->instance != VK_NULL_HANDLE || impl->device != VK_NULL_HANDLE || impl->allocator != VK_NULL_HANDLE) {
+			impl->initializationDeferred = true;
+			return;
+		}
+	}
+	impl->initializationDeferred = false;
+	int width = 0, height = 0;
+	if (auto* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle())) {
+		glfwGetFramebufferSize(window, &width, &height);
+		if (width == 0 || height == 0) {
+			// Avoid GPU allocation while minimized. Event processing continues;
+			// the next protected frame may retry with the restored extent.
+			impl->initializationDeferred = true;
+			impl->presentationLifecycle.PublishRecreation(TerraEngine::Renderer::Vulkan::PresentationRecreationOutcome::DeferredZeroExtent, 0u, 0u, 0u);
+			return;
+		}
+	}
+	// This public owner alone settles failed startup. Impl reports false without
+	// secretly freeing owners that a later shutdown would try to free again.
+	try
+	{
+		if (impl->InitVulkan(windowSystem)) return;
+	}
+	catch (...)
+	{
+		impl->Cleanup();
+		throw;
+	}
+	impl->Cleanup();
+	// The surface can become zero-sized after the initial framebuffer query.
+	// Release partial owners and retry later, without hiding genuine failures.
+	if (impl->initializationDeferred) return;
+	throw std::runtime_error("Vulkan initialization failed; inspect the recorded startup diagnostic.");
+}
+
+bool VulkanContext::IsReady() const {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	return impl->initialized;
+}
+bool VulkanContext::IsInitializationDeferred() const {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	return impl->initializationDeferred;
 }
 
 
@@ -1960,6 +2005,9 @@ void VulkanContext::WaitIdle() {
 void VulkanContext::Shutdown() {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->Cleanup();
+	// Explicit shutdown cancels a pending startup; frame retries belong only to
+	// a still-active RenderSystem lifetime.
+	impl->initializationDeferred = false;
 }
 
 

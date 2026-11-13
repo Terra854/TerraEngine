@@ -20,11 +20,11 @@ it must not be accepted by weakening a nearby constant.
 | Pre-animation source commit | `6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9` |
 | Locked reference baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
 | Reference-baseline evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
-| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `774c6c7a40da4ebb8fa67feb3649e956235669428d4c50ad43cdb2dceca1a801` |
-| Animation performance workloads | `Tests/Tools/Animation/PerformanceWorkloads.json` — SHA-256 `add34eb7debacbaddb03c07de115cf00f7935a3e62e849cf4b370f2cbf1bd707` |
-| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `b5c78e9f01dc0036db4fb4674f632ebf06a736e4a7c010ec56e1f3804b92131d` |
-| Whole-engine coverage matrix | `Tests/Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `e9a861037edf63207368d9e31b3a85a32bdf3723cdfb28eeaa7b5223c5a64670` |
-| Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659` |
+| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `60bebb37e3e6dde8fbfb17614fd2c7403154fe172af2885b2262e452b1276ac4` |
+| Animation performance workloads | `Tests/Tools/Animation/PerformanceWorkloads.json` — SHA-256 `475c24d5bde5fff92b1b4454a2892748f40fa87f080f182376f4ff5a15b73a3b` |
+| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `fa9678871297579e074b9dfa1961ff44bf85509738948b35d8d40c23d60c9019` |
+| Whole-engine coverage matrix | `Tests/Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `9a7b05347b1ca4b22876f3e39c605ab2cef016eafdc03b1a1a188ac1c757026e` |
+| Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `daa3318a1b2b105ee05a740135ff0724fb1cec46a2467c414f7859a866b87514` |
 
 Candidate tools may write only below `out/` and may never overwrite the reference
 baseline tree. A candidate build is not allowed to become its own reference.

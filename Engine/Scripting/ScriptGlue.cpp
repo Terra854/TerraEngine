@@ -3908,6 +3908,9 @@ static std::optional<TerraEngine::UUID> ResolveManagedTransactionObjectId(const 
 	if (value.is_number_unsigned())
 	{
 		ObjectManager& objects = ObjectManager::instance();
+		// Reject out-of-range values before narrowing; wrapping could select a
+		// different live entity instead of rejecting this managed write.
+		if (value.get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
 		const entt::entity entity = static_cast<entt::entity>(value.get<std::uint32_t>());
 		if (std::optional<Object> object = objects.getObject(entity))
 		{
@@ -3938,6 +3941,18 @@ static std::optional<TerraEngine::UUID> ResolveManagedTransactionObjectId(const 
 	return std::nullopt;
 }
 
+// A malformed or stale numeric target must abort parsing the complete request.
+// No builder writes are enqueued until ParseManagedSceneTransaction returns.
+static TerraEngine::UUID RequireManagedTransactionObjectId(const nlohmann::json& value, std::string_view operation)
+{
+	const auto objectId = ResolveManagedTransactionObjectId(value);
+	if (!objectId || *objectId == TerraEngine::EMPTY_UUID)
+	{
+		throw std::invalid_argument("Unresolvable managed transaction target for operation: " + std::string(operation));
+	}
+	return *objectId;
+}
+
 static TerraEngine::Scene::TransactionObjectRef ParseManagedTransactionObjectRef(const nlohmann::json& value)
 {
 	if (value.is_null())
@@ -3951,11 +3966,7 @@ static TerraEngine::Scene::TransactionObjectRef ParseManagedTransactionObjectRef
 			return TerraEngine::Scene::LocalObject(localIt->get<std::int32_t>());
 		}
 	}
-	if (const std::optional<TerraEngine::UUID> objectId = ResolveManagedTransactionObjectId(value))
-	{
-		return TerraEngine::Scene::ExistingObject(*objectId);
-	}
-	return {};
+	return TerraEngine::Scene::ExistingObject(RequireManagedTransactionObjectId(value, "parent"));
 }
 
 static TerraEngine::Scene::Transaction ParseManagedSceneTransaction(const nlohmann::json& payload)
@@ -3997,78 +4008,58 @@ static TerraEngine::Scene::Transaction ParseManagedSceneTransaction(const nlohma
 		}
 		else if (op == "delete" || op == "deleteObject")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.DeleteObject(*target);
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.DeleteObject(target);
 		}
 		else if (op == "reparent" || op == "reparentObject")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.ReparentObject(*target, ParseManagedTransactionObjectRef(write.value("parent", nlohmann::json{})));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.ReparentObject(target, ParseManagedTransactionObjectRef(write.value("parent", nlohmann::json{})));
 		}
 		else if (op == "setName")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.SetName(*target, write.value("name", std::string{}));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.SetName(target, write.value("name", std::string{}));
 		}
 		else if (op == "setTag")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.SetTag(*target, write.value("tag", std::string{}));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.SetTag(target, write.value("tag", std::string{}));
 		}
 		else if (op == "setLayer")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.SetLayer(*target, write.value("layer", std::string{}));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.SetLayer(target, write.value("layer", std::string{}));
 		}
 		else if (op == "setActive")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.SetActive(*target, write.value("active", true));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.SetActive(target, write.value("active", true));
 		}
 		else if (op == "setStatic")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.SetStatic(*target, write.value("static", write.value("isStatic", false)));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.SetStatic(target, write.value("static", write.value("isStatic", false)));
 		}
 		else if (op == "addComponent")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.AddComponent(*target, write.value("component", write.value("componentName", std::string{})));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.AddComponent(target, write.value("component", write.value("componentName", std::string{})));
 		}
 		else if (op == "removeComponent")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				builder.RemoveComponent(*target, write.value("component", write.value("componentName", std::string{})));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			builder.RemoveComponent(target, write.value("component", write.value("componentName", std::string{})));
 		}
 		else if (op == "updateComponentProperty")
 		{
-			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
-			{
-				const int valueKind = write.value("valueKind", -1);
-				builder.UpdateComponentProperty(
-					*target,
-					write.value("component", write.value("componentName", std::string{})),
-					write.value("property", write.value("propertyName", std::string{})),
-					MakeManagedTransactionVariant(write.value("value", nlohmann::json{}), valueKind));
-			}
+			const TerraEngine::UUID target = RequireManagedTransactionObjectId(write.value("object", nlohmann::json{}), op);
+			const int valueKind = write.value("valueKind", -1);
+			builder.UpdateComponentProperty(
+				target,
+				write.value("component", write.value("componentName", std::string{})),
+				write.value("property", write.value("propertyName", std::string{})),
+				MakeManagedTransactionVariant(write.value("value", nlohmann::json{}), valueKind));
 		}
 		else
 		{

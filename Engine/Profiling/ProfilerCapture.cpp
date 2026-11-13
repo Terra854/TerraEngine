@@ -664,6 +664,27 @@ std::uint64_t EstimateProfilerFrameOwnedBytes(const ProfilerFrameRecord& frame) 
 	return bytes;
 }
 
+void PrepareProfilerJournalWorkloadEvidence(ProfilerSealedFrame& sealed)
+{
+	const auto& workloads = sealed.frame.workloadExecutions;
+	const bool valid = workloads.size() <= kMaximumWorkloadExecutionRecordsPerFrame
+		&& std::all_of(workloads.begin(), workloads.end(), [](const WorkloadExecutionRecord& record) {
+			return ValidateWorkloadExecutionRecord(record).valid;
+		});
+	if(valid) return;
+
+	// Reserve the diagnostic before discarding anything. The whole optional
+	// family is withheld so surviving rows cannot masquerade as complete coverage.
+	const auto records = static_cast<std::uint64_t>(workloads.size());
+	const auto beforeBytes = EstimateProfilerFrameOwnedBytes(sealed.frame);
+	sealed.losses.push_back({sealed.frame.frameIndex, sealed.frame.frameIndex,
+		ProfilerCaptureLossClass::WorkloadRanges, ProfilerCaptureLossReason::InvalidEvidence,
+		records, 0U});
+	std::vector<WorkloadExecutionRecord>{}.swap(sealed.frame.workloadExecutions);
+	sealed.frame.workloadExecutionsAvailable = false;
+	sealed.losses.back().discardedByteCount = beforeBytes - EstimateProfilerFrameOwnedBytes(sealed.frame);
+}
+
 bool ValidateProfilerSealedFrame(const ProfilerSealedFrame& sealed, std::string& outError) noexcept
 {
 	outError.clear();
@@ -690,7 +711,9 @@ bool ValidateProfilerSealedFrame(const ProfilerSealedFrame& sealed, std::string&
 			outError = "Profiler sealed frame has an invalid loss range.";
 			return false;
 		}
-		if (havePrevious && loss.firstFrameIndex <= previousLastFrame)
+		// Independent loss classes may share this sealed frame. Chronological
+		// reversal is still invalid; equal frame indices do not imply duplicate loss.
+		if (havePrevious && loss.firstFrameIndex < previousLastFrame)
 		{
 			outError = "Profiler sealed frame loss ranges are not strictly ordered.";
 			return false;
@@ -908,6 +931,9 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 		{
 			ProfilerSealedFrame item;
 			item.frame = document.frames[first + offset];
+			// Offline saves preserve core evidence using the same explicit optional
+			// workload-loss policy as live recording; the wire codec stays strict.
+			PrepareProfilerJournalWorkloadEvidence(item);
 			item.ownedByteCount = EstimateProfilerFrameOwnedBytes(item.frame);
 			sealed.push_back(std::move(item));
 		}
@@ -1207,6 +1233,14 @@ void CollectFrameStrings(
 	{
 		table.Intern(sample.name); table.Intern(sample.threadLabel); table.Intern(sample.taskLabel);
 	}
+	for (const WorkloadExecutionRecord& workload : frame.workloadExecutions)
+	{
+		table.Intern(workload.frameId); table.Intern(workload.descriptorId); table.Intern(workload.ownerSystem);
+		table.Intern(workload.phase); table.Intern(workload.workloadName); table.Intern(workload.activationPredicateKey);
+		CollectDuration(table, workload.queueDuration); CollectDuration(table, workload.runDuration);
+		CollectDuration(table, workload.coordinatorWaitDuration); CollectDuration(table, workload.ownershipWaitDuration);
+		CollectDuration(table, workload.flushDuration); CollectDuration(table, workload.publicationDuration);
+	}
 	for (const PerformanceStageRecord& stage : frame.performanceStages)
 	{
 		table.Intern(stage.stageName); table.Intern(stage.workloadName); CollectDuration(table, stage.duration);
@@ -1246,6 +1280,8 @@ bool UnpackDuration(const nlohmann::json& json, const std::vector<std::string>& 
 		error = "Profiler journal V1 frame contains a malformed duration.";
 		return false;
 	}
+	if (json[0].get<std::uint64_t>() > static_cast<std::uint8_t>(TelemetryAvailability::Unavailable))
+	{ error = "Profiler journal duration availability is unknown."; return false; }
 	const std::size_t reasonIndex = json[2].get<std::size_t>();
 	if (reasonIndex >= strings.size())
 	{
@@ -1521,25 +1557,90 @@ bool UnpackAnimationOptimizationForJournal(
 	return true;
 }
 
+// One row encoding is shared by the historical two-view optimization record
+// and the bounded publication-view extension; the fixed scalar f array is unchanged.
+nlohmann::json PackRenderOptimizationViewForJournal(const ProfilerRenderOptimizationViewSummary& view)
+{
+	return nlohmann::json::array({
+		view.viewType, view.frameGeneration, view.topologyGeneration, view.viewGeneration,
+		view.rendererGeneration, view.topologyBuildNanoseconds,
+		view.dynamicMaterializationNanoseconds, view.instanceStreamUploadNanoseconds,
+		view.groupedCommandRecordingNanoseconds, view.visibleInstanceCount, view.groupedInstanceCount,
+		view.fallbackInstanceCount, view.groupedSubmissionCount, view.fallbackSubmissionCount,
+		view.avoidedSubmissionCount, view.instanceStreamBytes, view.instanceStreamCapacityBytes,
+		view.topologyReuseHits, view.topologyInvalidations, view.viewEvidenceReuseHits,
+		view.viewEvidenceInvalidations, view.rejectedIncompleteKeyCount,
+		view.rejectedUnsupportedVariantCount, view.rejectedOutOfRangeCount,
+		view.rejectedStaleGenerationCount, view.fallbackAllocationFailureCount,
+		view.fallbackRecoveryCount, view.valid});
+}
+
 nlohmann::json PackRenderOptimizationForJournal(const ProfilerRenderOptimizationEvidence& evidence)
 {
 	nlohmann::json result = nlohmann::json::array();
-	for (const ProfilerRenderOptimizationViewSummary& view : evidence.views)
-	{
-		result.push_back(nlohmann::json::array({
-			view.viewType, view.frameGeneration, view.topologyGeneration, view.viewGeneration,
-			view.rendererGeneration, view.topologyBuildNanoseconds,
-			view.dynamicMaterializationNanoseconds, view.instanceStreamUploadNanoseconds,
-			view.groupedCommandRecordingNanoseconds, view.visibleInstanceCount, view.groupedInstanceCount,
-			view.fallbackInstanceCount, view.groupedSubmissionCount, view.fallbackSubmissionCount,
-			view.avoidedSubmissionCount, view.instanceStreamBytes, view.instanceStreamCapacityBytes,
-			view.topologyReuseHits, view.topologyInvalidations, view.viewEvidenceReuseHits,
-			view.viewEvidenceInvalidations, view.rejectedIncompleteKeyCount,
-			view.rejectedUnsupportedVariantCount, view.rejectedOutOfRangeCount,
-			view.rejectedStaleGenerationCount, view.fallbackAllocationFailureCount,
-			view.fallbackRecoveryCount, view.valid}));
-	}
+	for (const auto& view : evidence.views) result.push_back(PackRenderOptimizationViewForJournal(view));
 	return result;
+}
+
+bool UnpackRenderOptimizationViewForJournal(const nlohmann::json& values,
+	ProfilerRenderOptimizationViewSummary& view, std::string& error)
+{
+	const bool hasTimings = values.is_array() && values.size() == 28U;
+	if (!values.is_array() || (values.size() != 24U && !hasTimings)
+		|| !values.back().is_boolean())
+	{
+		error = "Profiler journal V1 frame has malformed renderer optimization view evidence.";
+		return false;
+	}
+	for (std::size_t index = 0U; index + 1U < values.size(); ++index)
+	{
+		if (!values.at(index).is_number_unsigned()
+			|| ((index == 0u || index >= (hasTimings ? 9u : 5u))
+				&& values.at(index).get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max()))
+		{
+			error = "Profiler journal V1 frame renderer optimization evidence has a non-unsigned value.";
+			return false;
+		}
+	}
+
+	std::size_t index = 0U;
+	view.viewType = values.at(index++).get<std::uint32_t>();
+	view.frameGeneration = values.at(index++).get<std::uint64_t>();
+	view.topologyGeneration = values.at(index++).get<std::uint64_t>();
+	view.viewGeneration = values.at(index++).get<std::uint64_t>();
+	view.rendererGeneration = values.at(index++).get<std::uint64_t>();
+	if (hasTimings)
+	{
+		view.topologyBuildNanoseconds = values.at(index++).get<std::uint64_t>();
+		view.dynamicMaterializationNanoseconds = values.at(index++).get<std::uint64_t>();
+		view.instanceStreamUploadNanoseconds = values.at(index++).get<std::uint64_t>();
+		view.groupedCommandRecordingNanoseconds = values.at(index++).get<std::uint64_t>();
+	}
+	auto nextCounter = [&values, &index]() { return values.at(index++).get<std::uint32_t>(); };
+	view.visibleInstanceCount = nextCounter();
+	view.groupedInstanceCount = nextCounter();
+	view.fallbackInstanceCount = nextCounter();
+	view.groupedSubmissionCount = nextCounter();
+	view.fallbackSubmissionCount = nextCounter();
+	view.avoidedSubmissionCount = nextCounter();
+	view.instanceStreamBytes = nextCounter();
+	view.instanceStreamCapacityBytes = nextCounter();
+	view.topologyReuseHits = nextCounter();
+	view.topologyInvalidations = nextCounter();
+	view.viewEvidenceReuseHits = nextCounter();
+	view.viewEvidenceInvalidations = nextCounter();
+	view.rejectedIncompleteKeyCount = nextCounter();
+	view.rejectedUnsupportedVariantCount = nextCounter();
+	view.rejectedOutOfRangeCount = nextCounter();
+	view.rejectedStaleGenerationCount = nextCounter();
+	view.fallbackAllocationFailureCount = nextCounter();
+	view.fallbackRecoveryCount = nextCounter();
+	view.valid = values.at(index).get<bool>();
+
+	// Publication rows may retain diagnostic generations/counters while unavailable.
+	// Their owning aggregate validates semantics; the historical pair still uses
+	// its existing stricter conservation and availability validator.
+	return true;
 }
 
 bool UnpackRenderOptimizationForJournal(
@@ -1554,63 +1655,59 @@ bool UnpackRenderOptimizationForJournal(
 	}
 	for (std::size_t viewIndex = 0U; viewIndex < out.views.size(); ++viewIndex)
 	{
-		const nlohmann::json& values = json.at(viewIndex);
-		const bool hasTimings = values.is_array() && values.size() == 28U;
-		if (!values.is_array() || (values.size() != 24U && !hasTimings)
-			|| !values.back().is_boolean())
-		{
-			error = "Profiler journal V1 frame has malformed renderer optimization view evidence.";
-			return false;
-		}
-		for (std::size_t index = 0U; index + 1U < values.size(); ++index)
-		{
-			if (!values.at(index).is_number_unsigned())
-			{
-				error = "Profiler journal V1 frame renderer optimization evidence has a non-unsigned value.";
-				return false;
-			}
-		}
-
-		ProfilerRenderOptimizationViewSummary& view = out.views[viewIndex];
-		std::size_t index = 0U;
-		view.viewType = values.at(index++).get<std::uint32_t>();
-		view.frameGeneration = values.at(index++).get<std::uint64_t>();
-		view.topologyGeneration = values.at(index++).get<std::uint64_t>();
-		view.viewGeneration = values.at(index++).get<std::uint64_t>();
-		view.rendererGeneration = values.at(index++).get<std::uint64_t>();
-		if (hasTimings)
-		{
-			view.topologyBuildNanoseconds = values.at(index++).get<std::uint64_t>();
-			view.dynamicMaterializationNanoseconds = values.at(index++).get<std::uint64_t>();
-			view.instanceStreamUploadNanoseconds = values.at(index++).get<std::uint64_t>();
-			view.groupedCommandRecordingNanoseconds = values.at(index++).get<std::uint64_t>();
-		}
-		auto nextCounter = [&values, &index]() { return values.at(index++).get<std::uint32_t>(); };
-		view.visibleInstanceCount = nextCounter();
-		view.groupedInstanceCount = nextCounter();
-		view.fallbackInstanceCount = nextCounter();
-		view.groupedSubmissionCount = nextCounter();
-		view.fallbackSubmissionCount = nextCounter();
-		view.avoidedSubmissionCount = nextCounter();
-		view.instanceStreamBytes = nextCounter();
-		view.instanceStreamCapacityBytes = nextCounter();
-		view.topologyReuseHits = nextCounter();
-		view.topologyInvalidations = nextCounter();
-		view.viewEvidenceReuseHits = nextCounter();
-		view.viewEvidenceInvalidations = nextCounter();
-		view.rejectedIncompleteKeyCount = nextCounter();
-		view.rejectedUnsupportedVariantCount = nextCounter();
-		view.rejectedOutOfRangeCount = nextCounter();
-		view.rejectedStaleGenerationCount = nextCounter();
-		view.fallbackAllocationFailureCount = nextCounter();
-		view.fallbackRecoveryCount = nextCounter();
-		view.valid = values.at(index).get<bool>();
+		if (!UnpackRenderOptimizationViewForJournal(json.at(viewIndex), out.views[viewIndex], error)) return false;
 	}
 	if (!ValidateProfilerRenderOptimizationEvidence(out))
 	{
 		error = "Profiler journal V1 frame contains inconsistent renderer optimization evidence.";
 		return false;
 	}
+	return true;
+}
+
+nlohmann::json PackWorkloadExecutionForJournal(const WorkloadExecutionRecord& w, JournalStringTable& table)
+{
+	if (!ValidateWorkloadExecutionRecord(w).valid) throw std::invalid_argument("Profiler journal workload evidence is invalid.");
+	return nlohmann::json::array({table.Intern(w.frameId), table.Intern(w.descriptorId), w.descriptorGeneration,
+		table.Intern(w.ownerSystem), table.Intern(w.phase), table.Intern(w.workloadName), table.Intern(w.activationPredicateKey),
+		w.active, w.ready, static_cast<std::uint8_t>(w.selectedPath), static_cast<std::uint8_t>(w.status), w.workerIdentityAvailable,
+		w.workerId, w.queueDepthAtEnqueue, w.queueDepthAtStart, w.dispatchCount, w.usefulWorkItemCount,
+		w.dependencyWave, w.completionSequence, w.partitionIndex, w.partitionCount, w.itemBegin, w.itemEnd, w.sameFrameVisibilityRequired,
+		PackDuration(w.queueDuration, table), PackDuration(w.runDuration, table), PackDuration(w.coordinatorWaitDuration, table),
+		PackDuration(w.ownershipWaitDuration, table), PackDuration(w.flushDuration, table), PackDuration(w.publicationDuration, table)});
+}
+
+bool UnpackWorkloadExecutionForJournal(const nlohmann::json& row, const std::vector<std::string>& strings,
+	WorkloadExecutionRecord& w, std::string& error)
+{
+	if (!row.is_array() || row.size() != 30u) { error = "Profiler journal has malformed workload row."; return false; }
+	for (std::size_t index = 0; index < 24u; ++index)
+	{
+		if (index == 7u || index == 8u || index == 11u || index == 23u)
+		{
+			if (!row[index].is_boolean()) { error = "Profiler journal workload flag is not boolean."; return false; }
+		}
+		else if (!row[index].is_number_unsigned()) { error = "Profiler journal workload value is not unsigned."; return false; }
+	}
+	if (row[9].get<std::uint64_t>() > 255u || row[10].get<std::uint64_t>() > 255u
+		|| row[12].get<std::uint64_t>() > UINT32_MAX || row[17].get<std::uint64_t>() > UINT32_MAX)
+	{ error = "Profiler journal workload value exceeds its native width."; return false; }
+	const auto* frame = StringAt(strings, row[0], error); const auto* descriptor = StringAt(strings, row[1], error);
+	const auto* owner = StringAt(strings, row[3], error); const auto* phase = StringAt(strings, row[4], error);
+	const auto* name = StringAt(strings, row[5], error); const auto* predicate = StringAt(strings, row[6], error);
+	if (!frame || !descriptor || !owner || !phase || !name || !predicate) return false;
+	w.frameId = *frame; w.descriptorId = *descriptor; w.descriptorGeneration = row[2].get<std::uint64_t>();
+	w.ownerSystem = *owner; w.phase = *phase; w.workloadName = *name; w.activationPredicateKey = *predicate;
+	w.active = row[7].get<bool>(); w.ready = row[8].get<bool>(); w.selectedPath = static_cast<WorkloadExecutionPath>(row[9].get<std::uint8_t>());
+	w.status = static_cast<WorkloadExecutionStatus>(row[10].get<std::uint8_t>()); w.workerIdentityAvailable = row[11].get<bool>();
+	w.workerId = row[12].get<std::uint32_t>(); w.queueDepthAtEnqueue = row[13].get<std::uint64_t>(); w.queueDepthAtStart = row[14].get<std::uint64_t>();
+	w.dispatchCount = row[15].get<std::uint64_t>(); w.usefulWorkItemCount = row[16].get<std::uint64_t>(); w.dependencyWave = row[17].get<std::uint32_t>();
+	w.completionSequence = row[18].get<std::uint64_t>(); w.partitionIndex = row[19].get<std::uint64_t>(); w.partitionCount = row[20].get<std::uint64_t>();
+	w.itemBegin = row[21].get<std::uint64_t>(); w.itemEnd = row[22].get<std::uint64_t>(); w.sameFrameVisibilityRequired = row[23].get<bool>();
+	if (!UnpackDuration(row[24], strings, w.queueDuration, error) || !UnpackDuration(row[25], strings, w.runDuration, error)
+		|| !UnpackDuration(row[26], strings, w.coordinatorWaitDuration, error) || !UnpackDuration(row[27], strings, w.ownershipWaitDuration, error)
+		|| !UnpackDuration(row[28], strings, w.flushDuration, error) || !UnpackDuration(row[29], strings, w.publicationDuration, error)) return false;
+	if (!ValidateWorkloadExecutionRecord(w).valid) { error = "Profiler journal workload semantics are invalid."; return false; }
 	return true;
 }
 
@@ -1659,6 +1756,9 @@ nlohmann::json PackJournalFrame(
 			e.dynamicRebuildCount,e.authorityReuseCount,e.authorityRebuildCount,e.viewSelectionReuseCount,e.viewSelectionRebuildCount,e.viewCount});
 		packed.push_back(e.disjointTimingNanoseconds);
 		result["f"] = std::move(packed);
+		result["fv"] = nlohmann::json::array();
+		for (std::size_t index = 0; index < e.viewCount; ++index)
+			result["fv"].push_back(PackRenderOptimizationViewForJournal(e.views[index]));
 	}
 	// Timing lanes are compact, bounded frame evidence. Persist them at every
 	// detail level so an aggregate or unsampled frame remains useful after the
@@ -1741,6 +1841,14 @@ nlohmann::json PackJournalFrame(
 	{
 		result["w"].push_back(nlohmann::json::array({worker.workerId, worker.queueDepth, worker.dispatchCount,
 			worker.usefulWorkItemCount, PackDuration(worker.runDuration, table), PackDuration(worker.waitDuration, table), PackDuration(worker.idleDuration, table)}));
+	}
+	// Missing legacy evidence remains absent; an explicitly observed empty set
+	// is encoded as we:[] so reopening cannot invent measured-zero availability.
+	if (frame.workloadExecutionsAvailable || !frame.workloadExecutions.empty())
+	{
+		result["we"] = nlohmann::json::array();
+		for (const auto& workload : frame.workloadExecutions)
+			result["we"].push_back(PackWorkloadExecutionForJournal(workload, table));
 	}
 	result["q"] = nlohmann::json::array();
 	for (const PresentationWaitRecord& wait : frame.presentationWaits)
@@ -1856,8 +1964,31 @@ bool UnpackJournalFrame(const nlohmann::json& json, const std::vector<std::strin
 			e.viewSelectionReuseCount=(*it)[18].get<std::uint32_t>(); e.viewSelectionRebuildCount=(*it)[19].get<std::uint32_t>();
 			e.viewCount=(*it)[20].get<std::uint32_t>();
 			for (std::size_t index=0; index<8; ++index) e.disjointTimingNanoseconds[index]=(*it)[21][index].get<std::uint64_t>();
+			if (const auto views = json.find("fv"); views != json.end())
+			{
+				if (!views->is_array() || views->size() > e.kMaximumViews || views->size() != e.viewCount)
+				{ error = "Profiler journal publication-view count is inconsistent."; return false; }
+				for (std::size_t index = 0; index < views->size(); ++index)
+					if (!UnpackRenderOptimizationViewForJournal((*views)[index], e.views[index], error)) return false;
+			}
 			if (!ValidateProfilerFramePublicationEvidence(e)) { error="Profiler journal V1 frame contains invalid frame-publication evidence."; return false; }
 			out.framePublication=std::move(e);
+		}
+		if (json.contains("fv") && !json.contains("f")) { error = "Profiler journal views have no scalar owner."; return false; }
+		out.workloadExecutions.clear(); out.workloadExecutionsAvailable = false;
+		if (const auto workloads = json.find("we"); workloads != json.end())
+		{
+			if (!workloads->is_array() || workloads->size() > kMaximumWorkloadExecutionRecordsPerFrame)
+			{ error = "Profiler journal workload count exceeds its format bound."; return false; }
+			std::vector<WorkloadExecutionRecord> decoded;
+			decoded.reserve(workloads->size());
+			for (const auto& row : *workloads)
+			{
+				WorkloadExecutionRecord record;
+				if (!UnpackWorkloadExecutionForJournal(row, strings, record, error)) return false;
+				decoded.push_back(std::move(record));
+			}
+			out.workloadExecutions = std::move(decoded); out.workloadExecutionsAvailable = true;
 		}
 		if (const auto it = json.find("t"); it != json.end()) for (const auto& value : *it)
 		{
@@ -1939,6 +2070,9 @@ bool EncodeProfilerJournalFrameImpl(
 	};
 	try
 	{
+		if (frame.workloadExecutions.size() > kMaximumWorkloadExecutionRecordsPerFrame
+			|| (frame.framePublication && !ValidateProfilerFramePublicationEvidence(*frame.framePublication)))
+			throw std::invalid_argument("Profiler journal evidence exceeds its bounded format.");
 		JournalStringTable strings;
 		CollectFrameStrings(strings, frame, settings);
 		if (strings.Values().size() > kJournalMaximumStringCount)
@@ -2074,7 +2208,14 @@ bool DecodeProfilerJournalFrameImpl(
 			return false;
 		}
 		std::uint32_t sampleCount = 0u;
-		if (!consumeU32(payload, sampleCount) || sampleCount > kJournalMaximumStringCount)
+		// V1 samples occupy 55 fixed bytes after the CBOR envelope. Check the
+		// remaining wire capacity before reserving C++ sample objects: a tiny
+		// truncated input must not amplify its declared count into a large buffer.
+		// Division and max_size subtraction keep both checks overflow-safe.
+		constexpr std::size_t kSampleRecordBytes = 8u + 8u + 1u + 4u * 3u + 8u + 8u + 4u + 4u + 2u;
+		if (!consumeU32(payload, sampleCount) || sampleCount > kJournalMaximumStringCount
+			|| sampleCount > payload.size() / kSampleRecordBytes
+			|| sampleCount > outFrame.samples.max_size() - outFrame.samples.size())
 		{
 			outError = "Profiler journal frame has an invalid sample count.";
 			return false;

@@ -131,6 +131,10 @@ protected:
 	bool OnCloseRequested() override;
 
 private:
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	// Invoke the same detach/save operations as the editor controls.
+	friend struct UIBuilderWindowTestAccess;
+#endif
 	void RequestNewDocument();
 	void RequestLoadSelectedComponent();
 	bool OpenMarkupDocumentInternal(const std::filesystem::path& markupPath);
@@ -196,3 +200,14 @@ private:
 	std::string m_StatusMessage;
 	char m_NewSelectorBuffer[128]{};
 };
+
+#if defined(TERRAENGINE_EDITOR_TESTS)
+struct UIBuilderWindowTestAccess {
+	static void Detach(UIBuilderWindow& window, int index) {
+		window.m_WorkspaceState.selectedStyleSheetIndex = index;
+		window.DetachStyleSheetSession();
+	}
+	static bool Save(UIBuilderWindow& window) { return window.SaveWorkingDocument(); }
+	static std::size_t StyleCount(const UIBuilderWindow& window) { return window.m_DocumentSession.styleSheets.size(); }
+};
+#endif

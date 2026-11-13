@@ -61,6 +61,20 @@ AnimationClipEditorWindow::AnimationClipEditorWindow(MainEditorSubsystem* owner)
 
 AnimationClipEditorWindow::~AnimationClipEditorWindow() = default;
 
+#if defined(TERRAENGINE_EDITOR_TESTS)
+// State is complete here; tests use the real frame path for transport updates.
+void AnimationClipEditorTestAccess::Configure(AnimationClipEditorWindow& window, std::int64_t cursor, float speed, bool looping) {
+	window.state_->cursor = cursor;
+	window.state_->speed = speed;
+	window.state_->looping = looping;
+	window.state_->playing = true;
+	window.state_->fractionalTicks = 0.0;
+}
+bool AnimationClipEditorTestAccess::Playing(const AnimationClipEditorWindow& window) {
+	return window.state_->playing;
+}
+#endif
+
 void AnimationClipEditorWindow::SetDuration(std::int64_t ticks) noexcept {
 	state_->fallbackDuration = std::max<std::int64_t>(0, ticks);
 	state_->cursor = std::min(state_->cursor, state_->fallbackDuration);
@@ -115,7 +129,10 @@ void AnimationClipEditorWindow::OnGui() {
 		if(state_->looping) {
 			const std::int64_t cycle = duration + 1;
 			state_->cursor = ((state_->cursor % cycle) + cycle) % cycle;
-		} else if(state_->cursor <= 0 || state_->cursor >= duration) {
+		} else if((state_->speed > 0.0F && state_->cursor >= duration)
+			|| (state_->speed < 0.0F && state_->cursor <= 0)) {
+			// At the starting bound, sub-tick frames must keep accumulating time.
+			// Stop only at the destination bound for the chosen travel direction.
 			state_->cursor = std::clamp<std::int64_t>(state_->cursor, 0, duration);
 			state_->playing = false;
 		}

@@ -140,7 +140,9 @@ try {
 	$restored = [byte[]]::new($original.Length)
 	[Buffer]::BlockCopy($mutated, 0, $restored, 0, $insertionOffset)
 	[Buffer]::BlockCopy($mutated, $insertionOffset + $inserted.Length, $restored, $insertionOffset, $original.Length - $insertionOffset)
-	if (-not [Linq.Enumerable]::SequenceEqual[byte]($original, $restored)) { throw 'Mutation is not exactly byte-reversible.' }
+	# PowerShell 7.0 infers the generic byte type from these byte arrays; explicit
+	# generic-method argument syntax requires a newer host than this runner allows.
+	if (-not [Linq.Enumerable]::SequenceEqual($original, $restored)) { throw 'Mutation is not exactly byte-reversible.' }
 	# The sole insertion contains no comment delimiter or newline. Every original
 	# byte survives in order, including all comments, compiler directives and tests.
 	$receipt.mutation = [ordered]@{ path = $controllerPath; insertionOffset = $insertionOffset

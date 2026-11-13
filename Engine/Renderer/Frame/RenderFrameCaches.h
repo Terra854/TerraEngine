@@ -184,6 +184,7 @@ namespace TerraEngine::Renderer::Frame {
 			std::vector<RenderItemRecord>& destination,
 			const RenderableContainer& currentRenderables,
 			const CommandContainer& baseCommands,
+			const TerraEngine::Renderer::RenderReferenceFrame& referenceFrame,
 			std::vector<std::uint8_t>* visibleAnimatedFlags,
 			const std::unordered_map<TerraEngine::UUID, std::size_t>*
 				currentRenderableIndices,
@@ -259,6 +260,12 @@ namespace TerraEngine::Renderer::Frame {
 							static_cast<TerraEngine::Renderer::GeometryRoute>(
 								cachedRecord->routeSelectors[index]),
 							cachedRecord->editorTints[index], command);
+						// Compact hits retain static lanes, while this view owns the
+						// immutable origin used to materialize its current matrix.
+						const auto localized = TerraEngine::Renderer::BuildLocalizedRenderPoseMatrices(
+							command.canonicalWorldPose, referenceFrame);
+						if (!localized.valid) continue;
+						command.modelMatrix = localized.currentMatrix;
 						destination.push_back(std::move(command));
 						if(visibleAnimatedFlags != nullptr
 							&& renderableIndex < visibleAnimatedFlags->size()

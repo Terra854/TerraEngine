@@ -12,12 +12,52 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include "Tests/Support/ReviewRemediation/RenderSettingsFailureHooks.h"
 #include <mutex>
 #include <nlohmann/json.hpp>
 
 // Existing sanitizer helper below is retained; do not add a second definition.
 // Render settings normalization shared by protected capture and settings facades.
 #include "Frame/RenderFrameState.h"
+
+namespace TerraEngine::Tests::Review {
+	// Owner-thread-only validation state. It never crosses a worker lifetime or
+	// changes a scheduler declaration, publication boundary, or ordinary IO path.
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	static thread_local RenderSettingsFailureHook* settingsFailureHook = nullptr;
+#endif
+	bool SetRenderSettingsFailureHook(RenderSettingsFailureHook* hook) noexcept
+	{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (hook != nullptr && settingsFailureHook != nullptr) return false;
+		settingsFailureHook = hook; return true;
+#else
+		return hook == nullptr;
+#endif
+	}
+	static void SettingsFilesystemCheckpoint(SettingsFilesystemOperation operation, const std::filesystem::path& path)
+	{
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (settingsFailureHook != nullptr && settingsFailureHook->operation == operation && settingsFailureHook->remaining != 0)
+		{
+			--settingsFailureHook->remaining; ++settingsFailureHook->reached;
+			throw std::filesystem::filesystem_error("Controlled render-settings filesystem failure", path, std::make_error_code(std::errc::io_error));
+		}
+#else
+		(void)operation; (void)path;
+#endif
+	}
+	static bool SettingsPathExists(const std::filesystem::path& path)
+	{
+		SettingsFilesystemCheckpoint(SettingsFilesystemOperation::Exists, path);
+		return std::filesystem::exists(path);
+	}
+	static void SettingsCreateDirectories(const std::filesystem::path& path)
+	{
+		SettingsFilesystemCheckpoint(SettingsFilesystemOperation::CreateDirectories, path);
+		std::filesystem::create_directories(path);
+	}
+}
 
 namespace TerraEngine::Renderer::Frame {
 	RenderSettings SanitizeRenderSettings(const RenderSettings& input)
@@ -624,26 +664,29 @@ VirtualGeometryInactiveReason RenderSystem::GetVirtualGeometryInactiveReason() c
 void RenderSystem::LoadSettings()
 {
 	namespace fs = std::filesystem;
-	fs::path settingsPath = ResolveRuntimeSettingsDirectory() / "RenderSettings.json";
-
-
-	if (!fs::exists(settingsPath))
-	{
-		const fs::path legacySettingsPath = ResolveLegacyAssetSettingsPath();
-
-		if (!legacySettingsPath.empty() && fs::exists(legacySettingsPath))
-		{
-			settingsPath = legacySettingsPath;
-		}
-		else
-		{
-			SetQualityPreset(QualityPreset::High);
-			return;
-		}
-	}
 
 	try
 	{
+		// Path resolution and filesystem probes belong to the same reporting
+		// boundary as parsing/writing; permission and IO errors must not escape.
+		fs::path settingsPath = ResolveRuntimeSettingsDirectory() / "RenderSettings.json";
+
+
+		if (!TerraEngine::Tests::Review::SettingsPathExists(settingsPath))
+		{
+			const fs::path legacySettingsPath = ResolveLegacyAssetSettingsPath();
+
+			if (!legacySettingsPath.empty() && TerraEngine::Tests::Review::SettingsPathExists(legacySettingsPath))
+			{
+				settingsPath = legacySettingsPath;
+			}
+			else
+			{
+				SetQualityPreset(QualityPreset::High);
+				return;
+			}
+		}
+
 		std::ifstream file(settingsPath);
 		nlohmann::json j;
 		file >> j;
@@ -711,24 +754,28 @@ void RenderSystem::LoadSettings()
 	catch (const std::exception& e)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to load RenderSettings: " << e.what());
-		SetQualityPreset(QualityPreset::High);
+		// A transient read failure must never persist fallback values over authored settings.
+		ApplyQualityPreset(QualityPreset::High, false);
 	}
 }
 
 void RenderSystem::SaveSettings()
 {
 	namespace fs = std::filesystem;
-	const fs::path settingsDir = ResolveRuntimeSettingsDirectory();
-	const fs::path settingsPath = settingsDir / "RenderSettings.json";
-
-
-	if (!fs::exists(settingsDir))
-	{
-		fs::create_directories(settingsDir);
-	}
 
 	try
 	{
+		// Path resolution and filesystem probes belong to the same reporting
+		// boundary as parsing/writing; permission and IO errors must not escape.
+		const fs::path settingsDir = ResolveRuntimeSettingsDirectory();
+		const fs::path settingsPath = settingsDir / "RenderSettings.json";
+
+
+		if (!TerraEngine::Tests::Review::SettingsPathExists(settingsDir))
+		{
+			TerraEngine::Tests::Review::SettingsCreateDirectories(settingsDir);
+		}
+
 		nlohmann::json j;
 		j["preset"] = static_cast<uint32_t>(currentPreset);
 		j["validationEnabled"] = currentSettings.validationEnabled > 0u;

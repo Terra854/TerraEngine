@@ -357,7 +357,9 @@ namespace TerraEngine::Navigation {
 			case NavigationSourceKind::Terrain: {
 				const ::TerrainComponent* terrain = objects.GetComponent<::TerrainComponent>(*object);
 				if(!terrain || terrain->terrainAssetId != source.identity.assetId
-					|| terrain->schemaVersion != source.revisionEvidence.geometryRevision) return true;
+					// The supported decoder admits legacy zero; capture's MakeCandidate
+					// stores NonZero(schemaVersion), so compare that same representation.
+					|| NonZero(terrain->schemaVersion) != source.revisionEvidence.geometryRevision) return true;
 				break;
 			}
 			default:

@@ -7,6 +7,30 @@
 namespace TerraEngine::Tests {
 	void RegisterOwnedImportExecutorTests(TestRegistry& registry)
 	{
+		registry.Add("Engine.OwnedImportExecutor.CurrentWorkerIdentityIsPoolScoped", [](TestContext& context) {
+			auto& frame = ThreadPool::instance();
+			// Reverse destruction must join the submitting pool before its task's
+			// foreign-pool observation target can disappear on an assertion failure.
+			auto second = ThreadPool::CreateOwned(1);
+			auto first = ThreadPool::CreateOwned(2);
+			context.Expect(!first->CurrentExecutingWorkerIndex() && !second->CurrentExecutingWorkerIndex()
+				&& !frame.CurrentExecutingWorkerIndex(), "The coordinator cannot masquerade as any pool's worker zero.");
+			// Return an observation instead of throwing an assertion on a worker.
+			// Both owners remain alive and unchanged until the real task settles.
+			auto task = first->createTask([owner = first.get(), foreign = second.get(), &frame] {
+				const auto index = owner->CurrentExecutingWorkerIndex();
+				return index && *index < owner->getThreadCount()
+					&& !foreign->CurrentExecutingWorkerIndex() && !frame.CurrentExecutingWorkerIndex();
+			});
+			auto result = task->getFuture();
+			first->enqueue(task);
+			const bool ready = result.wait_for(Correctness::kDefaultTimeout) == std::future_status::ready;
+			context.Expect(ready && result.get(), "A real dispatch observes only its actual owning pool's bounded index.");
+			first->shutdown();
+			second->shutdown();
+			context.Expect(!first->CurrentExecutingWorkerIndex() && !second->CurrentExecutingWorkerIndex(),
+				"Joined workers leave no identity on the coordinator thread.");
+		});
 		registry.Add("Engine.OwnedImportExecutor.InitialGraphRejectionSettlesUnsubmittedBranches", [](TestContext& context) {
 			auto pool = ThreadPool::CreateOwned(1);
 			pool->shutdown();

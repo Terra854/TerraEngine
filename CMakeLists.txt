@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22.1)
+cmake_minimum_required(VERSION 3.24)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 project(TerraEngine LANGUAGES CXX C)
 
@@ -14,6 +14,8 @@ if(UNIX AND NOT APPLE)
 endif()
 
 include(CTest)
+include(cmake/TerraEngineCorrectnessTools.cmake)
+terraengine_validate_correctness_tools()
 
 # Configure-time guard: centralize platform names so native, managed, and
 # install rules all agree about the host layout they are producing.
@@ -925,6 +927,20 @@ if(BUILD_TESTING)
 	# Benchmark and contract utilities are test infrastructure. Keeping their
 	# targets behind BUILD_TESTING prevents production-only builds from compiling
 	# or installing QA executables and evidence scripts.
+	# Register cleanup BEFORE the subdirectory's install rules. Otherwise the
+	# later root rule erases the freshly installed executables and their DLLs.
+	# Resolve the exact owned directory first; a redirected directory must never
+	# turn validation-tool cleanup into removal of another install or workspace.
+	install(CODE "
+file(REAL_PATH \"${CMAKE_BINARY_DIR}\" _terra_vg_cleanup_build)
+set(_terra_vg_cleanup_expected \"\${_terra_vg_cleanup_build}/Build/Tests/Tools/VirtualGeometry\")
+cmake_path(NORMAL_PATH _terra_vg_cleanup_expected)
+file(REAL_PATH \"\${_terra_vg_cleanup_expected}\" _terra_vg_cleanup_resolved)
+if(NOT _terra_vg_cleanup_expected STREQUAL _terra_vg_cleanup_resolved)
+	message(FATAL_ERROR \"Virtual-geometry tool cleanup refused a redirected install directory\")
+endif()
+file(REMOVE_RECURSE \"\${_terra_vg_cleanup_resolved}\")
+")
 	add_subdirectory(Tests/Tools/VirtualGeometry)
 	add_subdirectory(Tests/Tools/FramePublication)
 	add_subdirectory(Tests/Tools/UnboundedScenes)
@@ -937,6 +953,12 @@ set(FASTGLTF_ENABLE_DOCS OFF CACHE BOOL "Disable fastgltf docs" FORCE)
 set(FASTGLTF_COMPILE_AS_CPP20 ON CACHE BOOL "Compile fastgltf as C++20" FORCE)
 add_subdirectory(External/fastgltf)
 set_target_properties(fastgltf PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	# The installed importer and its bundled JSON decoder live together. Their
+	# direct dependencies must resolve there without build-tree loader paths.
+	set_target_properties(fastgltf simdjson PROPERTIES
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}")
+endif()
 
 # --- mikktspace --------------------------------------------------------------
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
@@ -1108,26 +1130,29 @@ configure_file(
 	${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/config.h
 )
 
+# Preserve timestamps when the generated version bytes are unchanged. Otherwise
+# every configure recompiles nethost and relinks all dependent runtime tools.
+# These files remain build-local copies; vendored runtime sources stay intact.
 # Generate runtime_version.h required by nethost/utils.h
-file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/runtime_version.h
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/runtime_version.h CONTENT
 "#define RuntimeProductVersion \"10.0.1\"
 #define RuntimeBuildVersion \"10.0.1\"
-")
+" @ONLY NEWLINE_STYLE LF)
 
 # Generate _version.h required by nethost/utils.cpp (on Windows)
-file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.h
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.h CONTENT
 "#define VER_PRODUCTVERSION_STR \"10.0.1\"
 #define VER_FILEVERSION_STR \"10.0.1.0\"
 #define VER_PRODUCTVERSION 10,0,1,0
 #define VER_FILEVERSION 10,0,1,0
-")
+" @ONLY NEWLINE_STYLE LF)
 
 # Generate _version.c required by nethost/utils.cpp on Unix. The upstream
 # source embeds this static version string directly, so keep the local file in
 # the generated nethost include directory instead of editing vendored sources.
-file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.c
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.c CONTENT
 "static char sccsid[] __attribute__((used)) = \"@(#)Version 10.0.1\";
-")
+" @ONLY NEWLINE_STYLE LF)
 
 set(NETHOST_SOURCES
     ${DOTNET_RUNTIME_ROOT}/nethost/nethost.cpp
@@ -1230,6 +1255,7 @@ add_dependencies(TerraEngine.Managed.Output TerraEngine.Managed.Restore)
 add_custom_target(TerraEngine ALL
 	COMMAND ${TERRAENGINE_DOTNET_COMMAND} publish
 		"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj"
+		${TERRAENGINE_DOTNET_ISOLATION_ARGUMENTS}
 		-c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID}
 		--self-contained true --no-restore -o "${MANAGED_OUTPUT_DIR}"
 	COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
@@ -1246,6 +1272,7 @@ add_custom_target(TerraEngine.Export.Generator ALL
 	# platform-qualified MSBuild layouts all stage the same DLL path.
 	COMMAND ${TERRAENGINE_DOTNET_COMMAND} build
 		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj"
+		${TERRAENGINE_DOTNET_ISOLATION_ARGUMENTS}
 		-c $<CONFIG> --no-restore -nologo
 		-p:OutDir="${EXPORT_GENERATOR_OUTPUT_DIR}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1269,6 +1296,7 @@ add_custom_target(TerraEngine.Editor.Managed ALL
 	# MSBuild also keeps the project-reference build deterministic.
 	COMMAND ${TERRAENGINE_DOTNET_COMMAND} publish
 		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj"
+		${TERRAENGINE_DOTNET_ISOLATION_ARGUMENTS}
 		-c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID}
 		--self-contained true --no-restore
 		${TERRAENGINE_DOTNET_HEXA_COMPATIBILITY_ARGUMENTS}
@@ -1516,6 +1544,14 @@ if(BUILD_TESTING)
 			${CMAKE_CURRENT_SOURCE_DIR}/Engine
 	)
 	target_link_libraries(TerraEnginePhysicsConstraintCharacterStress PRIVATE TerraEngine-Engine)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# These installed tools all live at Tests/Tools/<category>; reach the
+		# shared bundled engine without an inherited LD_LIBRARY_PATH.
+		set_target_properties(TerraEngine-LocomotionFixtureMaterializer
+			TerraEngineAudioStressRunner TerraEnginePhysicsGameplayStress
+			TerraEnginePhysicsOptimizationBenchmark TerraEnginePhysicsConstraintCharacterStress
+			PROPERTIES INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../../Engine")
+	endif()
 	if(MSVC)
 		target_compile_options(TerraEnginePhysicsConstraintCharacterStress PRIVATE /FS)
 	endif()
@@ -1598,6 +1634,14 @@ target_link_libraries(TerraEngineModelPackageCompiler
 		mikktspace
 		basisu
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	# This compiler is installed beside the editor and again under Tests/Editor.
+	# Local owners serve the editor copy; the deeper test copy reaches that same
+	# complete editor dependency bundle without duplicating large native owners.
+	set_target_properties(TerraEngineModelPackageCompiler PROPERTIES
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH};${TERRAENGINE_LOCAL_RPATH}/../../Editor")
+endif()
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngineShaderCompiler
@@ -1801,6 +1845,9 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Automation/Providers/NavigationAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
+	# These production authoring paths are also linked by the real-editor review harness.
+	Editor/TerraEngine-Editor/Subsystems/PrefabInstanceReset.cpp
+	Editor/TerraEngine-Editor/Subsystems/EditorClosePolicy.cpp
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
@@ -1957,6 +2004,12 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${TERRAENGINE_TERRAIN_S
 	target_link_libraries(TerraEngineTerrainTransactionStress PRIVATE TerraEngine-Engine)
 	set_target_properties(TerraEngineTerrainTransactionStress PROPERTIES
 		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# Installed terrain transactions share the same central engine owner as
+		# the other Tests/Tools executables, three directories above this tool.
+		set_target_properties(TerraEngineTerrainTransactionStress PROPERTIES
+			INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../../Engine")
+	endif()
 	if(MSVC)
 		target_compile_options(TerraEngineTerrainTransactionStress PRIVATE /FS)
 	endif()
@@ -2028,32 +2081,8 @@ endif()
 # Enable Interprocedural Optimization (IPO/LTCG) for Release builds if supported by the compiler
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
-if(ipo_supported)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
-endif()
-
-# Configure-time guard: select platform or option behavior before generating build files.
-if(MSVC)
-    # Stronger optimizations for MSVC in Release modes
-    add_compile_options(
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Ot>
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Ox>
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/GS->
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Oi>
-    )
-    add_link_options(
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/OPT:REF>
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/OPT:ICF>
-    )
-else()
-    # Stronger optimizations for GCC/Clang
-    add_compile_options(
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O3>
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-ffast-math>
-    )
-endif()
+# Apply the result explicitly after all project targets have been declared below.
+# Setting an IPO default here cannot initialize targets created earlier.
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
 
@@ -2654,6 +2683,65 @@ endif()
 # so concurrent exports always retain every required shader path.
 file(COPY \"\${shader_stage_root}/\"
 	DESTINATION \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
+# Only after successful publication, prune reviewed historical names absent from
+# the complete new snapshot. Never retire a dynamically produced current output.
+set(retired_shader_candidates
+	\"Default.task.spv\"
+	\"Default.mesh.spv\"
+	\"Default.frag.spv\"
+	\"Default.ConventionalVisibilityIdentity.frag.spv\"
+	\"Lighting/ClusterGrid.comp.tspf\"
+	\"Lighting/ClusterDepthMask.comp.tspf\"
+	\"Lighting/LightCull.comp.tspf\"
+	\"Lighting/ClusterLightCount.comp.tspf\"
+	\"Lighting/ClusterLightPrefix.comp.tspf\"
+	\"Lighting/ClusterLightFill.comp.tspf\"
+	\"PostProcess/HiZGenerate.comp.tspf\"
+	\"PostProcess/VRSGenerate.comp.tspf\"
+	\"PostProcess/GTAO.comp.spv\"
+	\"PostProcess/GTAOBlur.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryPacketCompaction.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryAnimatedClusterBounds.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryComputeRaster.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryTriangleSetup.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryComposite.task.spv\"
+	\"VirtualGeometry/VirtualGeometryComposite.mesh.spv\"
+	\"VirtualGeometry/VirtualGeometryComposite.vert.spv\"
+	\"VirtualGeometry/VirtualGeometryComposite.frag.spv\"
+	\"VirtualGeometry/VirtualGeometryGeneratedIndirect.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryIndirectArguments.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryShadingBins.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryTraversal.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryVisibilityReconstruct.comp.spv\"
+	\"VirtualGeometry/VirtualGeometryVisibilityResolve.comp.spv\"
+	\"Animation/AnimationSample.comp.spv\"
+	\"Animation/AnimationBlend.comp.spv\"
+	\"Animation/AnimationHierarchy.comp.spv\"
+	\"Animation/AnimationProcedural.comp.spv\"
+	\"Animation/AnimationMorph.comp.spv\"
+	\"Animation/AnimationBounds.comp.spv\"
+	\"Animation/AnimationPalette.comp.spv\"
+	\"Animation/AnimationRagdoll.comp.spv\"
+	\"Animation/MotionMatchScore.comp.spv\"
+	\"Animation/MotionMatchTopK.comp.spv\"
+	\"UI/UI_Static.vert.spv\"
+	\"UI/UI_Static.frag.spv\"
+	\"UI/UI_Instanced.vert.spv\"
+	\"UI/UI_Instanced.frag.spv\"
+	\"UI/UI_SDF_Text.vert.spv\"
+	\"UI/UI_SDF_Text.frag.spv\"
+	\"UI/UI_Textured.vert.spv\"
+	\"UI/UI_Textured.frag.spv\"
+	\"Editor/SceneViewGrid.vert.tspf\"
+	\"Editor/SceneViewGrid.frag.tspf\"
+)
+foreach(retired_name IN LISTS retired_shader_candidates)
+	if(NOT EXISTS \"\${shader_stage_root}/\${retired_name}\")
+		file(REMOVE \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/\${retired_name}\")
+	endif()
+endforeach()
+
 ")
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(SCRIPT "${SHADER_INSTALL_SCRIPT}")
@@ -2709,9 +2797,15 @@ file(COPY \"\${shader_stage_root}/\"
 
 	# Install Engine DLLs to Launcher folder so it can run
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_FILE:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
-	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# Target installation performs the declared ELF RPATH fixup; copying the
+		# build file directly would retain a dependency on build-tree libraries.
+		install(TARGETS TerraEngine-Engine
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+	else()
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+	endif()
 	if(WIN32)
 		# Install rule: every code change must keep the install tree reproducible for downstream users.
 		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
@@ -2737,10 +2831,14 @@ file(COPY \"\${shader_stage_root}/\"
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
 	)
-	install(FILES
-		$<TARGET_FILE:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime
-	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# Exported runtimes need the same installed loader policy as Engine.
+		install(TARGETS TerraEngine-Engine
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime)
+	else()
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime)
+	endif()
 	if(WIN32)
 		install(FILES
 			$<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
@@ -2752,9 +2850,14 @@ file(COPY \"\${shader_stage_root}/\"
 
 	# Install Engine DLLs to Editor folder so it can run
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_FILE:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
-	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# Keep the editor companion independent of the developer build path too.
+		install(TARGETS TerraEngine-Engine
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	else()
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	endif()
 	if(WIN32)
 		# Install rule: every code change must keep the install tree reproducible for downstream users.
 		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Editor>
@@ -2825,15 +2928,8 @@ file(COPY \"\${shader_stage_root}/\"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Animation"
 		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json"
 	)
-	# Virtual-geometry manifests and scripts define the installed validation surface.
-	# The executable arrives in a later milestone, but its inputs are installable
-	# from the first foundation gate.
-	# Replace the installed validation-tool directory atomically at install
-	# time. This prevents retired manifest names from surviving an incremental
-	# install and keeps the product-facing layout semantic.
-	install(CODE
-		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tests/Tools/VirtualGeometry\")"
-	)
+	# Cleanup was registered before the tool subdirectory, so these current
+	# manifests join its freshly installed executable/DLL closure without erasing it.
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/VirtualGeometry/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/VirtualGeometry"
 		FILES_MATCHING
@@ -2892,6 +2988,13 @@ file(COPY \"\${shader_stage_root}/\"
 	if(TARGET TerraEngine-LocomotionFixtureMaterializer)
 		install(TARGETS TerraEngine-LocomotionFixtureMaterializer
 			RUNTIME DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Locomotion")
+		if(WIN32)
+			# This direct launcher needs its engine and bundled DLLs beside it;
+			# a parent folder or developer PATH is not an installed runtime closure.
+			install(FILES $<TARGET_FILE:TerraEngine-Engine>
+				$<TARGET_RUNTIME_DLLS:TerraEngine-LocomotionFixtureMaterializer>
+				DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Locomotion")
+		endif()
 	endif()
 	install(FILES
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/README.md"
@@ -2919,9 +3022,22 @@ file(COPY \"\${shader_stage_root}/\"
 	)
 	# Install cimgui (TerraEngine-ImGui)
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
-	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
-	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# Target installation removes build-only GLFW paths while preserving
+		# cimgui's declared local RUNPATH at each existing consumer location.
+		foreach(TERRAENGINE_CIMGUI_RUNTIME_DIR Editor Editor/Managed Launcher)
+			install(TARGETS cimgui
+				LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_CIMGUI_RUNTIME_DIR})
+		endforeach()
+		# The editor directly imports glTF and fastgltf directly uses simdjson;
+		# install both real target owners, including their SONAME links.
+		install(TARGETS fastgltf simdjson
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	else()
+		install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+		install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
+		install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+	endif()
 
 	# Ship a bundled fallback UI font so runtime UI text rendering works in both
 	# the editor and exported builds without depending on any OS-installed font.
@@ -2941,22 +3057,20 @@ file(COPY \"\${shader_stage_root}/\"
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	)
-	# Copy to Launcher/Editor/Managed
-	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
-	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
-	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime)
-	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
+	# Install the same bundled GLFW owner beside each existing native consumer.
 	if(UNIX AND NOT APPLE)
+		# Let CMake emit the target's real SONAME chain; a hard-coded minor
+		# version can leave dangling links on Linux or other ELF Unix platforms.
 		foreach(TERRAENGINE_GLFW_RUNTIME_DIR Launcher Editor Editor/ExportRuntime Editor/Managed)
-			# Linux binaries need the GLFW SONAME link beside the copied real
-			# shared object, otherwise the loader looks for libglfw.so.3 and
-			# ignores the libglfw.so.3.4 file.
-			install(CODE "file(REMOVE \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so.3\")")
-			install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink libglfw.so.3.4 \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so.3\")")
-			install(CODE "file(REMOVE \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so\")")
-			install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink libglfw.so.3 \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so\")")
+			install(TARGETS glfw
+				LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR})
 		endforeach()
+	else()
+		install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+		install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+		install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/ExportRuntime)
+		install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
+
 	endif()
 
 	if(UNIX AND NOT APPLE)
@@ -3142,6 +3256,10 @@ if(BUILD_TESTING)
 		# Test runners link the production engine DLL. Copy the complete known
 		# runtime closure beside each category so clean installed-tree runs work.
 		install(FILES $<TARGET_FILE:TerraEngine-Engine>
+			$<TARGET_RUNTIME_DLLS:TerraEngineAudioStressRunner>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Audio
+		)
+		install(FILES $<TARGET_FILE:TerraEngine-Engine>
 			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tests/Tools/Physics
 		)
 		install(FILES $<TARGET_RUNTIME_DLLS:TerraEnginePhysicsGameplayStress>
@@ -3179,12 +3297,14 @@ else()
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/bin/dxc
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
-	# Ship the DXC runtime libraries beside the compiler binary so it can run without system installs.
+	# Ship the authored relative DXC library layout without host library paths.
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxcompiler.so
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxil.so
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+		# The bundled Editor/dxc retains its authored $ORIGIN/../lib RPATH.
+		# Preserve that bin-to-lib relationship instead of relying on host paths.
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/lib
 	)
 endif()
 
@@ -3213,3 +3333,61 @@ endif()
 if(BUILD_TESTING)
 	add_subdirectory(Tests/Tools/CodeQuality)
 endif()
+
+# Visit project-owned directories after target creation, so engine, editor and
+# later test/tool targets receive the same policy. Vendored subprojects retain
+# their own build settings; no dependency source or flags are rewritten here.
+function(terraengine_apply_optimization_policy directory)
+	if(directory MATCHES "/External(/|$)")
+		return()
+	endif()
+	get_property(project_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+	foreach(project_target IN LISTS project_targets)
+		# These bundled dependency targets are declared here rather than inside
+		# their External subdirectories; preserve their own policy as well.
+		if(project_target STREQUAL "basisu" OR project_target STREQUAL "mikktspace" OR project_target STREQUAL "nethost"
+			OR project_target STREQUAL "TerraEngineRecastCore" OR project_target STREQUAL "TerraEngineDetourCore")
+			continue()
+		endif()
+		get_target_property(target_kind ${project_target} TYPE)
+		if(target_kind STREQUAL "INTERFACE_LIBRARY" OR target_kind STREQUAL "UTILITY")
+			continue()
+		endif()
+		if(ipo_supported)
+			get_target_property(automatic_exports ${project_target} WINDOWS_EXPORT_ALL_SYMBOLS)
+			# CMake scans ordinary COFF objects to generate automatic DLL exports.
+			# MSVC /GL objects contain compiler IR instead, which that scanner cannot
+			# read. Keep these DLLs on native objects; explicit-export targets and
+			# executables can still use the supported IPO path.
+			if(MSVC AND automatic_exports)
+				set(target_ipo OFF)
+			else()
+				set(target_ipo ON)
+			endif()
+			foreach(configuration RELEASE RELWITHDEBINFO MINSIZEREL)
+				set_property(TARGET ${project_target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_${configuration} ${target_ipo})
+			endforeach()
+		endif()
+		# Keep stack checks and IEEE finite-value checks: authored input validation
+		# relies on NaN/infinity rejection even in optimized configurations.
+		if(MSVC)
+			target_compile_options(${project_target} PRIVATE
+				$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Ot>
+				$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Ox>
+				/GS
+				$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Oi>)
+			target_link_options(${project_target} PRIVATE
+				$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/OPT:REF>
+				$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/OPT:ICF>)
+		else()
+			target_compile_options(${project_target} PRIVATE
+				$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O3>
+				-fno-fast-math)
+		endif()
+	endforeach()
+	get_property(project_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+	foreach(project_subdirectory IN LISTS project_subdirectories)
+		terraengine_apply_optimization_policy("${project_subdirectory}")
+	endforeach()
+endfunction()
+terraengine_apply_optimization_policy("${CMAKE_CURRENT_SOURCE_DIR}")

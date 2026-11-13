@@ -2,7 +2,7 @@
 	"format": "TerraPrefabUnboundedV1",
 	"sourceId": "navigation-hard-break-source",
 	"objects": [{
-		"uuid": "580000000000000000000000000005",
+		"uuid": "58000000000000000000000000000005",
 		"name": "Unsupported Source Prefab Object",
 		"components": {"NavigationSourceComponent": {}}
 	}]

@@ -1,7 +1,7 @@
 {
 	"format": "TerraSceneUnboundedV1",
 	"objects": [{
-		"uuid": "580000000000000000000000000001",
+		"uuid": "58000000000000000000000000000001",
 		"name": "Supported Navigation Agent Scene Object",
 		"components": {"NavigationAgentComponent": {"active": true, "radiusMetres": 0.4, "heightMetres": 1.8}}
 	}]

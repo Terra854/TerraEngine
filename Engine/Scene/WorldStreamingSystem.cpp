@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
+#include <unordered_map>
 
 namespace TerraEngine::Scene
 {
@@ -20,23 +22,102 @@ namespace TerraEngine::Scene
 
 	RegionInterestPlan BuildDeterministicRegionInterestPlan(const std::vector<ObserverInterest>& interests, const WorldRegionDirectory& directory, const PublishedWorldRegionResidency& current, WorldStreamingBudget budget, std::uint64_t generation)
 	{
+		return BuildDeterministicRegionInterestPlan(interests, directory, current, budget, generation, nullptr);
+	}
+	RegionInterestPlan BuildDeterministicRegionInterestPlan(const std::vector<ObserverInterest>& interests, const WorldRegionDirectory& directory, const PublishedWorldRegionResidency& current, WorldStreamingBudget budget, std::uint64_t generation, const RegionInterestPlanningObserver* observer)
+	{
 		RegionInterestPlan plan{};
 		plan.generation = generation;
 		if (budget.maximumResidentRegions == 0U) return plan;
 		struct Candidate { WorldRegionKey key{}; int priority = 0; };
-		std::vector<Candidate> candidates;
-		for (const ObserverInterest& interest : interests)
+		std::unordered_map<WorldRegionKey, int, WorldRegionKeyHash> candidatePriorities;
+		std::optional<std::vector<WorldRegionDirectoryEntry>> sparseEntries;
+		const auto increment = [](std::uint64_t& value) {
+			if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+		};
+		const auto reject = [&](std::size_t index, RegionInterestPlanningRejectionReason reason) {
+			increment(plan.diagnostics.rejectedCount);
+			if (plan.diagnostics.recentRejections.size() == 64u)
+				plan.diagnostics.recentRejections.erase(plan.diagnostics.recentRejections.begin());
+			plan.diagnostics.recentRejections.push_back({index, reason});
+		};
+		const auto addCandidate = [&](const WorldRegionKey& key, int priority) {
+			auto [entry, inserted] = candidatePriorities.try_emplace(key, priority);
+			if (!inserted) entry->second = std::max(entry->second, priority);
+		};
+		// Unsigned subtraction preserves the full [0,UINT64_MAX] distance even
+		// when signed keys straddle INT64_MIN/MAX; no signed difference overflows.
+		const auto distance = [](std::int64_t left, std::int64_t right) -> std::uint64_t {
+			return left >= right ? static_cast<std::uint64_t>(left) - static_cast<std::uint64_t>(right)
+				: static_cast<std::uint64_t>(right) - static_cast<std::uint64_t>(left);
+		};
+		const auto checkedAdd = [](std::int64_t value, std::int64_t delta, std::int64_t& result) {
+			if ((delta > 0 && value > (std::numeric_limits<std::int64_t>::max)() - delta)
+				|| (delta < 0 && value < (std::numeric_limits<std::int64_t>::min)() - delta)) return false;
+			result = value + delta;
+			return true;
+		};
+		for (std::size_t index = 0u; index < interests.size(); ++index)
 		{
-			if (interest.observerId.empty() || !std::isfinite(interest.radiusMetres) || interest.radiusMetres < 0.0) continue;
+			const ObserverInterest& interest = interests[index];
+			if (interest.observerId.empty()) { reject(index, RegionInterestPlanningRejectionReason::InvalidObserver); continue; }
+			if (!std::isfinite(interest.radiusMetres) || interest.radiusMetres < 0.0)
+			{ reject(index, RegionInterestPlanningRejectionReason::InvalidRadius); continue; }
 			WorldRegionKey center{};
-			if (WorldPositionToRegionKey(interest.position, center) != WorldCoordinateError::None) continue;
-			const std::int64_t radius = static_cast<std::int64_t>(std::ceil(interest.radiusMetres / kWorldRegionEdgeMetres));
-			for (std::int64_t z = -radius; z <= radius; ++z) for (std::int64_t y = -radius; y <= radius; ++y) for (std::int64_t x = -radius; x <= radius; ++x)
+			if (WorldPositionToRegionKey(interest.position, center) != WorldCoordinateError::None)
+			{ reject(index, RegionInterestPlanningRejectionReason::InvalidPosition); continue; }
+			const double observedRadius = std::ceil(interest.radiusMetres / kWorldRegionEdgeMetres);
+			// INT64_MAX rounds up to2^63 as double; the exclusive exact bound
+			// rejects before narrowing and also leaves -radius representable.
+			if (!std::isfinite(observedRadius) || observedRadius < 0.0 || observedRadius >= 0x1p63)
+			{ reject(index, RegionInterestPlanningRejectionReason::RadiusUnrepresentable); continue; }
+			if (observer && observer->beforeRadiusNarrowing) observer->beforeRadiusNarrowing(observer->context, observedRadius);
+			const auto radius = static_cast<std::int64_t>(observedRadius);
+			const auto unsignedRadius = static_cast<std::uint64_t>(radius);
+			const std::uint64_t side = 2u * unsignedRadius + 1u;
+			const auto directorySize = directory.Size();
+			if (directorySize == 0u) continue;
+			// Division checks choose the cheaper strategy without ever computing
+			// an overflowing cubic work estimate. Radius zero remains a single
+			// lookup even when the directory contains millions of unrelated keys.
+			const bool useCube = side <= directorySize && side <= directorySize / side
+				&& side <= (directorySize / side) / side;
+			if (useCube)
 			{
-				WorldRegionKey key{ center.x + x, center.y + y, center.z + z };
-				if (directory.Find(key)) candidates.push_back({ key, PriorityValue(interest.priority) });
+				increment(plan.diagnostics.cubeInterests);
+				for (std::uint64_t z = 0u; z < side; ++z)
+					for (std::uint64_t y = 0u; y < side; ++y)
+						for (std::uint64_t x = 0u; x < side; ++x)
+						{
+							WorldRegionKey key{};
+							if (!checkedAdd(center.x, static_cast<std::int64_t>(x) - radius, key.x)
+								|| !checkedAdd(center.y, static_cast<std::int64_t>(y) - radius, key.y)
+								|| !checkedAdd(center.z, static_cast<std::int64_t>(z) - radius, key.z)) continue;
+							increment(plan.diagnostics.directoryExaminations);
+							if (observer && observer->beforeDirectoryLookup) observer->beforeDirectoryLookup(observer->context, key);
+							if (directory.Find(key)) addCandidate(key, PriorityValue(interest.priority));
+						}
+			}
+			else
+			{
+				increment(plan.diagnostics.sparseInterests);
+				// Copy once on demand; normal small-radius planning pays no full
+				// directory copy. Candidate ownership is bounded to unique keys.
+				if (!sparseEntries) sparseEntries = directory.Entries();
+				for (const auto& entry : *sparseEntries)
+				{
+					increment(plan.diagnostics.directoryExaminations);
+					if (observer && observer->beforeDirectoryLookup) observer->beforeDirectoryLookup(observer->context, entry.key);
+					if (distance(center.x, entry.key.x) <= unsignedRadius
+						&& distance(center.y, entry.key.y) <= unsignedRadius
+						&& distance(center.z, entry.key.z) <= unsignedRadius)
+						addCandidate(entry.key, PriorityValue(interest.priority));
+				}
 			}
 		}
+		std::vector<Candidate> candidates;
+		candidates.reserve(candidatePriorities.size());
+		for (const auto& [key, priority] : candidatePriorities) candidates.push_back({key, priority});
 		std::sort(candidates.begin(), candidates.end(), [](const Candidate& left, const Candidate& right) { return left.priority != right.priority ? left.priority > right.priority : left.key < right.key; });
 		std::unordered_set<WorldRegionKey, WorldRegionKeyHash> selected;
 		for (const Candidate& candidate : candidates)
@@ -57,7 +138,7 @@ namespace TerraEngine::Scene
 	}
 
 	WorldStreamingSystem& WorldStreamingSystem::Instance() { static WorldStreamingSystem instance; return instance; }
-	void WorldStreamingSystem::Initialize() { std::scoped_lock lock(mutex); observerInterests.clear(); queuedPublications.clear(); interestPlan = {}; residency = {}; initialized = true; }
+	void WorldStreamingSystem::Initialize() { std::scoped_lock lock(mutex); observerInterests.clear(); queuedPublications.clear(); interestPlan = {}; residency = {}; publicationDiagnostics = {}; initialized = true; }
 	void WorldStreamingSystem::Update(float) {
 		// Direct hosts use the same bounded planning functions as scheduler jobs.
 		// Production frames normally invoke these through DeclareFrameWorkloads.
@@ -71,7 +152,18 @@ namespace TerraEngine::Scene
 		using namespace TerraEngine::Scheduling;
 		SystemDeclaration declaration{}; declaration.name = SystemName(); declaration.phase = "Streaming";
 		declaration.reads = { kResourceWorldRegionDirectory, kResourceObserverInterests, kResourcePublishedWorldRegionResidency };
-		declaration.writes = { kResourcePreparedWorldRegionResidency }; declaration.mainThread = false; declaration.usesDefaultMetadata = false; declaration.profilingLabel = "World Region Streaming";
+		declaration.writes = { kResourcePreparedWorldRegionResidency };
+		declaration.mainThread = false;
+		// The scheduled item only prepares typed values. Live publication is a
+		// separate coordinator operation at the existing MainEngine Frame End edge.
+		declaration.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
+		declaration.boundaryClassification = HardBoundaryClassification::PartiallyWorkerSafe;
+		declaration.hardBoundary = true;
+		declaration.safeSubwork = "Reads system-owned observer interests and residency under the system lock, uses locked directory lookups or snapshots, and prepares bounded exact-key interest/retirement candidates and copied diagnostics without publishing live residency.";
+		declaration.protectedCommit = "At the existing coordinator Frame End boundary, expires directory leases, validates prepared identities/revisions and retirement leases, writes directory residency transitions and ResourceManager region asset needs, then swaps the complete PublishedWorldRegionResidency snapshot. Rejected batches preserve the prior residency; invalid queued work retires for later progress.";
+		declaration.protectedReason = "Directory transitions, resource residency ownership and published snapshot visibility remain protected Frame End writes; workers only prepare candidate values.";
+		declaration.usesDefaultMetadata = false;
+		declaration.profilingLabel = "World Region Streaming";
 		return declaration;
 	}
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> WorldStreamingSystem::DeclareFrameWorkloads(float)
@@ -92,6 +184,7 @@ namespace TerraEngine::Scene
 	}
 	RegionInterestPlan WorldStreamingSystem::CurrentInterestPlan() const { std::scoped_lock lock(mutex); return interestPlan; }
 	PublishedWorldRegionResidency WorldStreamingSystem::CurrentResidency() const { std::scoped_lock lock(mutex); return residency; }
+	WorldStreamingPublicationDiagnostics WorldStreamingSystem::GetPublicationDiagnostics() const { std::scoped_lock lock(mutex); return publicationDiagnostics; }
 	void WorldStreamingSystem::PrepareInterestPlan()
 	{
 		std::scoped_lock lock(mutex);
@@ -112,11 +205,37 @@ namespace TerraEngine::Scene
 		if (queuedPublications.empty() && interestPlan.retirements.empty()) return false;
 		PublishedWorldRegionResidency next = residency;
 		next.invalidatedRegions.clear();
-		for (const PreparedRegionPublication& publication : queuedPublications)
-		{
+		// Reject this boundary atomically, but retire permanently invalid prepared
+		// output so it cannot hold a queue slot or block later retirement forever.
+		// Valid entries keep their order and wait for the next protected boundary.
+		const auto rejectedBegin = std::remove_if(queuedPublications.begin(), queuedPublications.end(), [&](const PreparedRegionPublication& publication) {
 			const std::optional<WorldRegionDirectoryEntry> entry = directory.Find(publication.key);
 			if (publication.cancelled || !publication.snapshot || !entry || entry->revision != publication.expectedDirectoryRevision || entry->state != WorldRegionState::Prepared
-				|| publication.snapshot->key != publication.key || publication.snapshot->directoryRevision != entry->revision || publication.snapshot->contentHash != entry->contentHash) return false;
+				|| publication.snapshot->key != publication.key || publication.snapshot->directoryRevision != entry->revision || publication.snapshot->contentHash != entry->contentHash) {
+				// Report the rejected observation without failing a newer directory
+				// revision or publishing any part of this rejected residency batch.
+				std::string reason = publication.cancelled ? "cancelled prepared region"
+					: !publication.snapshot ? "missing prepared region snapshot"
+					: !entry ? "missing region directory entry"
+					: entry->revision != publication.expectedDirectoryRevision ? "stale region directory revision"
+					: entry->state != WorldRegionState::Prepared ? "region is not prepared"
+					: "prepared region metadata mismatch";
+				if (publicationDiagnostics.rejectedCount != std::numeric_limits<std::uint64_t>::max()) ++publicationDiagnostics.rejectedCount;
+				constexpr std::size_t maximumReceipts = 64U;
+				if (publicationDiagnostics.recentRejections.size() == maximumReceipts) publicationDiagnostics.recentRejections.erase(publicationDiagnostics.recentRejections.begin());
+				// Retire only the rejected revision's preparation. A newer directory
+				// owner must remain untouched, and Failed permits a fresh request.
+				if (entry && entry->revision == publication.expectedDirectoryRevision
+					&& entry->state == WorldRegionState::Prepared)
+					(void)directory.Transition(publication.key, WorldRegionState::Failed, reason);
+				publicationDiagnostics.recentRejections.push_back({publication.key, publication.expectedDirectoryRevision, entry ? entry->revision : 0U, std::move(reason)});
+				return true;
+			}
+			return false;
+		});
+		if (rejectedBegin != queuedPublications.end()) {
+			queuedPublications.erase(rejectedBegin, queuedPublications.end());
+			return false;
 		}
 		for (const WorldRegionKey& key : interestPlan.retirements)
 		{

@@ -6,6 +6,7 @@
 #include "Animation/Diagnostics/AnimationDiagnostics.h"
 #include "Audio/AudioDiagnostics.h"
 #include "Core/Scheduling/FrameWorkload.h"
+#include "Core/Scheduling/FrameWorkloadProfiling.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/RenderTypes.h"
@@ -893,6 +894,8 @@ Profiler::Profiler()
 
 Profiler::~Profiler()
 {
+	// Capture invalidation belongs to explicit Stop/Reset while scheduler storage
+	// is alive. Static destruction only settles this profiler's journal owner.
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		journalWorkerStopping = true;
@@ -1264,6 +1267,9 @@ void Profiler::BeginFrame(bool playModeActive)
 	lateSampleCount = 0u;
 	hotPath->activeFrameStartNanoseconds.store(frameStartNanoseconds, std::memory_order_release);
 	hotPath->activeFrameToken.store(frameToken, std::memory_order_release);
+	// Register existing identities; only the actual scheduler may publish availability.
+	TerraEngine::Scheduling::BeginFrameWorkloadProfilingCapture({
+		hotPath->sessionGeneration.load(std::memory_order_acquire), frameToken});
 	statusText = "Recording";
 	UpdateFastRecordingFlagsLocked();
 }
@@ -1280,6 +1286,7 @@ void Profiler::AbandonFrameAfterFailure() noexcept
 	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
 	try
 	{
+		TerraEngine::Scheduling::InvalidateFrameWorkloadProfilingCapture();
 		std::lock_guard<std::mutex> lock(mutex);
 		currentFrame.reset();
 		currentDeferredSamples.reset();
@@ -1327,8 +1334,11 @@ void Profiler::EndFrame()
 	const std::int64_t collectionStartNanoseconds = SteadyNowNanoseconds();
 	const auto physicsSnapshot = TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot();
 	const auto audioSnapshot = TerraEngine::Audio::AcquireAudioDiagnosticsSnapshot();
-	std::vector<WorkloadExecutionRecord> workloadExecutionSnapshot =
-		TerraEngine::Scheduling::TakeLatestFrameWorkloadExecutionRecordsForProfiling();
+	const auto workloadIdentity = TerraEngine::Scheduling::FrameWorkloadProfilingIdentity{
+		hotPath->sessionGeneration.load(std::memory_order_acquire),
+		hotPath->activeFrameToken.load(std::memory_order_acquire)};
+	auto workloadPublication = TerraEngine::Scheduling::TakeLatestFrameWorkloadProfilingSnapshot(workloadIdentity);
+	auto& workloadExecutionSnapshot = workloadPublication.records;
 	thread_local std::vector<WorkerTelemetryRecord> workerCounterScratch;
 	workerCounterScratch.clear();
 	workerCounterScratch.reserve(ThreadPool::instance().getThreadCount());
@@ -1365,6 +1375,14 @@ void Profiler::EndFrame()
 	taskRecordingActive.store(false, std::memory_order_release);
 	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
 	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	// The copied scheduler observation was acquired before the document lock.
+	// Recheck the existing tokens here too: a replaced session/frame cannot
+	// receive rows taken for its predecessor, even if recording is active again.
+	if (workloadPublication.identity != TerraEngine::Scheduling::FrameWorkloadProfilingIdentity{sessionGeneration, frameToken})
+	{
+		workloadPublication.available = false;
+		workloadExecutionSnapshot.clear();
+	}
 	const std::int64_t frameStartNanoseconds =
 		hotPath->activeFrameStartNanoseconds.load(std::memory_order_acquire);
 	const std::int64_t wallDurationNanoseconds =
@@ -1518,6 +1536,7 @@ void Profiler::EndFrame()
 	// The copy keeps profiler storage independent of workload callbacks and live
 	// system state while preserving queue/worker/boundary diagnostics.
 	currentFrame->workloadExecutions = std::move(workloadExecutionSnapshot);
+	currentFrame->workloadExecutionsAvailable = workloadPublication.available;
 	for (const WorkloadExecutionRecord& execution : currentFrame->workloadExecutions)
 	{
 		ProtectedBoundaryRecord boundary;
@@ -2511,6 +2530,9 @@ void Profiler::CommitCurrentFrameToJournalLocked()
 	const std::int64_t sealingStartNanoseconds = SteadyNowNanoseconds();
 	ProfilerSealedFrame sealed;
 	sealed.frame = std::move(*currentFrame);
+	// Invalid optional scheduler rows are accounted as unavailable evidence,
+	// rather than poisoning the strict encoder and terminating the whole journal.
+	PrepareProfilerJournalWorkloadEvidence(sealed);
 	sealed.deferredSamples = std::move(currentDeferredSamples);
 	currentFrame.reset();
 	sealed.needsDeferredAggregation = true;
@@ -2604,6 +2626,8 @@ void Profiler::CommitCurrentFrameToJournalLocked()
 				{
 					const std::uint64_t records = sealed.frame.workloadExecutions.size();
 					sealed.frame.workloadExecutions.clear();
+					// Pressure discarded detail is unavailable, never an observed empty pass.
+					sealed.frame.workloadExecutionsAvailable = false;
 					recordLoss(lossClass, records, 0u);
 				}
 				break;
@@ -3317,6 +3341,7 @@ void Profiler::UpdateFastRecordingFlagsLocked()
 			|| (settings.detailLevel == ProfilerCaptureDetailLevel::Sampled
 				&& currentFrame->frameIndex % std::max(1u, settings.sampleIntervalFrames) == 0u));
 	frameRecordingActive.store(frameActive, std::memory_order_release);
+	if (!frameActive) TerraEngine::Scheduling::InvalidateFrameWorkloadProfilingCapture();
 	// Optional scopes span every worker and contend on the profiler's capture
 	// buffers. Apply the selected detail level during collection instead of
 	// filling those bounded rings on frames whose hierarchy will not be retained.

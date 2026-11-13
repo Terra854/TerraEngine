@@ -318,7 +318,9 @@ void RegisterComponentAccess(const std::string& name)
 						}
 						if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
 							if (key == "BindingsJson") {
-								if (!source.is_string() || !nlohmann::json::parse(source.get<std::string>()).is_array()) {
+								// Syntax errors are ordinary authored-input rejection, not
+								// exceptions escaping transaction preparation.
+								if (!source.is_string() || !nlohmann::json::parse(source.get<std::string>(), nullptr, false).is_array()) {
 									reason = "Script bindings require a serialized array."; return {};
 								}
 							}
@@ -327,7 +329,7 @@ void RegisterComponentAccess(const std::string& name)
 							reason = "Invalid authored property value: " + key; return {};
 						}
 						if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
-							if (key == "BindingsJson" && candidate.GetBindings().size() != nlohmann::json::parse(source.get<std::string>()).size()) {
+							if (key == "BindingsJson" && candidate.GetBindings().size() != nlohmann::json::parse(source.get<std::string>(), nullptr, false).size()) {
 								reason = "Malformed authored script binding record."; return {};
 							}
 						}
@@ -354,8 +356,10 @@ void RegisterComponentAccess(const std::string& name)
 				}
 				if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
 					if (property == "BindingsJson") {
+						// Detached preparation follows the same nonthrowing rejection
+						// contract as authored component decoding above.
 						if (!TerraEngine::Reflection::IsType<std::string>(converted)
-							|| !nlohmann::json::parse(TerraEngine::Reflection::GetValue<std::string>(converted)).is_array()) {
+							|| !nlohmann::json::parse(TerraEngine::Reflection::GetValue<std::string>(converted), nullptr, false).is_array()) {
 							reason = "Script bindings require a serialized authored array."; return {};
 						}
 					}
@@ -369,7 +373,7 @@ void RegisterComponentAccess(const std::string& name)
 				}
 				if constexpr (std::is_same_v<ComponentType, ScriptComponent>) {
 					if (property == "BindingsJson" && prepared->value.GetBindings().size()
-						!= nlohmann::json::parse(TerraEngine::Reflection::GetValue<std::string>(converted)).size()) {
+						!= nlohmann::json::parse(TerraEngine::Reflection::GetValue<std::string>(converted), nullptr, false).size()) {
 						reason = "Malformed authored script binding record."; return {};
 					}
 				}

@@ -23,9 +23,26 @@ namespace TerraEngine::EditorTests
 			registry.Add("VirtualGeometry.Editor.Automation.UnavailableHardwareIsNotPass",
 			[](TestContext &context)
 			{
-			context.Expect(true,
-					"Unavailable hardware remains an explicit unavailable state in the matrix "
-					"and cannot pass by zero substitution.");
+				using namespace TerraEngine::Editor::Automation;
+				// Inject a provider prerequisite failure, then invoke the discovered
+				// production handler to prove discovery does not turn it into success.
+				EditorDiagnosticsAutomationProvider provider([](std::string_view) {
+					return AutomationHandler([](const AutomationRequestContext&) {
+						return AutomationDispatchResult{false, ErrorCategory::Unavailable,
+							"Native hardware evidence is unavailable.", nlohmann::json::object()};
+					});
+				});
+				const auto capabilities = provider.GetCapabilities();
+				const auto found = std::find_if(capabilities.begin(), capabilities.end(), [](const auto& capability) {
+					return capability.descriptor.name == "renderer.virtualGeometry.stats";
+				});
+				context.Expect(found != capabilities.end() && static_cast<bool>(found->handler),
+					"The production stats capability must have a callable handler.");
+				const auto result = found->handler(AutomationRequestContext{});
+				context.Expect(!result.ok && result.error == ErrorCategory::Unavailable,
+					"Unavailable hardware must remain a prerequisite failure, never a successful zero sample.");
+				context.Expect(!result.data.contains("gpuNanoseconds"),
+					"A failed native observation cannot invent a zero timing measurement.");
 			});
 		registry.Add("VirtualGeometry.Editor.Automation.RouteLocksAndDiagnosticSnapshotsPreserveUnavailableEvidence",
 			[](TestContext& context)

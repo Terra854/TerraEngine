@@ -15,6 +15,8 @@
 #include <system_error>
 #include <unordered_map>
 #include <utility>
+#include <algorithm>
+#include <exception>
 
 #if defined(_WIN32)
 	#ifndef NOMINMAX
@@ -25,6 +27,7 @@
 	#include <cerrno>
 	#include <csignal>
 	#include <unistd.h>
+	#include <sys/stat.h>
 #endif
 
 namespace {
@@ -71,6 +74,92 @@ namespace {
 #else
 		return path;
 #endif
+	}
+
+	// Inspect entries without following redirects. A junction or symbolic link
+	// inside an output overlay must never redirect writes to unrelated content.
+	std::filesystem::file_type PublicationType(const std::filesystem::path& path, std::error_code& error) {
+		const auto status = std::filesystem::symlink_status(NativeIoPath(path), error);
+		if(status.type() == std::filesystem::file_type::not_found) { error.clear(); return status.type(); }
+		if(error) return std::filesystem::file_type::none;
+#if defined(_WIN32)
+		const DWORD attributes = GetFileAttributesW(NativeIoPath(path).c_str());
+		if(attributes == INVALID_FILE_ATTRIBUTES) { error = std::error_code(static_cast<int>(GetLastError()), std::system_category()); return std::filesystem::file_type::none; }
+		if((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) { error = std::make_error_code(std::errc::too_many_symbolic_link_levels); return std::filesystem::file_type::none; }
+#endif
+		if(std::filesystem::is_symlink(status)) { error = std::make_error_code(std::errc::too_many_symbolic_link_levels); return std::filesystem::file_type::none; }
+		return status.type();
+	}
+
+	bool IsPublicationVolume(const std::filesystem::path& scratch, const std::filesystem::path& directory, std::error_code& error) {
+#if !defined(_WIN32)
+		// Mount points can be ordinary POSIX directories. Reject cross-device
+		// targets before publishing, because rename would not be atomic there.
+		struct stat source{}, destination{};
+		if(::stat(scratch.c_str(), &source) != 0 || ::stat(directory.c_str(), &destination) != 0) {
+			error = std::error_code(errno, std::generic_category()); return false;
+		}
+		if(source.st_dev != destination.st_dev) { error = std::make_error_code(std::errc::cross_device_link); return false; }
+#else
+		// All Windows mount/junction reparse entries below the canonical output
+		// root are rejected by PublicationType; scratch is its sibling volume.
+		(void)scratch; (void)directory; (void)error;
+#endif
+		return true;
+	}
+
+	// Both paths are private siblings on the output volume. Never truncate the
+	// visible destination: an unsuccessful replace leaves its old bytes intact.
+	void ReplacePublicationFile(const std::filesystem::path& candidate, const std::filesystem::path& destination, std::error_code& error) {
+		error.clear();
+#if defined(_WIN32)
+		if(!MoveFileExW(NativeIoPath(candidate).c_str(), NativeIoPath(destination).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+			error = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+#else
+		std::filesystem::rename(NativeIoPath(candidate), NativeIoPath(destination), error);
+#endif
+	}
+
+	std::string PathToUtf8(const std::filesystem::path& path);
+	bool HasPendingPublicationJournal(const std::filesystem::path& scratch, std::error_code& error,
+		bool* completed, std::string_view runId, std::string_view expectedOwner = {}) {
+		if(completed) *completed = false;
+		const auto type = PublicationType(scratch, error);
+		if(error || type == std::filesystem::file_type::not_found) return false;
+		if(type != std::filesystem::file_type::directory) { error = std::make_error_code(std::errc::not_a_directory); return false; }
+		for(std::filesystem::directory_iterator iterator(NativeIoPath(scratch), error), end; iterator != end && !error; iterator.increment(error)) {
+			if(iterator->path().filename().native().starts_with(std::filesystem::path(".publication-").native())) return true;
+			// Only Commit's atomic directory rename enters this namespace. Unlike
+			// a file inside the journal, the name survives partially failed recursive
+			// cleanup: remaining originals can never become rollback evidence again.
+			const auto prefix = std::filesystem::path(".completed-publication-").native();
+			if(iterator->path().filename().native().starts_with(prefix)) {
+				const auto name = PathToUtf8(iterator->path().filename());
+				const auto token = std::string_view(name).substr(std::string_view(".completed-publication-").size());
+				// Generic same-run cleanup accepts only the format emitted by
+				// MakeOwnerToken, never a foreign/malformed completed-looking name.
+				bool valid = token.starts_with(std::string(runId) + "-");
+				std::string_view numbers = valid ? token.substr(runId.size() + 1) : std::string_view{};
+				for(unsigned field = 0; field != 3 && valid; ++field) {
+					const auto end = numbers.find('-');
+					const auto number = numbers.substr(0, end);
+					std::uint64_t value = 0;
+					const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+					valid = !number.empty() && parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size() && value != 0
+						&& (field == 2 ? end == std::string_view::npos : end != std::string_view::npos);
+					if(valid && end != std::string_view::npos) numbers.remove_prefix(end + 1);
+				}
+				if(!valid
+					|| PublicationType(iterator->path(), error) != std::filesystem::file_type::directory || error) {
+					if(!error) error = std::make_error_code(std::errc::invalid_argument);
+					return true;
+				}
+				// A completion from an older same-run owner is disposable, but cannot
+				// authorize the current dead owner's backup deletion or lock release.
+				if(completed && (expectedOwner.empty() || token == expectedOwner)) *completed = true;
+			}
+		}
+		return false;
 	}
 
 	/// Converts a path to portable UTF-8 without depending on the process locale.
@@ -400,66 +489,284 @@ bool ExportOutputTransaction::Commit(std::string& error, const std::shared_ptr<E
 }
 
 bool ExportOutputTransaction::Commit(std::string& error) {
+	// Allocations and path conversions can throw after an earlier file publishes.
+	// Unwind the tracked prefix without replacing that original exception with a
+	// secondary cleanup exception. Unrestored originals remain in the journal.
+	struct ExceptionRollback {
+		ExportOutputTransaction& owner;
+		int entered = std::uncaught_exceptions();
+		~ExceptionRollback() noexcept {
+			if(std::uncaught_exceptions() <= entered) return;
+			try { std::string failure; if(!owner.RollbackPublication(failure)) owner.AppendCleanupWarning(std::move(failure)); }
+			catch(...) { /* Preserve the original exception and retryable journal. */ }
+		}
+	} exceptionRollback{*this};
 	error.clear();
 	if(m_State != ExportOutputTransactionState::StagedAndValidated || !m_OwnsLock) {
 		error = "output_publication_state_invalid: Commit requires a validated staging directory and an owned lock.";
 		return false;
 	}
 
-	std::error_code typeError;
-	m_HadPreviousOutput = std::filesystem::exists(NativeIoPath(m_FinalDirectory), typeError);
-	if(typeError) {
-		error = "output_publication_failed: Could not inspect the previous output: " + typeError.message();
+	if(m_PublicationJournalOwned) {
+		error = "output_publication_state_invalid: Previous publication rollback is still pending.";
+		return false;
+	}
+	std::error_code publishError;
+	const auto rootType = PublicationType(m_FinalDirectory, publishError);
+	if(publishError || (rootType != std::filesystem::file_type::not_found && rootType != std::filesystem::file_type::directory)) {
+		error = "output_publication_failed: Final output must be an ordinary directory.";
+		return false;
+	}
+	m_HadPreviousOutput = rootType != std::filesystem::file_type::not_found;
+	if(PublicationType(m_StagingDirectory, publishError) != std::filesystem::file_type::directory || publishError) {
+		error = "output_publication_failed: Validated staging is missing or redirected.";
+		return false;
+	}
+	// ExportPipeline deliberately removes packaging scratch before validation.
+	// Recreate only this owned, reserved sibling when absent; never follow a
+	// replacement junction or adopt a conflicting entry as a journal parent.
+	if(!IsSafeTransactionSibling(m_ScratchDirectory, ".scratch")) {
+		error = "output_publication_failed: Publication scratch is outside its reserved sibling.";
+		return false;
+	}
+	const auto scratchType = PublicationType(m_ScratchDirectory, publishError);
+	if(!publishError && scratchType == std::filesystem::file_type::not_found) {
+		if(!std::filesystem::create_directory(NativeIoPath(m_ScratchDirectory), publishError) && !publishError)
+			publishError = std::make_error_code(std::errc::file_exists);
+	} else if(!publishError && scratchType != std::filesystem::file_type::directory) {
+		publishError = std::make_error_code(std::errc::not_a_directory);
+	}
+	if(publishError) {
+		error = "output_publication_failed: Could not safely reserve publication scratch: " + publishError.message();
 		return false;
 	}
 
-	// Publish as an in-place overlay so shells, debuggers, and other tools can
-	// keep the destination directory open. Matching files receive the staged
-	// version, while paths absent from staging remain entirely user-owned and are
-	// never deleted as an implicit side effect of export.
-	std::error_code publishError;
-	std::filesystem::copy(
-		NativeIoPath(m_StagingDirectory),
-		NativeIoPath(m_FinalDirectory),
-		std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::recursive,
-		publishError);
+	// Preflight the complete overlay before creating even one final directory.
+	// Unmentioned destination content is never enumerated, copied, or removed.
+	std::vector<std::filesystem::path> directories{m_FinalDirectory}, files;
+	std::vector<PublicationDirectoryTime> directoryTimes;
+	for(std::filesystem::recursive_directory_iterator iterator(NativeIoPath(m_StagingDirectory), publishError), end;
+		iterator != end && !publishError; iterator.increment(publishError)) {
+		const auto type = PublicationType(iterator->path(), publishError);
+		if(publishError) break;
+		const auto relative = iterator->path().lexically_relative(NativeIoPath(m_StagingDirectory));
+		if(type == std::filesystem::file_type::directory) directories.push_back(m_FinalDirectory / relative);
+		else if(type == std::filesystem::file_type::regular) files.push_back(relative);
+		else { publishError = std::make_error_code(std::errc::operation_not_supported); break; }
+	}
+	std::sort(directories.begin(), directories.end());
+	std::sort(files.begin(), files.end());
+	for(const auto& directory : directories) {
+		if(publishError) break;
+		const auto type = PublicationType(directory, publishError);
+		if(!publishError && type != std::filesystem::file_type::not_found && type != std::filesystem::file_type::directory)
+			publishError = std::make_error_code(std::errc::not_a_directory);
+		if(!publishError && type == std::filesystem::file_type::directory) {
+			if(!IsPublicationVolume(m_ScratchDirectory, directory, publishError)) break;
+			const auto time = std::filesystem::last_write_time(NativeIoPath(directory), publishError);
+			if(!publishError) directoryTimes.push_back({directory, time});
+		}
+	}
+	for(const auto& relative : files) {
+		if(publishError) break;
+		const auto type = PublicationType(m_FinalDirectory / relative, publishError);
+		if(!publishError && type != std::filesystem::file_type::not_found && type != std::filesystem::file_type::regular)
+			publishError = std::make_error_code(std::errc::invalid_argument);
+	}
 	if(publishError) {
-		error = "output_publication_failed: Could not publish the validated staging directory: " + publishError.message();
+		error = "output_publication_failed: Unsafe overlay path or type conflict: " + publishError.message();
 		return false;
 	}
+
+	const auto journal = m_ScratchDirectory / (".publication-" + m_OwnerToken);
+	// Copy the path before creation; acquiring ownership afterward is a no-throw
+	// bool update. A failed exclusive create never owns an existing journal.
+	m_PublicationJournalDirectory = journal;
+	if(!std::filesystem::create_directory(NativeIoPath(journal), publishError) || publishError) {
+		m_PublicationJournalDirectory.clear();
+		error = "output_publication_failed: Could not exclusively reserve publication journal: " + publishError.message();
+		return false;
+	}
+	m_PublicationJournalOwned = true;
+	m_PublicationDirectoryTimes = std::move(directoryTimes);
+	m_PublicationFiles.reserve(files.size());
+	for(const auto& relative : files) {
+		PublicationFile entry;
+		entry.destination = m_FinalDirectory / relative;
+		entry.replacement = journal / (std::to_string(m_PublicationFiles.size()) + ".candidate");
+		entry.original = journal / (std::to_string(m_PublicationFiles.size()) + ".original");
+		const auto type = PublicationType(entry.destination, publishError);
+		if(publishError) break;
+		entry.hadOriginal = type == std::filesystem::file_type::regular;
+		if(entry.hadOriginal) {
+			entry.originalTime = std::filesystem::last_write_time(NativeIoPath(entry.destination), publishError);
+			if(!publishError) std::filesystem::copy_file(NativeIoPath(entry.destination), NativeIoPath(entry.original), std::filesystem::copy_options::none, publishError);
+		}
+		if(!publishError) std::filesystem::copy_file(NativeIoPath(m_StagingDirectory / relative), NativeIoPath(entry.replacement), std::filesystem::copy_options::none, publishError);
+		if(publishError) break;
+		m_PublicationFiles.push_back(std::move(entry));
+	}
+	// Allocate every ownership record before the first final-tree mutation.
+	// Merely reserving vector capacity would still allow a path copy to throw
+	// after mkdir. Once mkdir succeeds, marking its bool cannot allocate.
+	m_PublicationDirectories.reserve(directories.size());
+	for(const auto& directory : directories) m_PublicationDirectories.push_back({directory, false});
+	for(auto& directory : m_PublicationDirectories) {
+		if(publishError) break;
+		const auto type = PublicationType(directory.path, publishError);
+		if(publishError) break;
+		if(type == std::filesystem::file_type::not_found) {
+			if(std::filesystem::create_directory(NativeIoPath(directory.path), publishError)) directory.created = true;
+			else if(!publishError) publishError = std::make_error_code(std::errc::file_exists);
+		} else if(type != std::filesystem::file_type::directory) publishError = std::make_error_code(std::errc::not_a_directory);
+	}
+	for(auto& entry : m_PublicationFiles) {
+		if(publishError) break;
+		const auto type = PublicationType(entry.destination, publishError);
+		if(!publishError && type != (entry.hadOriginal ? std::filesystem::file_type::regular : std::filesystem::file_type::not_found))
+			publishError = std::make_error_code(std::errc::file_exists);
+		if(!publishError) ReplacePublicationFile(entry.replacement, entry.destination, publishError);
+		if(!publishError) entry.published = true;
+	}
+	if(publishError) {
+		error = "output_publication_failed: Could not publish validated overlay: " + publishError.message();
+		std::string rollbackError;
+		if(!RollbackPublication(rollbackError)) error += " " + rollbackError;
+		return false;
+	}
+	// Persist the decision before releasing either journal ownership or the lock.
+	// Completion is a sibling-directory rename, so partial cleanup cannot erase
+	// a marker first and misclassify leftover originals as an interrupted commit.
+	const auto completedJournal = m_ScratchDirectory / (".completed-publication-" + m_OwnerToken);
+	if(PublicationType(completedJournal, publishError) != std::filesystem::file_type::not_found && !publishError)
+		publishError = std::make_error_code(std::errc::file_exists);
+	if(!publishError) ReplacePublicationFile(journal, completedJournal, publishError);
+	if(publishError) {
+		error = "output_publication_failed: Could not record completed publication: " + publishError.message();
+		std::string rollbackError;
+		if(!RollbackPublication(rollbackError)) error += " " + rollbackError;
+		return false;
+	}
+	// Once every replacement succeeds, the originals are cleanup-only. A later
+	// Rollback must retain this published build rather than undoing success.
+	m_PublicationFiles.clear();
+	m_PublicationDirectories.clear();
+	m_PublicationDirectoryTimes.clear();
+	m_PublicationJournalDirectory.clear();
+	m_PublicationJournalOwned = false;
 
 	m_WasPublished = true;
 	m_State = ExportOutputTransactionState::Published;
-	std::string metadataWarning;
-	if(!WriteLockMetadata(metadataWarning)) {
-		AppendCleanupWarning(std::move(metadataWarning));
-	}
+	try {
+		std::string metadataWarning;
+		if(!WriteLockMetadata(metadataWarning)) {
+			AppendCleanupWarning(std::move(metadataWarning));
+		}
 
-	// Publication is already complete. Staging, scratch, and lock cleanup failures
-	// are retained as warnings instead of incorrectly claiming the output failed.
-	std::string cleanupWarning;
-	if(!CleanupPath(m_StagingDirectory, cleanupWarning)) {
-		AppendCleanupWarning(std::move(cleanupWarning));
+		// Publication is already complete. Staging, scratch, and lock cleanup failures
+		// are retained as warnings instead of incorrectly claiming the output failed.
+		std::string cleanupWarning;
+		if(!CleanupPath(m_StagingDirectory, cleanupWarning)) {
+			AppendCleanupWarning(std::move(cleanupWarning));
+		}
+		cleanupWarning.clear();
+		if(!CleanupPath(m_ScratchDirectory, cleanupWarning)) {
+			AppendCleanupWarning(std::move(cleanupWarning));
+		}
+	} catch(...) {
+		// All files are committed now. Even allocation failure in diagnostics or
+		// cleanup must not turn that success into a failed publication callback.
+		try { AppendCleanupWarning("output_cleanup_failed: Cleanup raised an exception after publication; leftovers remain retryable."); }
+		catch(...) { /* Reporting itself may be out of memory; keep success true. */ }
 	}
-	cleanupWarning.clear();
-	if(!CleanupPath(m_ScratchDirectory, cleanupWarning)) {
-		AppendCleanupWarning(std::move(cleanupWarning));
-	}
-	cleanupWarning.clear();
-	if(!ReleaseOwnedLock(cleanupWarning)) {
-		AppendCleanupWarning(std::move(cleanupWarning));
+	// Even a throwing cleanup/diagnostic must still attempt the independent lock
+	// release. A completed journal is safe for a later owner to clean or retry.
+	try {
+		std::string releaseWarning;
+		if(!ReleaseOwnedLock(releaseWarning)) AppendCleanupWarning(std::move(releaseWarning));
+	} catch(...) {
+		// Ownership stays explicit if even reading/removing lock metadata fails.
+		// The destructor or stale-lock recovery may retry; publication stays true.
 	}
 	m_State = ExportOutputTransactionState::Cleaned;
 	return true;
 }
 
+bool ExportOutputTransaction::RollbackPublication(std::string& error) {
+	error.clear();
+	if(m_WasPublished || !m_PublicationJournalOwned) return true;
+	const auto remember = [&](const std::filesystem::path& path, const std::error_code& failure) {
+		if(!failure) return;
+		if(!error.empty()) error += " ";
+		error += "output_rollback_failed: '" + PathToUtf8(path) + "': " + failure.message();
+	};
+	for(auto entry = m_PublicationFiles.rbegin(); entry != m_PublicationFiles.rend(); ++entry) {
+		if(!entry->published && !entry->restoreTimePending) continue;
+		std::error_code failure;
+		const auto type = PublicationType(entry->destination, failure);
+		if(!failure && type != std::filesystem::file_type::regular && type != std::filesystem::file_type::not_found)
+			failure = std::make_error_code(std::errc::invalid_argument);
+		if(!failure && entry->published) {
+			if(entry->hadOriginal) {
+				ReplacePublicationFile(entry->original, entry->destination, failure);
+				if(!failure) entry->restoreTimePending = true;
+			} else std::filesystem::remove(NativeIoPath(entry->destination), failure);
+			if(!failure) entry->published = false;
+		}
+		if(!failure && entry->restoreTimePending) {
+			std::filesystem::last_write_time(NativeIoPath(entry->destination), entry->originalTime, failure);
+			if(!failure) entry->restoreTimePending = false;
+		}
+		remember(entry->destination, failure);
+	}
+	for(auto directory = m_PublicationDirectories.rbegin(); directory != m_PublicationDirectories.rend(); ++directory) {
+		if(!directory->created) continue;
+		std::error_code failure;
+		// Non-recursive removal preserves any unrelated content introduced by
+		// another owner. A secondary failure retains the journal and owned lock.
+		const auto type = PublicationType(directory->path, failure);
+		if(!failure && type == std::filesystem::file_type::directory) std::filesystem::remove(NativeIoPath(directory->path), failure);
+		else if(!failure && type != std::filesystem::file_type::not_found) failure = std::make_error_code(std::errc::invalid_argument);
+		if(!failure) directory->created = false;
+		remember(directory->path, failure);
+	}
+	for(const auto& directory : m_PublicationDirectoryTimes) {
+		std::error_code failure;
+		if(PublicationType(directory.path, failure) != std::filesystem::file_type::directory && !failure) failure = std::make_error_code(std::errc::not_a_directory);
+		if(!failure) std::filesystem::last_write_time(NativeIoPath(directory.path), directory.originalTime, failure);
+		remember(directory.path, failure);
+	}
+	if(!error.empty()) return false;
+	if(!CleanupPath(m_PublicationJournalDirectory, error)) { error = "output_rollback_failed: " + error; return false; }
+	m_PublicationFiles.clear(); m_PublicationDirectories.clear(); m_PublicationDirectoryTimes.clear(); m_PublicationJournalDirectory.clear();
+	m_PublicationJournalOwned = false;
+	return true;
+}
+
 bool ExportOutputTransaction::Rollback(std::string& error) {
 	error.clear();
+	if(m_RequiresManualRecovery) {
+		error = "output_rollback_failed: An orphan publication journal requires manual recovery; originals and lock were retained.";
+		return false;
+	}
 	if(m_State == ExportOutputTransactionState::Created
 		|| ((m_State == ExportOutputTransactionState::Cleaned
 			|| m_State == ExportOutputTransactionState::RolledBack) && !m_OwnsLock)) {
 		return true;
 	}
+	if(m_CompletedJournalCleanupOnly) {
+		// No new staging/publication started: only a previously committed run's
+		// disposable leftovers were found. Cleanup can be retried, but its failure
+		// must not retain a fresh lock and block every other export indefinitely.
+		std::string cleanupError, releaseError;
+		const bool cleaned = CleanupPath(m_StagingDirectory, cleanupError) && CleanupPath(m_ScratchDirectory, cleanupError);
+		const bool released = ReleaseOwnedLock(releaseError);
+		if(released) m_State = ExportOutputTransactionState::RolledBack;
+		error = std::move(cleanupError);
+		if(!releaseError.empty()) { if(!error.empty()) error += " "; error += releaseError; }
+		return cleaned && released;
+	}
+	if(!RollbackPublication(error)) return false;
 
 	std::error_code backupExistsError;
 	const bool backupExists = std::filesystem::exists(NativeIoPath(m_BackupDirectory), backupExistsError);
@@ -581,17 +888,36 @@ bool ExportOutputTransaction::RecoverExistingLock(std::string& error) {
 		error = "output_lock_conflict: Another live export owns the requested output.";
 		return false;
 	}
+	// A dead owner can leave a failed per-file rollback journal. There is no
+	// durable full-tree commit protocol here: retain originals and fail closed
+	// rather than treating these private files as disposable stale scratch.
+	std::error_code journalError;
+	bool completedJournal = false;
+	if(HasPendingPublicationJournal(metadata.scratchDirectory, journalError, &completedJournal, metadata.runId, metadata.ownerToken) || journalError) {
+		error = "output_lock_conflict: A prior publication journal requires manual recovery; originals were retained.";
+		return false;
+	}
+	const auto cleanupStalePrivate = [&](const std::filesystem::path& path, std::string& cleanupError) {
+		if(CleanupPath(path, cleanupError)) return true;
+		if(!completedJournal) return false;
+		// The dead owner's completion decision is authoritative even if it crashed
+		// before updating lock metadata. Disposable leftovers need not retain its
+		// stale lock; the next same-run preparation can retry their cleanup.
+		AppendCleanupWarning("output_cleanup_failed: Completed stale publication retained private leftovers: " + cleanupError);
+		cleanupError.clear();
+		return true;
+	};
 
 	// If the previous process stopped after moving the old output aside, prefer
 	// the known previous success over a new directory whose caller never received
 	// a successful commit result.
 	std::error_code existsError;
 	if(std::filesystem::exists(NativeIoPath(metadata.backupDirectory), existsError)) {
-		const bool metadataClaimsPublished = metadata.state == ToString(ExportOutputTransactionState::Published)
+		const bool metadataClaimsPublished = completedJournal || metadata.state == ToString(ExportOutputTransactionState::Published)
 			|| metadata.state == ToString(ExportOutputTransactionState::Cleaned);
 		if(metadataClaimsPublished && std::filesystem::exists(NativeIoPath(m_FinalDirectory), existsError)) {
 			std::string cleanupError;
-			if(!CleanupPath(metadata.backupDirectory, cleanupError)) {
+			if(!cleanupStalePrivate(metadata.backupDirectory, cleanupError)) {
 				error = "output_lock_recovery_failed: " + cleanupError;
 				return false;
 			}
@@ -620,8 +946,8 @@ bool ExportOutputTransaction::RecoverExistingLock(std::string& error) {
 	}
 
 	std::string cleanupError;
-	if(!CleanupPath(metadata.stagingDirectory, cleanupError)
-		|| !CleanupPath(metadata.scratchDirectory, cleanupError)) {
+	if(!cleanupStalePrivate(metadata.stagingDirectory, cleanupError)
+		|| !cleanupStalePrivate(metadata.scratchDirectory, cleanupError)) {
 		error = "output_lock_recovery_failed: " + cleanupError;
 		return false;
 	}
@@ -646,6 +972,13 @@ bool ExportOutputTransaction::RecoverExistingLock(std::string& error) {
 }
 
 bool ExportOutputTransaction::PrepareRunDirectories(std::string& error) {
+	std::error_code journalError;
+	bool completedJournal = false;
+	if(HasPendingPublicationJournal(m_ScratchDirectory, journalError, &completedJournal, m_RunId) || journalError) {
+		m_RequiresManualRecovery = true;
+		error = "output_staging_failed: An orphan publication journal requires manual recovery; originals were retained.";
+		return false;
+	}
 	// A missing lock with same-run orphan directories can occur after forceful
 	// process termination. Once this transaction owns the output lock, those
 	// reserved sibling paths are safe to repair and reuse.
@@ -672,10 +1005,12 @@ bool ExportOutputTransaction::PrepareRunDirectories(std::string& error) {
 		return false;
 	}
 
+	m_CompletedJournalCleanupOnly = completedJournal;
 	if(!CleanupPath(m_StagingDirectory, error) || !CleanupPath(m_ScratchDirectory, error)) {
 		error = "output_staging_failed: " + error;
 		return false;
 	}
+	m_CompletedJournalCleanupOnly = false;
 
 	std::error_code stagingError;
 	std::filesystem::create_directory(NativeIoPath(m_StagingDirectory), stagingError);
@@ -882,7 +1217,10 @@ bool ExportOutputTransaction::CleanupPath(const std::filesystem::path& path, std
 		return true;
 	}
 	std::error_code cleanupError;
-	std::filesystem::remove_all(NativeIoPath(path), cleanupError);
+	// A per-transaction, default-null error seam exercises the same cleanup and
+	// lock-release branches without depending on host privileges or IO timing.
+	if(m_Options.cleanupFailureForTests) cleanupError = m_Options.cleanupFailureForTests(path);
+	if(!cleanupError) std::filesystem::remove_all(NativeIoPath(path), cleanupError);
 	if(cleanupError) {
 		error = "Could not remove '" + PathToUtf8(path) + "': " + cleanupError.message();
 		return false;

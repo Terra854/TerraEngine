@@ -15,6 +15,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <winioctl.h>
 #endif
 
 namespace TerraEngine::Tests {
@@ -45,6 +46,25 @@ namespace TerraEngine::Tests {
 		std::string ReadSavedBytes(const std::filesystem::path& path) {
 			std::ifstream input(path, std::ios::binary);
 			return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+		}
+		bool MakeSaveDirectoryRedirect(const std::filesystem::path& link, const std::filesystem::path& target, bool junction) {
+#ifdef _WIN32
+			if(!junction) return CreateSymbolicLinkW(link.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+			// Junctions require no symbolic-link privilege and exercise reparse
+			// protection independently from the optional symlink capability.
+			std::filesystem::create_directory(link);
+			HANDLE handle=CreateFileW(link.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+			if(handle==INVALID_HANDLE_VALUE) return false;
+			struct JunctionData { DWORD tag; WORD length,reserved,subOffset,subLength,printOffset,printLength; wchar_t paths[2048]; } data{};
+			const auto substitute=L"\\??\\"+std::filesystem::absolute(target).native(); const auto print=target.native();
+			if(substitute.size()+print.size()+2>=2048){ CloseHandle(handle); return false; }
+			data.tag=IO_REPARSE_TAG_MOUNT_POINT; data.subLength=static_cast<WORD>(substitute.size()*sizeof(wchar_t)); data.printOffset=data.subLength+sizeof(wchar_t); data.printLength=static_cast<WORD>(print.size()*sizeof(wchar_t));
+			std::copy(substitute.begin(),substitute.end(),data.paths); std::copy(print.begin(),print.end(),data.paths+substitute.size()+1);
+			data.length=static_cast<WORD>(8+(substitute.size()+print.size()+2)*sizeof(wchar_t)); DWORD returned=0;
+			const bool ok=DeviceIoControl(handle,FSCTL_SET_REPARSE_POINT,&data,8+data.length,nullptr,0,&returned,nullptr)!=FALSE; CloseHandle(handle); return ok;
+#else
+			(void)junction; std::error_code error; std::filesystem::create_directory_symlink(target,link,error); return !error;
+#endif
 		}
 		struct SaveFixture final {
 			Correctness::DisposableFixturePath files;
@@ -332,6 +352,28 @@ namespace TerraEngine::Tests {
 		}
 	}
 	void RegisterSceneSaveFailureSafetyTests(TestRegistry& registry) {
+		registry.Add("Scene.SaveFailureSafety.DirectoryAliasUpdatesTheOriginalSourceCache", [](TestContext& context) {
+			SaveFixture fixture(context);
+			Correctness::DisposableFixturePath aliasOwner;
+			const auto alias = aliasOwner.Child("source-alias");
+			// Remove only the redirect entry before either separately owned root is
+			// destroyed; never traverse it during fixture cleanup.
+			struct RedirectOwner { std::filesystem::path path; ~RedirectOwner() { std::error_code error; std::filesystem::remove(path, error); } } redirect{alias};
+			context.Expect(MakeSaveDirectoryRedirect(alias, fixture.files.Root(), true), "Create a real directory alias without symbolic-link privileges.");
+			auto& scenes = SceneManager::Instance();
+			const auto sourcePath = scenes.GetScene(fixture.sceneId)->sourcePath;
+			const auto oldCache = scenes.GetScene(fixture.sceneId)->jsonContents;
+			const auto oldBytes = ReadSavedBytes(fixture.destination);
+			fixture.component->value = "saved through a directory alias"; scenes.ForceMarkActiveSceneDirty();
+			TerraEngine::Utilities::AtomicFileWriteOptions failure;
+			failure.checkpoint = [](auto stage, const auto&) { return stage == TerraEngine::Utilities::AtomicFileWriteStage::Replace ? std::string("Reject alias replacement") : std::string{}; };
+			const auto target = alias / fixture.destination.filename();
+			context.Expect(!scenes.SaveScene(target, failure) && ReadSavedBytes(fixture.destination) == oldBytes
+				&& scenes.GetScene(fixture.sceneId)->jsonContents == oldCache, "Rejected aliased saving preserves disk and source cache atomically.");
+			context.Expect(scenes.SaveScene(target), "Save through the real directory alias.");
+			context.Expect(ReadSavedBytes(fixture.destination) != oldBytes && scenes.GetScene(fixture.sceneId)->jsonContents != oldCache
+				&& scenes.GetScene(fixture.sceneId)->sourcePath == sourcePath && !scenes.IsActiveSceneDirty(), "The same source filename updates its cache without rewriting document identity.");
+		});
 		registry.Add("Scene.SaveFailureSafety.UnreadableReplacementPreservesEditableScene", [](TestContext& context) { VerifyFailedReplacement(context, 0, false); });
 		registry.Add("Scene.SaveFailureSafety.MalformedReplacementPreservesEditableScene", [](TestContext& context) { VerifyFailedReplacement(context, 1, false); });
 		registry.Add("Scene.SaveFailureSafety.WrongTypedReplacementPreservesEditableScene", [](TestContext& context) { VerifyFailedReplacement(context, 2, false); });

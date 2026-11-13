@@ -21,11 +21,23 @@ namespace TerraEngine::EditorTests
 			return service.GetRegistry().Find(name, 1, service.BuildAutomationStateSnapshot());
 		}
 
+		// Read required members without mutating the document. Missing keys and
+		// malformed parents must report TestFailure before const JSON access,
+		// which would otherwise assert or throw a different exception type.
+		const nlohmann::json& CheckedMember(TestContext& context, const nlohmann::json& object, std::string_view key)
+		{
+			context.Expect(object.is_object(), "Required JSON member has a non-object parent: " + std::string(key));
+			context.Expect(object.contains(std::string(key)), "Required JSON member is missing: " + std::string(key));
+			return object.at(std::string(key));
+		}
+
+		// Optional property discovery remains a boolean check; callers assert the
+		// expected property so absent declarations still become TestFailure.
 		bool SchemaHasProperty(const nlohmann::json& schema, std::string_view property)
 		{
 			return schema.contains("properties")
-				&& schema["properties"].is_object()
-				&& schema["properties"].contains(std::string(property));
+				&& schema.at("properties").is_object()
+				&& schema.at("properties").contains(std::string(property));
 		}
 	}
 
@@ -124,9 +136,9 @@ namespace TerraEngine::EditorTests
 			{
 				context.Expect(SchemaHasProperty(health->descriptor.resultSchema, "sessionArtifactId"),
 					"Bounded health must identify the active V1 journal without exposing a filesystem path.");
-				context.Expect(health->descriptor.resultSchema["properties"]["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
-					&& health->descriptor.resultSchema["properties"]["formatVersion"].value("const", 0u) == 1u
-					&& health->descriptor.resultSchema["properties"]["projectEpoch"].value("minimum", 1u) == 0u,
+				context.Expect(CheckedMember(context, CheckedMember(context, CheckedMember(context, health->descriptor.resultSchema, "properties"), "formatIdentifier"), "const").get<std::string>() == "TerraEngineProfilerJournalV1"
+					&& CheckedMember(context, CheckedMember(context, CheckedMember(context, health->descriptor.resultSchema, "properties"), "formatVersion"), "const").get<unsigned int>() == 1u
+					&& CheckedMember(context, CheckedMember(context, CheckedMember(context, health->descriptor.resultSchema, "properties"), "projectEpoch"), "minimum").get<unsigned int>() == 0u,
 					"Bounded health must retain both V1 identity and its lifecycle epoch.");
 			}
 			if (start.has_value())
@@ -138,8 +150,8 @@ namespace TerraEngine::EditorTests
 				context.Expect(!SchemaHasProperty(start->descriptor.inputSchema, legacyCaptureSelector), "Capture start must not expose an alternate capture-version selector.");
 				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "formatIdentifier")
 					&& SchemaHasProperty(start->descriptor.resultSchema, "formatVersion")
-					&& start->descriptor.resultSchema["properties"]["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
-					&& start->descriptor.resultSchema["properties"]["formatVersion"].value("const", 0u) == 1u,
+					&& CheckedMember(context, CheckedMember(context, CheckedMember(context, start->descriptor.resultSchema, "properties"), "formatIdentifier"), "const").get<std::string>() == "TerraEngineProfilerJournalV1"
+					&& CheckedMember(context, CheckedMember(context, CheckedMember(context, start->descriptor.resultSchema, "properties"), "formatVersion"), "const").get<unsigned int>() == 1u,
 					"Capture start results must identify exactly the fixed V1 journal format and version.");
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maximumChunkFrames"), "Capture start should accept a bounded chunk-frame limit.");
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maxFrames"), "Capture start should expose an optional explicit rolling-history limit.");
@@ -147,11 +159,11 @@ namespace TerraEngine::EditorTests
 				{
 					context.ExpectEqual(
 						0u,
-						start->descriptor.inputSchema["properties"]["maxFrames"].value("default", 0u),
+						CheckedMember(context, CheckedMember(context, CheckedMember(context, start->descriptor.inputSchema, "properties"), "maxFrames"), "default").get<unsigned int>(),
 						"Profiler discovery should publish unlimited history as the runtime default.");
 					context.ExpectEqual(
 						0,
-						start->descriptor.inputSchema["properties"]["maxFrames"].value("minimum", -1),
+						CheckedMember(context, CheckedMember(context, CheckedMember(context, start->descriptor.inputSchema, "properties"), "maxFrames"), "minimum").get<int>(),
 						"Profiler discovery should document zero as the unlimited-history sentinel.");
 				}
 				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "bounds"), "Capture start should return effective bounds without changing durable job fields.");
@@ -172,33 +184,33 @@ namespace TerraEngine::EditorTests
 				"Bounded index, detail, and operation contracts should remain discoverable.");
 			if (index.has_value())
 			{
-				const auto& properties = index->descriptor.inputSchema["properties"];
-				context.Expect(properties["offset"].value("type", std::string{}) == "integer"
-					&& properties["offset"].value("minimum", 1u) == 0u
-					&& properties["limit"].value("type", std::string{}) == "integer"
-					&& properties["limit"].value("minimum", 0u) == 1u
-					&& properties["limit"].value("maximum", 0u) == 512u
-					&& index->descriptor.resultSchema["properties"]["formatVersion"].value("const", 0u) == 1u
+				const auto& properties = CheckedMember(context, index->descriptor.inputSchema, "properties");
+				context.Expect(CheckedMember(context, CheckedMember(context, properties, "offset"), "type").get<std::string>() == "integer"
+					&& CheckedMember(context, CheckedMember(context, properties, "offset"), "minimum").get<unsigned int>() == 0u
+					&& CheckedMember(context, CheckedMember(context, properties, "limit"), "type").get<std::string>() == "integer"
+					&& CheckedMember(context, CheckedMember(context, properties, "limit"), "minimum").get<unsigned int>() == 1u
+					&& CheckedMember(context, CheckedMember(context, properties, "limit"), "maximum").get<unsigned int>() == 512u
+					&& CheckedMember(context, CheckedMember(context, CheckedMember(context, index->descriptor.resultSchema, "properties"), "formatVersion"), "const").get<unsigned int>() == 1u
 					&& SchemaHasProperty(index->descriptor.resultSchema, "projectEpoch"),
 					"Profiler index requests must advertise bounded non-negative page inputs.");
 			}
 			if (detail.has_value())
 			{
-				const auto& properties = detail->descriptor.inputSchema["properties"];
-				context.Expect(properties["frameIndex"].value("type", std::string{}) == "integer"
-					&& properties["frameIndex"].value("minimum", 1u) == 0u
-					&& detail->descriptor.resultSchema["properties"]["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
+				const auto& properties = CheckedMember(context, detail->descriptor.inputSchema, "properties");
+				context.Expect(CheckedMember(context, CheckedMember(context, properties, "frameIndex"), "type").get<std::string>() == "integer"
+					&& CheckedMember(context, CheckedMember(context, properties, "frameIndex"), "minimum").get<unsigned int>() == 0u
+					&& CheckedMember(context, CheckedMember(context, CheckedMember(context, detail->descriptor.resultSchema, "properties"), "formatIdentifier"), "const").get<std::string>() == "TerraEngineProfilerJournalV1"
 					&& SchemaHasProperty(detail->descriptor.resultSchema, "projectEpoch"),
 					"Profiler detail requests must expose one non-negative journal frame identity.");
 			}
 			if (operation.has_value())
 			{
-				const auto& inputProperties = operation->descriptor.inputSchema["properties"];
-				const auto& resultProperties = operation->descriptor.resultSchema["properties"];
-				context.Expect(inputProperties["operationId"].value("type", std::string{}) == "integer"
-					&& inputProperties["operationId"].value("minimum", 0u) == 1u
-					&& resultProperties["formatIdentifier"].value("const", std::string{}) == "TerraEngineProfilerJournalV1"
-					&& resultProperties["formatVersion"].value("const", 0u) == 1u
+				const auto& inputProperties = CheckedMember(context, operation->descriptor.inputSchema, "properties");
+				const auto& resultProperties = CheckedMember(context, operation->descriptor.resultSchema, "properties");
+				context.Expect(CheckedMember(context, CheckedMember(context, inputProperties, "operationId"), "type").get<std::string>() == "integer"
+					&& CheckedMember(context, CheckedMember(context, inputProperties, "operationId"), "minimum").get<unsigned int>() == 1u
+					&& CheckedMember(context, CheckedMember(context, resultProperties, "formatIdentifier"), "const").get<std::string>() == "TerraEngineProfilerJournalV1"
+					&& CheckedMember(context, CheckedMember(context, resultProperties, "formatVersion"), "const").get<unsigned int>() == 1u
 					&& SchemaHasProperty(operation->descriptor.resultSchema, "operation")
 					&& SchemaHasProperty(operation->descriptor.resultSchema, "finalization"),
 					"Profiler operation polling must remain V1-only and expose one bounded terminal/finalization result.");
@@ -257,7 +269,7 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::uint64_t(0x7dU), aggregate.value("availabilityMaskIntersection", 0U),
 				"The intersection should expose a lane that was unavailable in one measured frame.");
 
-			const nlohmann::json& lanes = aggregate["lanes"];
+			const nlohmann::json& lanes = aggregate.at("lanes");
 			context.ExpectEqual(std::size_t(7U), lanes.size(),
 				"Automation should expose all seven public disjoint lanes, excluding the reserved slot.");
 			context.ExpectEqual(std::string("persistent_state"), lanes[0].value("id", std::string{}),
@@ -269,7 +281,7 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::uint64_t(2U), lanes[1].value("unavailableFrameCount", 0U),
 				"Missing evidence and an unavailable lane should both remain visible to automation.");
 
-			const nlohmann::json& conservation = aggregate["conservation"];
+			const nlohmann::json& conservation = aggregate.at("conservation");
 			context.ExpectEqual(std::uint64_t(1U), conservation.value("eligibleFrameCount", 0U),
 				"Conservation should evaluate only frames with all seven public lanes available.");
 			context.ExpectEqual(std::uint64_t(1U), conservation.value("conservedFrameCount", 0U),
@@ -303,10 +315,10 @@ namespace TerraEngine::EditorTests
 				"The aggregate should report the complete selected frame separately.");
 			context.ExpectEqual(std::uint64_t(1U), aggregate.value("incompleteFrameCount", 0U),
 				"An interrupted capture tail must remain visible to automation clients.");
-			context.ExpectEqual(std::uint64_t(2U), aggregate["lanes"][0].value("availableFrameCount", 0U),
+			context.ExpectEqual(std::uint64_t(2U), aggregate.at("lanes")[0].value("availableFrameCount", 0U),
 				"Incomplete frames should retain their per-lane evidence instead of being discarded.");
 
-			const nlohmann::json& conservation = aggregate["conservation"];
+			const nlohmann::json& conservation = aggregate.at("conservation");
 			context.ExpectEqual(std::uint64_t(1U), conservation.value("eligibleFrameCount", 0U),
 				"Only the naturally completed frame should participate in conservation.");
 			context.ExpectEqual(std::uint64_t(1U), conservation.value("conservedFrameCount", 0U),

@@ -56,14 +56,20 @@ function Test-TerraRendererSmokeQualifyingEvent {
 	return $provider -match "Display|nvlddmkm|amdkmdag|igfx" -or $message -match "driver|device lost|reset"
 }
 
+function ConvertTo-TerraRendererSmokeUtc($Value) {
+	# DateTime.ToUniversalTime preserves the offset of a captured ambiguous local event.
+	if($Value -is [datetime]) { return $Value.ToUniversalTime() }
+	return ([datetimeoffset]$Value).UtcDateTime
+}
+
 function Test-TerraRendererSmokeEventAfterBaseline {
 	param(
 		[Parameter(Mandatory = $true)] $Event,
 		[Parameter(Mandatory = $true)] $Baseline
 	)
 
-	$baselineTime = [datetime] $Baseline.TimeCreated
-	$eventTime = if ($null -ne $Event.TimeCreated) { [datetime] $Event.TimeCreated } else { $null }
+	$baselineTime = ConvertTo-TerraRendererSmokeUtc $Baseline.TimeCreated
+	$eventTime = if ($null -ne $Event.TimeCreated) { ConvertTo-TerraRendererSmokeUtc $Event.TimeCreated } else { $null }
 	$baselineRecordId = [Int64] $Baseline.RecordId
 	$eventRecordId = if ($null -ne $Event.RecordId) { [Int64] $Event.RecordId } else { $null }
 
@@ -84,11 +90,35 @@ function Get-TerraRendererSmokeNewDriverEvents {
 		[Parameter(Mandatory = $true)] [scriptblock] $Query
 	)
 
-	# Query from the frozen baseline time on every poll. The RecordId predicate
-	# below removes pre-existing same-window events rather than relying on time alone.
-	return @(& $Query "since" ([datetime] $Baseline.TimeCreated) |
-		Where-Object { Test-TerraRendererSmokeQualifyingEvent $_ } |
+	# The frozen baseline is queried on every poll. Only the specific no-match
+	# condition may become empty; access/query failures keep their actual error.
+	$records = @()
+	try { $records = @(& $Query "since" (ConvertTo-TerraRendererSmokeUtc $Baseline.TimeCreated)) }
+	catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
+	$newEvents = @($records | Where-Object { Test-TerraRendererSmokeQualifyingEvent $_ } |
 		Where-Object { Test-TerraRendererSmokeEventAfterBaseline -Event $_ -Baseline $Baseline })
+	if ($newEvents.Count -gt 0) { return $newEvents }
+
+	# Empty qualifying evidence is valid only while the original record identity
+	# is still observed. A cleared/replaced log cannot prove a healthy empty run.
+	$baselineStillPresent = @($records | Where-Object {
+		$null -ne $_.RecordId -and $null -ne $_.TimeCreated -and
+		[Int64]$_.RecordId -eq [Int64]$Baseline.RecordId -and
+		(ConvertTo-TerraRendererSmokeUtc $_.TimeCreated) -eq (ConvertTo-TerraRendererSmokeUtc $Baseline.TimeCreated)
+	}).Count -gt 0
+	if (-not $baselineStillPresent) {
+		$head = @()
+		try { $head = @(& $Query "baseline" ([datetime]::MinValue) | Select-Object -First 1) }
+		catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
+		$baselineStillPresent = $head.Count -eq 1 -and $null -ne $head[0].RecordId -and $null -ne $head[0].TimeCreated -and
+			[Int64]$head[0].RecordId -eq [Int64]$Baseline.RecordId -and (ConvertTo-TerraRendererSmokeUtc $head[0].TimeCreated) -eq (ConvertTo-TerraRendererSmokeUtc $Baseline.TimeCreated)
+	}
+	if (-not $baselineStillPresent) {
+		$failure = [InvalidOperationException]::new('Windows System event baseline is unverified: the frozen record is absent or the log was cleared/replaced.')
+		$failure.Data['TerraRendererSmokeEvidenceStatus'] = 'unverified'
+		throw $failure
+	}
+	return @()
 }
 
 function Stop-TerraRendererSmokeProcessTree {
@@ -117,7 +147,25 @@ function Invoke-TerraRendererSmokeDriverEventGate {
 		[scriptblock] $StopProcessTree = ${function:Stop-TerraRendererSmokeProcessTree}
 	)
 
-	$newEvents = @(Get-TerraRendererSmokeNewDriverEvents -Baseline $Baseline -Query $Query)
+	try { $newEvents = @(Get-TerraRendererSmokeNewDriverEvents -Baseline $Baseline -Query $Query) }
+	catch {
+		$primaryFailure = $_
+		$classification = 'error'
+		$exception = $_.Exception
+		while ($null -ne $exception) {
+			if ($exception.Data['TerraRendererSmokeEvidenceStatus'] -eq 'unverified') { $classification = 'unverified'; break }
+			$exception = $exception.InnerException
+		}
+		# Retain observer failure separately from an actual qualifying driver event.
+		# Failure to write this receipt must not replace the original query error.
+		try {
+			[ordered]@{ outcome = $classification; operation = $Operation; stage = $Stage;
+				baseline = ConvertTo-TerraRendererSmokeEventEvidence $Baseline; processId = $ProcessId;
+				reason = $primaryFailure.Exception.Message; errorId = $primaryFailure.FullyQualifiedErrorId } |
+				ConvertTo-Json -Depth 6 | Out-File -LiteralPath (Join-Path $EvidencePath 'event-query-failure.json') -Encoding utf8
+		} catch { Write-Warning 'Could not persist event-query failure receipt; original failure remains authoritative.' }
+		throw $primaryFailure
+	}
 	if ($newEvents.Count -eq 0) { return }
 
 	$occurredAt = Get-Date
@@ -231,23 +279,27 @@ function Invoke-TerraRendererSmokeHarnessTests {
 	$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("terra-renderer-smoke-tests-" + [guid]::NewGuid().ToString("N"))
 	New-Item -ItemType Directory -Path $testRoot | Out-Null
 	try {
+		$caseCount = 0
 		$baselineTime = [datetime]::UtcNow
 		$baseline = [pscustomobject]@{ RecordId = 100; TimeCreated = $baselineTime; ProviderName = "Service Control Manager"; Id = 1; LevelDisplayName = "Information"; Message = "Existing event" }
 		$preexisting = [pscustomobject]@{ RecordId = 99; TimeCreated = $baselineTime.AddSeconds(-1); ProviderName = "Display"; Id = 13; LevelDisplayName = "Error"; Message = "Graphics FECS Exception" }
-		$noFailureQuery = { param($kind, $since) if ($kind -eq "baseline") { return $baseline }; if ($kind -eq "since") { return $preexisting } }
+		$noFailureQuery = { param($kind, $since) if ($kind -eq "baseline") { return $baseline }; if ($kind -eq "since") { return @($baseline, $preexisting) } }
 		$observedBaseline = Get-TerraRendererSmokeSystemBaseline -Query $noFailureQuery
 		if ($observedBaseline.RecordId -ne 100) { throw "The injected event-query seam did not provide the baseline record." }
 		$script:preexistingStopCount = 0
 		Invoke-TerraRendererSmokeDriverEventGate -Baseline $baseline -Query $noFailureQuery -ProcessId 4242 -EvidencePath $testRoot -Operation 0 -Stage "after-resize" -StopProcessTree { param($id) $script:preexistingStopCount += 1 }
 		if ($script:preexistingStopCount -ne 0) { throw "Pre-existing System events must not stop a live smoke run." }
+		++$caseCount
 		$resetRecord = [pscustomobject]@{ RecordId = 1; TimeCreated = $baselineTime.AddSeconds(1); ProviderName = "Display"; Id = 13; LevelDisplayName = "Error"; Message = "Graphics event after a System-log reset" }
 		if (-not (Test-TerraRendererSmokeEventAfterBaseline -Event $resetRecord -Baseline $baseline)) {
 			throw "A qualifying event after a System-log RecordId reset must fail closed."
 		}
+		++$caseCount
 		$readiness = ConvertFrom-TerraRendererSmokePresentationMarker -Text "prefix [Vulkan] Editor presentation ready generation=7 extent=1600x900 suffix"
 		if ($null -eq $readiness -or $readiness.generation -ne 7 -or $readiness.width -ne 1600 -or $readiness.height -ne 900) {
 			throw "The first-successful-present marker must produce typed readiness evidence."
 		}
+		++$caseCount
 		$ansiEscape = [char] 27
 		$gpuOutput = "${ansiEscape}[97m[DEBUG] Selected GPU: NVIDIA GeForce RTX 4080 Laptop GPU${ansiEscape}[0m"
 		$selectedGpuNames = @(Get-TerraRendererSmokeSelectedGpuNames -Text $gpuOutput)
@@ -255,11 +307,19 @@ function Invoke-TerraRendererSmokeHarnessTests {
 			throw "ANSI-colored Vulkan output must produce the exact selected GPU name."
 		}
 
+		++$caseCount
 		$operations = @()
 		$script:currentOperation = -1
 		$script:stopCount = 0
 		$newEvent = [pscustomobject]@{ RecordId = 101; TimeCreated = $baselineTime.AddSeconds(2); ProviderName = "nvlddmkm"; Id = 13; LevelDisplayName = "Error"; Message = "Graphics exception" }
-		$eventAtTwoQuery = { param($kind, $since) if ($kind -eq "since" -and $script:currentOperation -eq 2) { return $newEvent } }
+		# A healthy synthetic log retains its frozen record on every poll.
+		# Only operation 2 adds a new driver event to that continuous log.
+		$eventAtTwoQuery = {
+			param($kind, $since)
+			if ($kind -eq "baseline") { return $baseline }
+			if ($script:currentOperation -eq 2) { return @($baseline, $newEvent) }
+			return $baseline
+		}
 		for ($operation = 0; $operation -lt 5; ++$operation) {
 			$operations += $operation
 			$script:currentOperation = $operation
@@ -274,7 +334,22 @@ function Invoke-TerraRendererSmokeHarnessTests {
 		if (($operations -join ",") -ne "0,1,2" -or $script:stopCount -ne 1) {
 			throw "A driver event at operation N must stop the process tree and prevent operation N + 1."
 		}
-		Write-Output "RunLiveSmoke harness tests passed: pre-existing events ignored; new event at N stopped before N+1."
+		++$caseCount
+		$missingRoot = Join-Path $testRoot 'missing-baseline'
+		New-Item -ItemType Directory -Path $missingRoot | Out-Null
+		$script:missingBaselineStops = 0
+		$rejectedMissing = $false
+		try {
+			Invoke-TerraRendererSmokeDriverEventGate -Baseline $baseline -Query { param($kind, $since) return @() } -ProcessId 4242 -EvidencePath $missingRoot -Operation 0 -Stage 'continuity-prerequisite' -StopProcessTree { param($id) $script:missingBaselineStops += 1 }
+		} catch { $rejectedMissing = $true }
+		# A lost baseline is unavailable evidence; it must not invent an event.
+		$missingReceipt = Get-Content -Raw -LiteralPath (Join-Path $missingRoot 'event-query-failure.json') | ConvertFrom-Json
+		if (-not $rejectedMissing -or $missingReceipt.outcome -ne 'unverified' -or $script:missingBaselineStops -ne 0 -or (Test-Path -LiteralPath (Join-Path $missingRoot 'driver-event-failure.json'))) {
+			throw 'Missing frozen baseline must remain explicitly unverified without inventing a driver event or process stop.'
+		}
+		++$caseCount
+		Write-Output "$caseCount selected tests, 0 failures"
+		if ($caseCount -ne 6) { throw 'Live-smoke safety harness must execute all six bounded controls.' }
 	}
 	finally {
 		Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -302,7 +377,7 @@ if ($null -eq $SystemEventQuery) {
 			Get-WinEvent -LogName "System" -MaxEvents 1 -ErrorAction Stop
 		}
 		else {
-			Get-WinEvent -FilterHashtable @{ LogName = "System"; StartTime = $Since } -ErrorAction Stop
+			Get-WinEvent -FilterHashtable @{ LogName = "System"; StartTime = (ConvertTo-TerraRendererSmokeUtc $Since).ToString("o", [Globalization.CultureInfo]::InvariantCulture) } -ErrorAction Stop
 		}
 	}
 }

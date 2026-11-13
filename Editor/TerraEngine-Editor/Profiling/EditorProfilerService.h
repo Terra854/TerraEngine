@@ -160,6 +160,9 @@ struct EditorProfilerPresentationSnapshot
 };
 
 
+// Fixture-only root/lifecycle ingress is defined only in its operation-status test.
+namespace TerraEngine::EditorTests { struct ProfilerOperationFailureTestAccess; }
+
 class EditorProfilerService : public std::enable_shared_from_this<EditorProfilerService>
 {
 public:
@@ -220,6 +223,7 @@ public:
 	std::filesystem::path GetProfilerDirectory() const;
 
 private:
+	friend struct TerraEngine::EditorTests::ProfilerOperationFailureTestAccess;
 	enum class WorkerCompletionKind : std::uint8_t
 	{
 		CaptureList,

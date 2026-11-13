@@ -1229,28 +1229,69 @@ namespace TerraEngine::Editor::Automation
 				if(nextWarmup != 60 || nextMeasured != 300 || runs < 3 || nextRunId.empty() || nextSeed > 9007199254740991ULL)
 				{ error = "Installed validation requires a run identity, an exact JSON seed, three runs, and 60 warmup/300 measured frames per step."; return false; }
 			}
-			projectRoot = std::filesystem::canonical(root); projectGeneration = generation;
-			markerIdentity = marker.dump(); pendingTransactionId.clear(); pendingScenePublication = {}; mutationGeneration = 0;
-			installedSteps = std::move(nextSteps); fixtureCameras = std::move(nextCameras); nativeProviderFailure = false; fixtureReceipts = nlohmann::json::array(); rejectedReceipt = nullptr;
-			depthStepCameras.clear(); depthStepControls.clear(); fixtureRoleTargets=nlohmann::json::object();
-			if(!installedSteps.is_null()) {
-				for(const auto& [role,target] : installedSteps.at("targets").items()) {
+			// Validate the complete authored P3 closure before changing session
+			// members. A missing installed script/camera must never reach front()
+			// after active state has been published, or poison a subsequent start.
+			const auto nextProjectRoot = std::filesystem::canonical(root);
+			if(requestedStage == "P3" && (nextSteps.is_null() || nextCameras.empty()))
+			{ error = "P3 validation requires installed steps and sealed camera inputs."; return false; }
+			std::vector<std::vector<Renderer::RendererEfficiencyFixtureCamera>> nextDepthStepCameras;
+			std::vector<Renderer::RendererEfficiencyFixtureDepthControls> nextDepthStepControls;
+			nlohmann::json nextRoleTargets = nlohmann::json::object();
+			nlohmann::json nextFixtureReceipts = nlohmann::json::array();
+			nlohmann::json nextExportedArtifacts = nlohmann::json::array();
+			if(!nextSteps.is_null())
+			{
+				for(const auto& [role, target] : nextSteps.at("targets").items())
+				{
 					if(target.is_array()) continue;
-					if(role=="depthPanels") {for(const auto& [panel,value] : target.items()) fixtureRoleTargets["depthPanel-"+panel]=value;}
-					else fixtureRoleTargets[role]=target;
+					if(role == "depthPanels")
+						for(const auto& [panel, value] : target.items()) nextRoleTargets["depthPanel-" + panel] = value;
+					else nextRoleTargets[role] = target;
 				}
-				if(requestedStage=="P4" && installedSteps.value("shadowBatchFixture",false)) for(const auto& step:installedSteps.at("steps")) { std::vector<Renderer::RendererEfficiencyFixtureCamera> cameras; Renderer::RendererEfficiencyFixtureIntent controls; if(!ParseRendererEfficiencyShadowBatchCameras(installedSteps,step,fixtureCameras,cameras,error) || !ParseRendererEfficiencyShadowBatchControls(step,controls,error)) return false; depthStepCameras.push_back(std::move(cameras)); }
-				if(requestedStage=="P3") for(const auto& step : installedSteps.at("steps")) {
-					std::vector<Renderer::RendererEfficiencyFixtureCamera> cameras; Renderer::RendererEfficiencyFixtureDepthControls controls;
-					if(!ParseRendererEfficiencyDepthCameras(installedSteps,step,fixtureCameras,cameras,error) || !ParseRendererEfficiencyDepthControls(projectRoot,installedSteps,step,controls,error)) return false;
-					depthStepCameras.push_back(std::move(cameras));depthStepControls.push_back(std::move(controls));
-				}
+				if(requestedStage == "P4" && nextSteps.value("shadowBatchFixture", false))
+					for(const auto& step : nextSteps.at("steps"))
+					{
+						std::vector<Renderer::RendererEfficiencyFixtureCamera> cameras;
+						Renderer::RendererEfficiencyFixtureIntent controls;
+						if(!ParseRendererEfficiencyShadowBatchCameras(nextSteps, step, nextCameras, cameras, error)
+							|| !ParseRendererEfficiencyShadowBatchControls(step, controls, error)) return false;
+						nextDepthStepCameras.push_back(std::move(cameras));
+					}
+				if(requestedStage == "P3")
+					for(const auto& step : nextSteps.at("steps"))
+					{
+						std::vector<Renderer::RendererEfficiencyFixtureCamera> cameras;
+						Renderer::RendererEfficiencyFixtureDepthControls controls;
+						if(!ParseRendererEfficiencyDepthCameras(nextSteps, step, nextCameras, cameras, error)
+							|| !ParseRendererEfficiencyDepthControls(nextProjectRoot, nextSteps, step, controls, error)) return false;
+						nextDepthStepCameras.push_back(std::move(cameras));
+						nextDepthStepControls.push_back(std::move(controls));
+						const auto& payload = step.at("nativePayload");
+						if(payload.contains("depthRecipePath"))
+						{
+							const auto path = payload.at("depthRecipePath").get<std::string>();
+							const auto bytes = ReadSealedBytes(nextProjectRoot, path);
+							nextFixtureReceipts.push_back({{"kind", "DepthInputRecipe"}, {"fixtureStepId", step.at("id")},
+								{"recipePath", path}, {"recipeSha256", payload.at("depthRecipeSha256")},
+								{"nativeExtent", step.at("nativeExtent")}, {"recipe", payload.at("depthInputRecipe")}});
+							nextExportedArtifacts.push_back({{"kind", "Counters"}, {"status", "Valid"}, {"path", path},
+								{"sha256", InstalledStepsHash(bytes)}, {"reason", ""}});
+						}
+					}
 			}
+			// Protected commit: all fallible authored input reads are complete.
+			projectRoot = nextProjectRoot; projectGeneration = generation;
+			markerIdentity = marker.dump(); pendingTransactionId.clear(); pendingScenePublication = {}; mutationGeneration = 0;
+			installedSteps = std::move(nextSteps); fixtureCameras = std::move(nextCameras); nativeProviderFailure = false;
+			fixtureReceipts = std::move(nextFixtureReceipts); rejectedReceipt = nullptr;
+			depthStepCameras = std::move(nextDepthStepCameras); depthStepControls = std::move(nextDepthStepControls);
+			fixtureRoleTargets = std::move(nextRoleTargets);
 			animationReadyStepFrame.reset(); animationPerSample=false; staticResourceApplied=false; staticBudgetRequestedGeneration=0; staticLowerBudgetRequestedGeneration=0; pendingStaticLifetimeOwner.reset(); completedStaticLifetimeOwner.reset(); pendingStaticBudgetReceipt=nullptr; publishedBindings.clear(); baselineInputs = {}; pendingAnimationCommands.clear(); pendingAnimationObjects.clear(); animationBefore.clear(); animationGpuBefore.reset(); preparedTransaction = {};
 			stepIndex = 0; stepFrame = warmupCompleted = measuredCompleted = batchCursor = lastAcceptedFrame = 0;
 				exportJob = {}; pendingExportFrame = 0; pendingExportPurpose = EvidenceExportPurpose::Sample; pendingTransitionReceipt = nullptr; pendingTransitionOptionsEpoch = 0;
 				residencyBaselineObservation = nullptr; pendingResidencyReceipt = nullptr;
-				pendingEvidenceBundles.clear(); exportedFrames = nlohmann::json::array(); exportedArtifacts = nlohmann::json::array();
+				pendingEvidenceBundles.clear(); exportedFrames = nlohmann::json::array(); exportedArtifacts = std::move(nextExportedArtifacts);
 			bindingsAwaitingReceipt = baselineAwaitingReceipt = fixtureIntentQueued = stepMutationReady = false; expectingRejectedTransaction = false;
 			lightingBaselineObservation = lightingTransitionPending = false; sharedLightingBaselineDone = sharedLightingEditsDone = false; lightingBaselineCompleted = 0; lightingBaselineReceipt = nullptr;
 			for(auto& slots : lightingObservedSlots) slots.clear();
@@ -1266,22 +1307,16 @@ namespace TerraEngine::Editor::Automation
 			// Use the actual full UUID owner format shared by both boundaries.
 			operationId = ToHexString(GenerateUUID());
 			priorToken = {options.optionsSessionGeneration, options.options, true}; observedOptions = options;
-			submittedFrames = completedFrames = lastSubmit = lastComplete = 0; active = true; state = "Queued";
+			submittedFrames = completedFrames = lastSubmit = lastComplete = 0; state = "Queued";
 			unavailableReason = "The selected renderer efficiency fixture driver and GPU evidence are not implemented yet.";
 			if(!installedSteps.is_null())
 			{
 				state = "AwaitingAssets";
 				unavailableReason = "Awaiting native named subasset publication, verified cooked geometry, and target binding transactions before fixture measurement.";
 			}
-			requestedRuns = runs; preparedIdentity.reset(); identityError.clear(); documentJob = {}; completedEvidencePath.clear(); exportedFrameCount = exportedArtifactCount = 0;
+			requestedRuns = runs; preparedIdentity.reset(); identityError.clear(); documentJob = {}; completedEvidencePath.clear(); exportedFrameCount = 0; exportedArtifactCount = exportedArtifacts.size();
 			adapterName.clear(); driverVersion.clear(); colorWidth = colorHeight = 0;
 			if(stage=="P3") { colorWidth=fixtureCameras.front().nativeExtent.x; colorHeight=fixtureCameras.front().nativeExtent.y; }
-			// Authored recipes are immutable input closure, separate from GPU outputs.
-			if(stage=="P3") for(const auto& step : installedSteps.at("steps")) if(step.at("nativePayload").contains("depthRecipePath")) {
-				const auto& payload=step.at("nativePayload"); const auto path=payload.at("depthRecipePath").get<std::string>(); const auto bytes=ReadSealedBytes(projectRoot,path);
-				fixtureReceipts.push_back({{"kind","DepthInputRecipe"},{"fixtureStepId",step.at("id")},{"recipePath",path},{"recipeSha256",payload.at("depthRecipeSha256")},{"nativeExtent",step.at("nativeExtent")},{"recipe",payload.at("depthInputRecipe")}});
-				exportedArtifacts.push_back({{"kind","Counters"},{"status","Valid"},{"path",path},{"sha256",InstalledStepsHash(bytes)},{"reason",""}}); ++exportedArtifactCount;
-			}
 			identityJob = {};
 			if(!installedSteps.is_null())
 			{
@@ -1311,6 +1346,8 @@ namespace TerraEngine::Editor::Automation
 				});
 				identityJob = task->getFuture(); ThreadPool::instance().enqueue(task);
 			}
+			// Publish admission only after preparation and identity-task ownership succeed.
+			active = true;
 			error.clear(); return true;
 		}
 		catch(const std::exception& exception)

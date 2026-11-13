@@ -99,7 +99,8 @@ namespace TerraEngine::Tests
 		registry.Add("Navigation.LargeWorld.MissingNeighboursAreUnavailableAndLeasesInvalidateBeforeRetire", [](TestContext& context) {
 			NavigationStreamingCoordinator coordinator;
 			const NavigationCoverageKey key{4, -4, 0, 23U};
-			context.Expect(coordinator.PublishReady(key, 5U, 1024U), "The fixture requires one ready coverage record.");
+			context.Expect(coordinator.RequestInterest({4, -4, 0, 0, 0U, 23U}).size() == 1U, "Publication requires admitted interest.");
+			context.Expect(coordinator.PublishReady(coordinator.BeginPublication(key), 5U, 1024U), "The fixture requires one ready coverage record.");
 			context.Expect(coordinator.AcquireRouteLease(key, "route-1", 10U), "A ready route must hold a lease on its coverage.");
 			context.Expect(coordinator.MarkInvalidated(key), "Changed coverage must become dirty before retirement.");
 			context.Expect(coordinator.Observe(key).reason == NavigationStreamingReason::Invalidated,

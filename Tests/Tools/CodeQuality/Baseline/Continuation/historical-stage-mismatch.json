@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "historical-source-stage-qualification-v1",
+  "historicalRevision": "87d3fd037c1e881ff6630a4918c91be707673c1b",
+  "historicalTree": "47cf2ac37d0bee74c9da1b21e6516c3f9074a2f4",
+  "historicalStageManifestSha256": "5d5dd1c6a54c1e8c707428168a04fea1ec0536c1efebebc2d02eff19b71e4394",
+  "mismatchCount": 1,
+  "mismatches": [
+    {
+      "path": "Engine/Animation/AnimationSystem.h",
+      "exactGitSourceSha256": "6688ea0c2f069ddd330b6b4cda98d80a331b2ba7e6068458b39d7179ad1d7ae6",
+      "historicalStageExpectedSha256": "4c29d31ee9bfefdb5df5b435037bfbb7298b465692a07f4e8d67e6deaed12d75"
+    }
+  ],
+  "failureReceipt": {
+    "path": "historical-stage-failure.json",
+    "sha256": "df229f8086346c95f9740d841dad06d55abdfe1d1cf9ecb90a73e108348274a5",
+    "bytes": 11580
+  },
+  "qualification": "Exact historical Git source and frozen historical mutable-stage raw pin disagree for one newline-only header image. Preserve both unchanged. HistoricalAccounting verifies historical comment accounting and strict source stability only; all current stage checks remain mandatory in the separate joined workflow. No historical full Portable success or current/runtime acceptance is claimed.",
+  "structuralOnly": true,
+  "semanticCompletenessProven": false,
+  "lifetimeAcceptance": false
+}

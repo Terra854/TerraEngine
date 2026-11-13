@@ -186,6 +186,7 @@ namespace TerraEngine::Editor::Automation
 		bool Active() const { return active; }
 		const nlohmann::json& InstalledSteps() const { return installedSteps; }
 		const std::vector<Renderer::RendererEfficiencyFixtureCamera>& FixtureCameras() const { return fixtureCameras; }
+		void ReportRestorationFailure(std::string reason) { unavailableReason = std::move(reason); state = "Failed"; active = false; }
 		void ReportBootstrapUnavailable(std::string reason) { if(state == "AwaitingAssets") unavailableReason = std::move(reason); }
 		void ReportNativeUnavailable(std::string reason) { if(active) { unavailableReason = std::move(reason); nativeProviderFailure = true; } }
 		// Resource ingress runs at the existing protected boundary. A terminal

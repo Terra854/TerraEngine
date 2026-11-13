@@ -25,13 +25,19 @@ namespace TerraEngine::Navigation::Ground
 				|| first.coverage.verticalBand != second.coverage.verticalBand) return false;
 			if(first.boundaryAxis == 0U) {
 				return first.coverage.shardZ == second.coverage.shardZ
-					&& (first.coverage.shardX + 1U == second.coverage.shardX
-						|| second.coverage.shardX + 1U == first.coverage.shardX);
+					// Only the lower shard's positive edge meets its upper neighbor.
+					// The ordering guard also prevents signed overflow at the far edge.
+					&& ((first.positiveSide && first.coverage.shardX < second.coverage.shardX
+						&& first.coverage.shardX + 1 == second.coverage.shardX)
+						|| (second.positiveSide && second.coverage.shardX < first.coverage.shardX
+							&& second.coverage.shardX + 1 == first.coverage.shardX));
 			}
 			if(first.boundaryAxis == 1U) {
 				return first.coverage.shardX == second.coverage.shardX
-					&& (first.coverage.shardZ + 1U == second.coverage.shardZ
-						|| second.coverage.shardZ + 1U == first.coverage.shardZ);
+					&& ((first.positiveSide && first.coverage.shardZ < second.coverage.shardZ
+						&& first.coverage.shardZ + 1 == second.coverage.shardZ)
+						|| (second.positiveSide && second.coverage.shardZ < first.coverage.shardZ
+							&& second.coverage.shardZ + 1 == first.coverage.shardZ));
 			}
 			return false;
 		}

@@ -520,6 +520,23 @@ endfunction()
 # package layout keeps the original signed archive beside each extracted
 # package, so the feed manifest can prove that regeneration produced the exact
 # audited bytes rather than merely creating a directory with the expected name.
+# One authoritative restored-host selection is shared by declared build outputs
+# and cache verification. The cross-platform feed/legal audit remains unfiltered.
+function(terraengine_nuget_package_matches_runtime package_id runtime_id output)
+	string(TOLOWER "${package_id}" normalized_package_id)
+	set(selected TRUE)
+	if(runtime_id STREQUAL "linux-x64"
+			AND (normalized_package_id MATCHES "[.]win-x64$"
+				OR normalized_package_id MATCHES "^runtime[.]win-x64[.]"))
+		set(selected FALSE)
+	elseif(runtime_id STREQUAL "win-x64"
+			AND (normalized_package_id MATCHES "[.]linux-x64$"
+				OR normalized_package_id MATCHES "^runtime[.]linux-x64[.]"))
+		set(selected FALSE)
+	endif()
+	set(${output} "${selected}" PARENT_SCOPE)
+endfunction()
+
 function(terraengine_verify_nuget_package_cache package_cache)
 	if(NOT IS_DIRECTORY "${package_cache}")
 		message(FATAL_ERROR
@@ -541,15 +558,9 @@ function(terraengine_verify_nuget_package_cache package_cache)
 		# runtime packs selected by the active RID. Verify that exact host subset
 		# while terraengine_verify_offline_nuget_feed continues to hash every
 		# archive in the shared audited feed.
-		string(TOLOWER "${package_id}" normalized_package_id)
-		if(TERRAENGINE_RUNTIME_ID STREQUAL "linux-x64"
-				AND (normalized_package_id MATCHES "[.]win-x64$"
-					OR normalized_package_id MATCHES "^runtime[.]win-x64[.]"))
-			continue()
-		endif()
-		if(TERRAENGINE_RUNTIME_ID STREQUAL "win-x64"
-				AND (normalized_package_id MATCHES "[.]linux-x64$"
-					OR normalized_package_id MATCHES "^runtime[.]linux-x64[.]"))
+		terraengine_nuget_package_matches_runtime(
+			"${package_id}" "${TERRAENGINE_RUNTIME_ID}" package_matches_runtime)
+		if(NOT package_matches_runtime)
 			continue()
 		endif()
 		string(TOLOWER "${package_id}" package_directory)
@@ -626,7 +637,16 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 		"${CMAKE_COMMAND}" -E env
 		${dotnet_environment}
 		"${dotnet_executable}")
+	# SDK10 artifacts layout gives every project/reference its own obj directory
+	# under this build tree and RID. SDK pivots additionally separate config/TFM.
+	# Identical arguments must accompany restore and every later --no-restore call.
+	set(managed_isolation_arguments
+		"-p:ArtifactsPath=${CMAKE_BINARY_DIR}/ManagedArtifacts/${runtime_id}"
+		"-p:UseArtifactsOutput=true"
+		"-p:UseArtifactsIntermediateOutput=true"
+		"-p:IncludeProjectNameInArtifactsPaths=true")
 	set(restore_arguments
+		${managed_isolation_arguments}
 		--configfile "${TERRAENGINE_OFFLINE_NUGET_CONFIG}"
 		--packages "${package_cache}"
 		--no-http-cache
@@ -674,8 +694,12 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 		string(JSON package_relative_path GET
 			"${restore_manifest_json}" packages ${package_index} file)
 		string(TOLOWER "${package_id}" package_directory)
-		list(APPEND package_cache_metadata
-			"${package_cache}/${package_directory}/${package_version}/.nupkg.metadata")
+		terraengine_nuget_package_matches_runtime(
+			"${package_id}" "${runtime_id}" package_matches_runtime)
+		if(package_matches_runtime)
+			list(APPEND package_cache_metadata
+				"${package_cache}/${package_directory}/${package_version}/.nupkg.metadata")
+		endif()
 		list(APPEND restore_inputs
 			"${TERRAENGINE_OFFLINE_NUGET_ROOT}/${package_relative_path}")
 	endforeach()
@@ -687,6 +711,7 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 		# Verify before deleting the last usable cache. A damaged source feed must
 		# fail closed without destroying the previously restored package graph.
 		COMMAND "${CMAKE_COMMAND}"
+			"-DTERRAENGINE_NUGET_CACHE_MODE=${TERRAENGINE_NUGET_CACHE_MODE}"
 			"-DTERRAENGINE_RUNTIME_ID=${runtime_id}"
 			-P "${TERRAENGINE_OFFLINE_NUGET_MODULE}"
 		COMMAND "${CMAKE_COMMAND}" -E rm -rf "${package_cache}"
@@ -721,6 +746,7 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 			${hexa_compatibility_arguments}
 			${restore_arguments}
 		COMMAND "${CMAKE_COMMAND}"
+			"-DTERRAENGINE_NUGET_CACHE_MODE=${TERRAENGINE_NUGET_CACHE_MODE}"
 			"-DTERRAENGINE_RUNTIME_ID=${runtime_id}"
 			"-DTERRAENGINE_NUGET_PACKAGE_CACHE=${package_cache}"
 			-P "${TERRAENGINE_OFFLINE_NUGET_MODULE}"
@@ -736,6 +762,8 @@ function(terraengine_add_offline_nuget_restore_target target_name runtime_id)
 
 	# Return the exact environment-prefixed command to the caller so build and
 	# publish targets read the same isolated package cache as restore.
+	set(TERRAENGINE_DOTNET_ISOLATION_ARGUMENTS
+		"${managed_isolation_arguments}" PARENT_SCOPE)
 	set(TERRAENGINE_DOTNET_COMMAND
 		"${dotnet_command}"
 		PARENT_SCOPE)

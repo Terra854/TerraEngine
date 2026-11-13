@@ -830,6 +830,9 @@ namespace
 
 void ScriptWorkspaceService::SetProjectRoot(const std::filesystem::path& projectRoot)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("SetProjectRoot");
+#endif
 	if (projectRoot.empty())
 	{
 		m_ProjectRoot = std::filesystem::path{};
@@ -856,24 +859,36 @@ void ScriptWorkspaceService::SetProjectRoot(const std::filesystem::path& project
 
 bool ScriptWorkspaceService::HasProjectRoot() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("HasProjectRoot");
+#endif
 	return !m_ProjectRoot.empty();
 }
 
 
 const ScriptWorkspaceStatus& ScriptWorkspaceService::GetStatus() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetStatus");
+#endif
 	return m_Status;
 }
 
 
 std::filesystem::path ScriptWorkspaceService::GetProjectRoot() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetProjectRoot");
+#endif
 	return m_ProjectRoot;
 }
 
 
 std::filesystem::path ScriptWorkspaceService::GetSolutionPath() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetSolutionPath");
+#endif
 	if (m_ProjectRoot.empty())
 	{
 		return {};
@@ -885,6 +900,9 @@ std::filesystem::path ScriptWorkspaceService::GetSolutionPath() const
 
 std::filesystem::path ScriptWorkspaceService::GetProjectPath() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetProjectPath");
+#endif
 	if (m_ProjectRoot.empty())
 	{
 		return {};
@@ -896,6 +914,9 @@ std::filesystem::path ScriptWorkspaceService::GetProjectPath() const
 
 std::filesystem::path ScriptWorkspaceService::GetOutputRoot() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetOutputRoot");
+#endif
 	if (m_ProjectRoot.empty())
 	{
 		return {};
@@ -907,12 +928,18 @@ std::filesystem::path ScriptWorkspaceService::GetOutputRoot() const
 
 std::filesystem::path ScriptWorkspaceService::GetReferenceRoot() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetReferenceRoot");
+#endif
 	return GetOutputRoot() / "References";
 }
 
 
 std::filesystem::path ScriptWorkspaceService::GetAssemblyPath() const
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("GetAssemblyPath");
+#endif
 	return GetOutputRoot() / "Assembly-CSharp.dll";
 }
 
@@ -975,6 +1002,9 @@ bool ScriptWorkspaceService::PublishManagedReadiness(const std::string& buildPro
 
 bool ScriptWorkspaceService::EnsureWorkspace(std::string* outError)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("EnsureWorkspace");
+#endif
 	if (!HasProjectRoot())
 	{
 		const std::string message = "Cannot generate the script workspace before a project is open.";
@@ -1001,6 +1031,9 @@ bool ScriptWorkspaceService::EnsureWorkspace(std::string* outError)
 
 bool ScriptWorkspaceService::RegenerateWorkspace(std::string* outError)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("RegenerateWorkspace");
+#endif
 	return EnsureWorkspace(outError);
 }
 
@@ -1014,6 +1047,9 @@ std::vector<ScriptTemplateDescriptor> ScriptWorkspaceService::ListApprovedTempla
 
 bool ScriptWorkspaceService::CreateApprovedScript(const ScriptCreationRequest& request, ScriptCreationResult& outResult, std::string* outError)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("CreateApprovedScript");
+#endif
 	outResult = ScriptCreationResult{};
 	if (!HasProjectRoot())
 	{
@@ -1109,6 +1145,9 @@ bool ScriptWorkspaceService::CreateApprovedScript(const ScriptCreationRequest& r
 
 bool ScriptWorkspaceService::SynchronizeWorkspace(ScriptWorkspaceStatus& outStatus, std::string* outError)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("SynchronizeWorkspace");
+#endif
 	const bool synchronized = EnsureWorkspace(outError);
 	outStatus = m_Status;
 	return synchronized;
@@ -1177,6 +1216,9 @@ bool ScriptWorkspaceService::OpenScriptInExternalEditor(const std::filesystem::p
 
 bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("WriteWorkspaceFiles");
+#endif
 	const std::filesystem::path templateRoot = ResolveTemplateRoot();
 	const std::string solutionTemplate = LoadTemplate(templateRoot / "Solution.sln.in");
 	const std::string projectTemplate = LoadTemplate(templateRoot / "Assembly-CSharp.csproj.in");
@@ -1238,6 +1280,9 @@ bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 
 bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 {
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	ObserveAccessForTests("SyncManagedReferences");
+#endif
 	const std::filesystem::path sourceDll = ResolveManagedBridgePath();
 	const std::filesystem::path targetDll = GetReferenceRoot() / "TerraEngine.CSharp.dll";
 

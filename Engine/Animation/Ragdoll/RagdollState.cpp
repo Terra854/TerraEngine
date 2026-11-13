@@ -125,12 +125,19 @@ namespace TerraEngine::Animation {
 			for(const float weight : snapshot.blendWeights) {
 				if(!std::isfinite(weight) || weight < 0.0F || weight > 1.0F) return false;
 			}
+			// Rollback captures bodies in every lifecycle, so explicit weights
+			// must match before any state/history can be published. Empty weights
+			// remain the supported implicit-full-blend representation.
+			if(!snapshot.blendWeights.empty()
+				&& snapshot.blendWeights.size() != snapshot.physicsPose.bodies.size()) return false;
 			const bool requiresPose = snapshot.lifecycle == RagdollLifecycleState::Active
 				|| snapshot.lifecycle == RagdollLifecycleState::Recovering;
-			return !requiresPose
-				|| (ValidatePhysicsPoseSnapshot(snapshot.physicsPose, snapshot.generation) == AnimationStatus::Ok
-					&& (snapshot.blendWeights.empty()
-						|| snapshot.blendWeights.size() == snapshot.physicsPose.bodies.size()));
+			if(requiresPose) return ValidatePhysicsPoseSnapshot(snapshot.physicsPose, snapshot.generation) == AnimationStatus::Ok;
+			// Preserve incomplete Creating/dormant pose semantics. Only structural
+			// joint uniqueness is required here; current-step completeness remains
+			// specific to the existing Active/Recovering consumption contract.
+			std::array<std::size_t, kRagdollSnapshotMaximumBodies> order{};
+			return HaveUniquePhysicsPoseJoints(snapshot.physicsPose.bodies, order);
 		}
 	}
 

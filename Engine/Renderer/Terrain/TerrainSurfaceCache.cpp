@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <unordered_set>
 
 namespace TerraEngine::Renderer::Terrain
 {
@@ -45,6 +46,11 @@ namespace TerraEngine::Renderer::Terrain
 		plan.observedGeneration = observedGeneration;
 		if (observedGeneration == 0u || (cancellation != nullptr && cancellation->load(std::memory_order_acquire))) { plan.cancelled = true; return plan; }
 		plan.candidate.assign(prior.begin(), prior.end());
+		// Sparse eviction leaves holes in physical ownership. Vector position is
+		// not a tile identity; reserve only genuinely unused, nonsentinel tiles.
+		std::unordered_set<std::uint32_t> occupiedTiles;
+		for (const auto& page : plan.candidate) occupiedTiles.insert(page.atlasTile);
+		std::uint32_t nextTile = 0U;
 		std::sort(requests.begin(), requests.end(), [](const auto& left, const auto& right) { return left.priority > right.priority; });
 		for (const TerrainSurfaceCacheRequest& request : requests)
 		{
@@ -59,7 +65,10 @@ namespace TerraEngine::Renderer::Terrain
 			if (existing != plan.candidate.end()) continue;
 			auto previous = std::find_if(plan.candidate.begin(), plan.candidate.end(), [&request](const auto& page) { return page.key.assetId == request.key.assetId && page.key.area == request.key.area && !page.lastKnownGood; });
 			if (previous != plan.candidate.end()) previous->lastKnownGood = true;
-			const std::uint32_t tile = static_cast<std::uint32_t>(plan.candidate.size());
+			while (nextTile != 0xffffffffU && occupiedTiles.contains(nextTile)) ++nextTile;
+			if (nextTile == 0xffffffffU) { plan.cancelled = true; return plan; }
+			const std::uint32_t tile = nextTile;
+			occupiedTiles.insert(tile);
 			TerrainSurfacePageHandle next{request.key, tile, request.byteCount, observedGeneration, false, request.protectedFromEviction};
 			plan.candidate.push_back(next);
 		}

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <array>
 #include <functional>
+#include <future>
 #include <optional>
 #include <entt/entity/entity.hpp>
 #include <map>
@@ -187,6 +188,7 @@ public:
 	// scene snapshots, Jolt world ownership, scripting, and fixed-step controls
 	// cannot drift into two different Play Mode implementations.
 	bool StartPlayMode();
+	bool IsPlayModeEntryPending() const noexcept { return m_PlayModeEntryPending; }
 	bool SetPlayModePaused(bool paused);
 	bool StepPlayMode();
 	void StopPlayMode();
@@ -255,6 +257,14 @@ public:
 	bool InstantiatePrefabAsset(const TerraEngine::UUID& prefabGuid, std::optional<entt::entity> parent = std::nullopt);
 	bool OpenPrefabFromObject(entt::entity object);
 	bool ResetPrefabInstanceToDefaults(entt::entity object);
+	// Interactive reset admits detached I/O/decode, then polls at the protected
+	// editor boundary. The synchronous entry remains for headless owner fixtures.
+	bool RequestPrefabInstanceReset(entt::entity object);
+	void PollPrefabInstanceReset();
+	bool IsPrefabInstanceResetPending() const { return m_PrefabResetRequest.has_value(); }
+	// Empty while no reset has completed (or a newly accepted reset is pending).
+	// Retain rejection as a terminal result instead of silently clearing the job.
+	std::optional<bool> GetLastPrefabInstanceResetResult() const { return m_LastPrefabResetResult; }
 	bool SaveOpenPrefab();
 	void ClosePrefabMode();
 	bool IsPrefabEditingMode() const { return m_IsPrefabEditingMode; }
@@ -334,6 +344,18 @@ private:
 	bool CloseCurrentProject();
 	
 	EditorContext* ctx = nullptr;
+	struct PrefabResetRequest {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::filesystem::path sceneRoot;
+		TerraEngine::Scene::Transaction witness;
+		std::future<nlohmann::json> future;
+		std::optional<nlohmann::json> prepared;
+	};
+	std::optional<PrefabResetRequest> m_PrefabResetRequest;
+	std::optional<bool> m_LastPrefabResetResult;
+	bool m_PlayModeEntryPending = false;
+	std::filesystem::path m_PlayModeEntrySceneRoot;
+	std::uint64_t m_PlayModeEntrySceneGeneration = 0U;
 	std::function<void()> onProjectClosed;
 	
 	// Windows

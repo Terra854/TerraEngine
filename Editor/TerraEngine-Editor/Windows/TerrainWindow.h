@@ -18,10 +18,12 @@
 #include "Terrain/TerrainGarbageCollector.h"
 #include "Terrain/TerrainLayerStack.h"
 #include "Terrain/TerrainMaterial.h"
+#include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Renderer/Terrain/TerrainDirectMesh.h"
 #include "Editor/AssetCompilers/TerrainCompiler.h"
 
 #include <atomic>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -40,6 +42,9 @@
 // TerrainComponent Inspector owns all interactive terrain presentation.
 class TerrainWindow final
 {
+	// Native regressions supply immutable worker input and inspect preparation;
+	// they still invoke the real cancel/open/cook paths and protected ownership.
+	friend struct TerrainCollisionPreparationReviewAccess;
 public:
 	struct AutomationOperationStart { bool accepted=false; std::string category,message; std::optional<TerraEngine::UUID> transactionId; };
 	// Scene View renders this canonical footprint through its own camera. Keeping
@@ -115,7 +120,12 @@ public:
 	// Terrain height and holes are their own collision source. Play Mode calls this
 	// after creating a physics world, while committed edits call it automatically;
 	// users never need to add or configure a separate collider component.
-	[[nodiscard]] bool QueueAutomaticTerrainCollision(std::string& outError);
+	// Returns admission success immediately; pending reports worker preparation.
+	// Play can prewarm without a world, then stage the same candidate after startup.
+	[[nodiscard]] bool QueueAutomaticTerrainCollision(std::string& outError, bool* pending = nullptr, bool prepareForPlay = false);
+	// Protected editor boundary: forget worker output and revoke staged adoption.
+	// Detached workers own immutable data and may finish without this window.
+	void CancelAutomaticTerrainCollision();
 	[[nodiscard]] bool HasDetachedPreview() const noexcept { return authoringSession.IsDirty(); }
 	[[nodiscard]] const TerraEngine::Terrain::TerrainResizePreview* ActiveResizePreview() const noexcept
 	{
@@ -329,6 +339,9 @@ private:
 	// may be published at the protected boundary for responsive sculpt feedback,
 	// but only terrain transactions may change durable roots, collision, or history.
 	std::future<TerraEngine::Renderer::Terrain::TerrainDirectMeshResult> terrainRenderProxyFuture;
+	std::future<TerraEngine::Physics::Terrain::TerrainCollisionCandidate> automaticCollisionFuture;
+	std::optional<TerraEngine::Physics::Terrain::TerrainCollisionCandidate> automaticCollisionReady;
+	std::chrono::steady_clock::time_point automaticCollisionStarted{};
 	std::shared_ptr<std::atomic_bool> terrainRenderProxyCancellation;
 	TerraEngine::UUID terrainRenderProxyMeshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID terrainRenderProxyMaterialId = TerraEngine::EMPTY_UUID;

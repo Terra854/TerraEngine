@@ -22,7 +22,7 @@ if($outputParent -and !(Test-Path $outputParent)) {
 $originalPath = $env:PATH
 $installRoot = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 $engineDirectory = Join-Path $installRoot 'Engine'
-$stop = (Get-Date).AddMinutes($DurationMinutes)
+$requiredSeconds = [double]$DurationMinutes * 60.0
 $iterations = 0
 $maximumMedianDeltaMs = 0.0
 $maximumP95DeltaMs = 0.0
@@ -33,7 +33,10 @@ $lastHash = ''
 $clock = [Diagnostics.Stopwatch]::StartNew()
 try {
 	if(Test-Path $engineDirectory) { $env:PATH = "$engineDirectory;$env:PATH" }
-	while((Get-Date) -lt $stop) {
+	# Use the same monotonic clock for the deadline and reported elapsed time.
+	# Wall time can change and a deadline created before this stopwatch starts
+	# can otherwise finish just short of the required real workload duration.
+	while($clock.Elapsed.TotalSeconds -lt $requiredSeconds) {
 		$raw = & $RunnerPath $RequestedSources $RepeatCount
 		if($LASTEXITCODE -ne 0) { throw "Soak child failed with exit code $LASTEXITCODE" }
 		$result = $raw | ConvertFrom-Json

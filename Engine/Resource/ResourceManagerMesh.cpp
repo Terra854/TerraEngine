@@ -1200,6 +1200,9 @@ namespace
 				|| morphPositionBytes.size() != expectedMorphBytes
 				|| morphNormalBytes.size() != expectedMorphBytes
 				|| morphTangentBytes.size() != expectedMorphBytes
+				// Entry and blob records are paired by index below. Their dimensions
+				// must agree before any blob decode or paired record access occurs.
+				|| productionMesh->deformableDemandedPageEntries.size() != productionMesh->deformableDemandedPageBlobs.size()
 				|| root.demandedPageCount != productionMesh->deformableDemandedPageEntries.size()
 				|| (demandedPagesRequired
 					&& (productionMesh->deformableDemandedPageDirectory.version
@@ -1333,7 +1336,8 @@ namespace
 					pageBlocks.push_back(&block);
 				}
 			}
-			if (pageBlocks.size() != productionMesh->deformableDemandedPageBlobs.size())
+			if (pageBlocks.size() != productionMesh->deformableDemandedPageBlobs.size()
+				|| pageBlocks.size() != productionMesh->deformableDemandedPageEntries.size())
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page blob count is invalid.");
 				return nullptr;

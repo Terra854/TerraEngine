@@ -1,7 +1,7 @@
 {
 	"format": "TerraSceneUnboundedV1",
 	"objects": [{
-		"uuid": "580000000000000000000000000002",
+		"uuid": "58000000000000000000000000000002",
 		"name": "Unsupported Source Scene Object",
 		"components": {"NavigationSourceComponent": {}}
 	}]

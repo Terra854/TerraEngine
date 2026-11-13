@@ -79,6 +79,9 @@ private:
 	std::array<std::uint64_t, MouseButtonCount()> observedMouseButtonPressGenerations{};
 	std::array<bool, MouseButtonCount()> mouseButtonPressedThisFrame{};
 	std::pair<double, double> cursorPosition{0.0, 0.0};
+	// Protected callbacks accumulate until the Input phase publishes one frame.
+	// Workers receive only the copied latestSnapshot, never this pending state.
+	std::pair<double, double> pendingScrollDelta{0.0, 0.0};
 	std::pair<double, double> scrollDelta{0.0, 0.0};
 	InputSnapshot latestSnapshot{};
 	std::uint64_t nextSnapshotRevision = 1;

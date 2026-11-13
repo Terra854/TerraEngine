@@ -1023,7 +1023,7 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 
 	std::vector<std::filesystem::path> authoredStylePaths;
 
-	if (nextSession.root && !nextSession.root->styleSheetSources.empty())
+	if (nextSession.root && (nextSession.root->hasExplicitStyleSheetSources || !nextSession.root->styleSheetSources.empty()))
 	{
 		for (const std::string& styleSource : nextSession.root->styleSheetSources)
 		{
@@ -1166,7 +1166,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 		}
 
 
-		if (nextSession.root && !nextSession.root->styleSheetSources.empty())
+		if (nextSession.root && (nextSession.root->hasExplicitStyleSheetSources || !nextSession.root->styleSheetSources.empty()))
 		{
 			for (const std::string& styleSource : nextSession.root->styleSheetSources)
 			{
@@ -1365,8 +1365,8 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	{
 		if (styleSession.removeOnNextSave && !styleSession.internalPath.empty())
 		{
-			std::error_code errorCode;
-			std::filesystem::remove(ResolveAuthoredPath(styleSession.internalPath), errorCode);
+			// Detach removes this document's reference only. Other documents may
+			// share the authored stylesheet and its metadata, so never delete it.
 			styleSession.internalPath.clear();
 			styleSession.removeOnNextSave = false;
 			styleSession.attached = false;
@@ -1403,6 +1403,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 		++writtenStyleSheetCount;
 	}
 
+	m_DocumentSession.root->hasExplicitStyleSheetSources = true;
 	m_DocumentSession.root->styleSheetSources.clear();
 
 	for (const std::filesystem::path& savedStylePath : savedStylePaths)

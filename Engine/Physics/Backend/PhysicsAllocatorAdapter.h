@@ -10,9 +10,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace TerraEngine::Physics::Backend {
+	struct PhysicsProviderDiagnosticState;
 	// Provider failures are translated before they leave the backend boundary.
 	// Callers can preserve this compact value in diagnostics without storing Jolt
 	// enums, callback pointers, or provider-owned strings.
@@ -44,6 +46,20 @@ namespace TerraEngine::Physics::Backend {
 		std::uint64_t traceMessages = 0U;
 		std::uint64_t assertionFailures = 0U;
 		std::uint64_t suppressedLogMessages = 0U;
+	};
+
+	// Attribute synchronous asset-cooking callbacks to a separate failure channel.
+	// Other threads retain their live-world channel. Backends constructed inside
+	// this scope retain its diagnostics; it does not clear or hide live failures.
+	// Async provider jobs must explicitly propagate a domain before using this API.
+	class TERRAENGINE_API ScopedPhysicsProviderFailureIsolation final {
+	public:
+		ScopedPhysicsProviderFailureIsolation();
+		~ScopedPhysicsProviderFailureIsolation();
+		ScopedPhysicsProviderFailureIsolation(const ScopedPhysicsProviderFailureIsolation&) = delete;
+		ScopedPhysicsProviderFailureIsolation& operator=(const ScopedPhysicsProviderFailureIsolation&) = delete;
+	private:
+		std::shared_ptr<PhysicsProviderDiagnosticState> previous;
 	};
 
 	// PhysicsBackendProfileScope maps a named backend operation onto TerraEngine's
@@ -83,5 +99,6 @@ namespace TerraEngine::Physics::Backend {
 
 	private:
 		bool installed = false;
+		std::shared_ptr<PhysicsProviderDiagnosticState> isolatedDiagnostics;
 	};
 }

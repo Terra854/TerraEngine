@@ -1,84 +1,125 @@
 # Terra Engine Mesh File (TEMF) Specification
 
-TEMF packages meshlet-optimized vertex/index data in a high-performance layout designed for zero-copy GPU consumption and DirectStorage/GDS compatibility.
+TEMF stores a versioned production directory and encoded mesh blocks. The
+canonical ABI is [`MeshHeader` (`TemfProductionHeader`)](../Engine/File%20Formats/TerraEngineMeshFile.h),
+not the decoded `MeshletRuntimeLayout`. All root fields are packed little-endian.
+Codecs and quantization profiles determine how payloads are reconstructed; a
+raw, zero-copy or universally 4KB-aligned stream layout must not be assumed.
 
-## Design Goals
-- **DirectStorage Ready**: Every data stream is aligned to 4KB boundaries to support high-speed NVMe IO.
-- **Zero-Copy Remap**: Support for on-disk `u16` or `u32` vertex indirection without CPU-side decompression.
-- **Meshlet Native**: Built specifically for the programmable mesh shader pipeline.
-- **Aggressive Packing**: Lean 16-byte vertex stride using quantized and octahedral attributes.
+## Production contract
 
-## Virtual Geometry Compatibility Note
+The current format is major `1`, minor `0`, with `headerBytes = 192` and semantic
+contract `0x31445250464d4554` (`TEMFPRD1`). The loader requires the production
+header/contract; historical meshlet root layouts are not supported compatibility
+formats. Rebuild stale compiled assets from source rather than mixing layouts.
+The unchanged major version alone does not establish compatibility.
 
-The virtual geometry feature keeps TEMF at version `1` while the engine format
-is still unstable. The payload layout may break compatibility with older
-compiled mesh files in place. Users should rebuild static mesh and model package
-outputs from source after the virtual geometry payload lands; no legacy
-compatibility shim is planned for stale compiled payloads.
+## Binary layout (all little-endian)
 
-Virtual geometry payloads add advisory requested targets, accepted/generated
-detail-level tables, skipped-detail diagnostics, preserved material section
-ranges, cullable group metadata, streamable page metadata, cluster hierarchy
-records, cluster-page links, validation flags, and cook diagnostics. Loaders
-must reject stale or invalid virtual geometry payloads atomically so failed
-rebuilds do not leave partially visible runtime state.
-
-These additions are still allowed to break older compiled mesh files while the
-engine format is unstable. When `virtualGeometryPayloadGeneration` changes, or
-when validation reports missing requested targets, fallback coverage, cluster
-hierarchy, page metadata, or cluster-page links, rebuild the source mesh or
-source package instead of trying to mix old whole-object LOD data with new
-cluster/page selection data.
-
-## Binary Layout (all little-endian)
-```
-Header                // fixed-size MeshHeader (236 bytes), padded to 4KB
-VertexData            // raw bytes (16b stride), aligned to 4KB
-VertexRemapData       // indirection pool (u16 or u32), aligned to 4KB
-SkinningData          // optional (8b stride), aligned to 4KB
-PrimitiveIndexData    // meshlet-local indices (u8), aligned to 4KB
-MeshletRecordTable    // offsets/counts per meshlet, aligned to 4KB
-MeshletSectionTable   // draw call ranges, aligned to 4KB
-MeshletBoundsTable    // optional culling spheres + cones, aligned to 4KB
-VirtualGeometryRoot   // optional VirtualGeometryHeader + tables, 4-byte table alignment
+```text
+MeshHeader                 // 192 bytes, alignment 1
+TemfPageDescriptor[]        // 64-byte records; pageTableOffset/pageCount
+TemfBlockDescriptor[]       // 112-byte records; blockTableOffset/blockCount
+TemfQuantizationDomain[]    // 128-byte records; quantizationTableOffset/count
+TemfBlockDependency[]       // 16-byte records; dependencyTableOffset/count
+Encoded block payloads     // payloadOffset/payloadBytes; per-block codec metadata
 ```
 
-### Header (236 bytes)
-| Offset | Size | Field | Description |
-| --- | --- | --- | --- |
-| 0 | 4 | magic | ASCII `TEMF` |
-| 4 | 2 | version | Current version = 1 |
-| 6 | 2 | reserved | Must be 0 |
-| 8 | 4 | headerSize | Size of the header struct (236) |
-| 12 | 4 | meshletVertexCount | Total vertices in the global packed pool |
-| 16 | 4 | meshletVertexRemapCount | Number of entries in the indirection stream |
-| 20 | 4 | meshletPrimitiveIndexCount | Number of `uint8` local indices |
-| 24 | 4 | meshletCount | Total number of meshlets |
-| 28 | 4 | meshletSectionCount | Number of draw call sections |
-| 32 | 4 | meshletBoundsCount | Number of culling bounds entries |
-| 36 | 4 | meshletVertexDataOffset | 4KB aligned offset to vertices |
-| 40 | 4 | meshletVertexRemapDataOffset | 4KB aligned offset to remap stream |
-| 44 | 4 | meshletPrimitiveIndexDataOffset | 4KB aligned offset to primitive stream |
-| 48 | 4 | meshletTableOffset | 4KB aligned offset to meshlet records |
-| 52 | 4 | meshletSectionOffset | 4KB aligned offset to sections |
-| 56 | 4 | meshletVertexRemapEncoding | 0 = `uint32`, 1 = `uint16` |
-| 60 | 4 | meshletFlags | bit 0: has bounds, bit 1: has virtual geometry |
-| 64 | 4 | meshletBoundsOffset | 4KB aligned offset to bounds |
-| 68 | 4 | meshletSkinningDataOffset | 4KB aligned offset to skinning stream |
-| 72 | 4 | meshletSkinningDataCount | Number of skinned vertices (matches vertex count if used) |
-| 76 | 4 | virtualGeometryHeaderOffset | Absolute offset to `VirtualGeometryHeader` when bit 1 is set |
-| 80 | 4 | virtualGeometryHeaderSize | Size of `VirtualGeometryHeader` (116) |
-| 84 | 4 | virtualGeometryPayloadGeneration | Current in-place payload generation |
-| 88 | 4 | virtualGeometryReserved | Reserved, must be 0 |
-| 92 | 4 | layout.strideBytes | Byte stride of each vertex (standard = 16) |
-| 96 | 4 | layout.attributeCount | Attributes used (<= 8) |
-| 100 | 96 | layout.attributes[8] | Vertex declaration (semantic/format/offset) |
-| 196 | 12 | quantization.positionOffset | Bounding box center |
-| 208 | 12 | quantization.positionScale | Bounding box half-extents |
-| 220 | 8 | quantization.uvOffset | Minimum UV |
-| 228 | 8 | quantization.uvScale | UV Range |
+Follow the recorded 64-bit file-relative offsets and bounded ranges; tables and
+payloads need not start at a universal 4KB boundary. The production writer uses
+`kTemfDirectoryAlignment = 16` for directory-table and payload-base placement.
+A paged mesh starts its page table after the 192-byte root; a direct-resident
+mesh has no page table. Individual encoded blocks follow their recorded offsets,
+lengths and alignment requirements, rather than an assumed 4KB or 16-byte stride.
 
-### Key Formats
+### Header (192 bytes)
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 4 | `magic` |
+| 4 | 2 | `formatVersion` |
+| 6 | 2 | `minorVersion` |
+| 8 | 4 | `headerBytes` |
+| 12 | 4 | `representationFlags` |
+| 16 | 8 | `assetIdentity` |
+| 24 | 8 | `sourceContentHash` |
+| 32 | 8 | `buildRecipeHash` |
+| 40 | 8 | `toolIdentity` |
+| 48 | 8 | `generationIdentity` |
+| 56 | 4 | `selectedCodecProfileId` |
+| 60 | 4 | `selectedQuantizationProfileId` |
+| 64 | 4 | `logicalPageSizeBytes` |
+| 68 | 4 | `pageCount` |
+| 72 | 4 | `blockCount` |
+| 76 | 4 | `quantizationDomainCount` |
+| 80 | 4 | `dependencyCount` |
+| 84 | 4 | `reserved0` |
+| 88 | 8 | `pageTableOffset` |
+| 96 | 8 | `blockTableOffset` |
+| 104 | 8 | `quantizationTableOffset` |
+| 112 | 8 | `dependencyTableOffset` |
+| 120 | 8 | `payloadOffset` |
+| 128 | 8 | `payloadBytes` |
+| 136 | 8 | `directoryHash` |
+| 144 | 8 | `payloadHash` |
+| 152 | 8 | `requiredCapabilityMask` |
+| 160 | 8 | `attributeCoverageMask` |
+| 168 | 8 | `formatContractId` |
+| 176 | 8 | `directoryBytes` |
+| 184 | 8 | `reserved1` |
+
+Validate magic (`TEMF`), major/minor, header size and contract before following
+any directory. Use checked multiplication and subtraction-based range checks
+before allocation/decompression. Validate directory/payload/block integrity,
+capability and attribute masks, page dependencies and codec/quantization domains
+before publishing immutable runtime state. A rejected reload retains last-good
+state. The packed record definitions and static assertions are the ABI authority.
+
+## Decoded meshlet and virtual-geometry payloads
+
+The records below describe reconstructed meshlet/virtual-geometry payload data.
+They are **not** an alternative on-disk root. Historical meshlet header fields
+such as `meshletFlags`, `virtualGeometryHeaderOffset`, `layout`, and `quantization`
+now belong to `MeshletRuntimeLayout` after validated production block decoding.
+The current compiler emits the virtual header and each nonempty table as separate
+production streams. `ResourceManagerMesh.cpp` selects matching blocks by the exact
+pair `streamKind` and `attributeMask`, decodes them, and concatenates their bytes in
+directory order. It reconstructs typed vectors from those streams, rather than
+following table offsets into a single decoded virtual-geometry payload.
+
+For virtual-geometry records, `streamKind` is `TemfStreamKind::Metadata` (`9`)
+and `attributeMask` is one exact `kTemfMetadata*` subkind below. These masks are
+selectors for this lookup, not offsets or a substitute for the production root's
+file-relative block-directory ranges. Empty source tables produce no stream.
+
+| Metadata subkind | `attributeMask` | Decoded destination |
+|---|---:|---|
+| `kTemfMetadataVirtualHeader` | `1 << 4` | One `VirtualGeometryHeader` |
+| `kTemfMetadataVirtualDetailLevels` | `1 << 5` | Detail-level records |
+| `kTemfMetadataVirtualMaterialSections` | `1 << 6` | Material-section records |
+| `kTemfMetadataVirtualSectionRanges` | `1 << 7` | Section-range records |
+| `kTemfMetadataVirtualCullableGroups` | `1 << 8` | Cullable-group records |
+| `kTemfMetadataVirtualPages` | `1 << 9` | Page records |
+| `kTemfMetadataVirtualRequestedTargets` | `1 << 10` | Requested-target records |
+| `kTemfMetadataVirtualSkippedDetails` | `1 << 11` | Skipped-detail records |
+| `kTemfMetadataVirtualClusters` | `1 << 12` | Cluster records |
+| `kTemfMetadataVirtualClusterPageLinks` | `1 << 13` | Cluster-page-link records |
+| `kTemfMetadataVirtualConeSafety` | `1 << 14` | Cone-safety records |
+| `kTemfMetadataVirtualValidationFlags` | `1 << 15` | Validation-flag records |
+| `kTemfMetadataVirtualDiagnostics` | `1 << 16` | Diagnostic records |
+| `kTemfMetadataVirtualDiagnosticStrings` | `1 << 17` | Diagnostic string bytes |
+
+`kTemfMetadataRuntimeLayout` (`1 << 0`), meshlet records (`1 << 1`), sections
+(`1 << 2`) and bounds (`1 << 3`) are separate metadata streams too. Geometry and
+identity data use their own stream kinds. Attribute strides and codecs come from
+the validated block descriptors and quantization domains.
+
+### Historical meshlet packing notes
+
+The older meshlet layout used the packing descriptions below. They are reference
+notes for retained runtime fields, not the encoded production-block layout or a
+universal decoded vertex stride. Read current stream descriptors as described above.
+
 - **Vertex Attribute (12 bytes)**:
   - `Position`: `R10G10B10A2Snorm` (10-bit per axis).
   - `Normal`: `Oct32` (High-precision octahedral 2D mapping).
@@ -87,7 +128,7 @@ VirtualGeometryRoot   // optional VirtualGeometryHeader + tables, 4-byte table a
 - **Meshlet Record (16 bytes)**: Stores `vertexOffset`, `vertexCount`, `primitiveIndexOffset`, `primitiveIndexCount`.
 
 ### Implementation Notes
-- **Alignment**: Every payload MUST begin on a 4096-byte boundary to ensure compatibility with `O_DIRECT`, `io_uring`, and DirectStorage.
+- **Alignment**: Follow the production directory's recorded offsets and encoded sizes, then validate the decoded record layout. There is no universal 4096-byte alignment requirement for on-disk directories or encoded blocks; any aligned IO staging is a backend concern, not a file-format invariant.
 - **Shader Consumption**: Shaders should use `ByteAddressBuffer` to load remap indices and manually handle the `u16`/`u32` bit-shift logic based on the `meshletVertexRemapEncoding` flag.
 - **Culling**: Pre-computed `MeshletBounds` provide conservative frustum sphere checks. Cone data is still stored for diagnostics/future validation, but runtime cone rejection is disabled until imported mesh sidedness and winding safety are carried into the task shader.
 
@@ -106,43 +147,52 @@ Loader rules:
 - Invalid sphere values are hard errors.
 - Invalid cone values are sanitized to conservative "do not backface cull" behavior.
 
-### Virtual Geometry Header (116 bytes)
+### Virtual Geometry Header (124 bytes)
 
-The root is present only when `meshletFlags & kMeshletHeaderFlagHasVirtualGeometry`
-is set. All offsets are absolute file offsets. Table records are packed and
-4-byte aligned relative to the root.
+For a production virtual-geometry representation, the loader reads this record
+from `Metadata` / `kTemfMetadataVirtualHeader`; the production representation flag
+and required metadata streams determine availability. The compiler retains the
+old packed-layout offset fields in this record and can emit nonzero values for
+them. Current stream reconstruction does not use them to locate tables: they are
+neither authoritative file offsets for TEMFPRD1 tables nor offsets into a single
+decoded arena. Do not seek to them or assume they are zero.
+
+The table below records the current C++ record shape, including its retained
+legacy fields. It does not define a second production root or an old-file loader.
 
 | Offset | Size | Field | Description |
 | --- | --- | --- | --- |
-| 0 | 4 | payloadGeneration | Must match the loader's current `kVirtualGeometryPayloadGeneration` |
-| 4 | 4 | headerSize | Size of `VirtualGeometryHeader` (76) |
-| 8 | 4 | detailLevelCount | Number of whole-mesh selectable LOD records |
-| 12 | 4 | materialSectionCount | Number of material section records |
-| 16 | 4 | sectionRangeCount | Number of per-LOD section ranges |
-| 20 | 4 | cullableGroupCount | Number of cullable group records |
-| 24 | 4 | pageCount | Number of virtual geometry page records |
-| 28 | 4 | diagnosticRecordCount | Number of diagnostic table records |
-| 32 | 4 | flags | Reserved for payload-level feature flags |
-| 36 | 4 | sourceTriangleCount | Source triangle count before simplification |
-| 40 | 4 | sourceVertexCount | Source vertex count before simplification |
-| 44 | 4 | requestedTargetCount | Number of advisory requested target records |
-| 48 | 4 | skippedDetailCount | Number of skipped/merged/rejected detail diagnostics |
-| 52 | 4 | clusterCount | Number of cluster hierarchy records |
-| 56 | 4 | clusterPageLinkCount | Number of cluster-page link records |
-| 60 | 4 | validationFlagCount | Number of validation flag records |
-| 64 | 4 | detailLevelTableOffset | Absolute offset to `VirtualGeometryDetailLevelRecord[]` |
-| 68 | 4 | materialSectionTableOffset | Absolute offset to `VirtualGeometryMaterialSectionRecord[]` |
-| 72 | 4 | sectionRangeTableOffset | Absolute offset to `VirtualGeometrySectionRangeRecord[]` |
-| 76 | 4 | cullableGroupTableOffset | Absolute offset to `VirtualGeometryCullableGroupRecord[]` |
-| 80 | 4 | pageTableOffset | Absolute offset to `VirtualGeometryPageRecord[]` |
-| 84 | 4 | diagnosticTableOffset | Absolute offset to `VirtualGeometryDiagnosticRecord[]` |
-| 88 | 4 | requestedTargetTableOffset | Absolute offset to `VirtualGeometryRequestedTargetRecord[]` |
-| 92 | 4 | skippedDetailTableOffset | Absolute offset to `VirtualGeometrySkippedDetailRecord[]` |
-| 96 | 4 | clusterTableOffset | Absolute offset to `VirtualGeometryClusterRecord[]` |
-| 100 | 4 | clusterPageLinkTableOffset | Absolute offset to `VirtualGeometryClusterPageLinkRecord[]` |
-| 104 | 4 | validationFlagTableOffset | Absolute offset to `VirtualGeometryValidationFlagRecord[]` |
-| 108 | 4 | diagnosticStringOffset | Absolute offset to UTF-8/NUL diagnostic strings |
-| 112 | 4 | diagnosticStringSize | Byte size of the diagnostic string table |
+| 0 | 4 | `payloadGeneration` | Current `kVirtualGeometryPayloadGeneration` |
+| 4 | 4 | `headerSize` | `sizeof(VirtualGeometryHeader)` (124) |
+| 8 | 4 | `detailLevelCount` | Record count for `detailLevel` data |
+| 12 | 4 | `materialSectionCount` | Record count for `materialSection` data |
+| 16 | 4 | `sectionRangeCount` | Record count for `sectionRange` data |
+| 20 | 4 | `cullableGroupCount` | Record count for `cullableGroup` data |
+| 24 | 4 | `pageCount` | Record count for `page` data |
+| 28 | 4 | `diagnosticRecordCount` | Record count for `diagnosticRecord` data |
+| 32 | 4 | `flags` | Cooked virtual-geometry validation flags |
+| 36 | 4 | `sourceTriangleCount` | Record count for `sourceTriangle` data |
+| 40 | 4 | `sourceVertexCount` | Record count for `sourceVertex` data |
+| 44 | 4 | `requestedTargetCount` | Record count for `requestedTarget` data |
+| 48 | 4 | `skippedDetailCount` | Record count for `skippedDetail` data |
+| 52 | 4 | `clusterCount` | Record count for `cluster` data |
+| 56 | 4 | `clusterPageLinkCount` | Record count for `clusterPageLink` data |
+| 60 | 4 | `validationFlagCount` | Record count for `validationFlag` data |
+| 64 | 4 | `coneSafetyCount` | Record count for `coneSafety` data |
+| 68 | 4 | `detailLevelTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualDetailLevels` stream |
+| 72 | 4 | `materialSectionTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualMaterialSections` stream |
+| 76 | 4 | `sectionRangeTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualSectionRanges` stream |
+| 80 | 4 | `cullableGroupTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualCullableGroups` stream |
+| 84 | 4 | `pageTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualPages` stream |
+| 88 | 4 | `diagnosticTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualDiagnostics` stream |
+| 92 | 4 | `requestedTargetTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualRequestedTargets` stream |
+| 96 | 4 | `skippedDetailTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualSkippedDetails` stream |
+| 100 | 4 | `clusterTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualClusters` stream |
+| 104 | 4 | `clusterPageLinkTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualClusterPageLinks` stream |
+| 108 | 4 | `validationFlagTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualValidationFlags` stream |
+| 112 | 4 | `coneSafetyTableOffset` | Retained legacy offset; use `kTemfMetadataVirtualConeSafety` stream |
+| 116 | 4 | `diagnosticStringOffset` | Retained legacy offset; use `kTemfMetadataVirtualDiagnosticStrings` stream |
+| 120 | 4 | `diagnosticStringSize` | Size of the separate diagnostic-string stream |
 
 ### Virtual Geometry Tables
 
@@ -180,11 +230,12 @@ is set. All offsets are absolute file offsets. Table records are packed and
 
 Validation rules:
 
-- `meshletFlags` bit 1 requires a non-zero `virtualGeometryHeaderOffset`,
-  `virtualGeometryHeaderSize == sizeof(VirtualGeometryHeader)`, and matching
-  `virtualGeometryPayloadGeneration`.
-- Table counts and offsets must stay inside the file and must not overlap
-  earlier meshlet streams.
+- Production virtual-geometry availability requires the representation flag, a
+  correctly sized header metadata stream, and the required reconstructed tables.
+  Legacy `MeshletRuntimeLayout` offset fields do not locate those streams.
+- Validate encoded file ranges through the production directory, decode each
+  selected stream with its declared codec/domain, and validate typed record
+  sizes and index ranges before cache or GPU publication.
 - Detail levels must contain non-zero meshlet and primitive counts, monotonic
   finite geometric error, valid section/page ranges, and conservative finite
   bounds.

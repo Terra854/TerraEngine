@@ -9,6 +9,25 @@
 #include "Core/Object/ObjectManager.h"
 
 namespace TerraEngine::Tests {
+	namespace {
+		// Singleton configuration is ignored after initialization. Start from a
+		// stopped owner, and restore suite defaults even when an assertion throws.
+		struct IsolatedAudioSystem {
+			Audio::AudioSystem& system = Audio::AudioSystem::Instance();
+			IsolatedAudioSystem() {
+				system.Shutdown();
+				system.SetConfiguredProvider("test.missing");
+				system.SetRuntimePlaybackEnabled(true);
+				system.SetRuntimePlaybackPaused(false);
+			}
+			~IsolatedAudioSystem() {
+				system.Shutdown();
+				system.SetConfiguredProvider("terra.miniaudio");
+				system.SetRuntimePlaybackEnabled(true);
+				system.SetRuntimePlaybackPaused(false);
+			}
+		};
+	}
 	void RegisterAudioPlaybackTests(TestRegistry& registry) {
 		registry.Add("Audio.Playback.OneShotLoopAndPauseUseLogicalTimeline", [](TestContext& context) {
 			Audio::AudioAuthoringSnapshotData data; data.frame = 1U; data.deltaSeconds = 1.0F / 60.0F;
@@ -46,8 +65,8 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Audio.Playback.ControlBatchesRejectAtomicallyAtSnapshot", [](TestContext& context) {
-			auto& system = Audio::AudioSystem::Instance();
-			system.SetConfiguredProvider("test.missing");
+			IsolatedAudioSystem fixture;
+			auto& system = fixture.system;
 			system.Initialize();
 			Audio::AudioAuthoringSnapshotData data;
 			Audio::AudioAuthoringSourceRecord source;
@@ -86,8 +105,6 @@ namespace TerraEngine::Tests {
 			system.Update(1.0F / 60.0F);
 			context.Expect(system.LatestPlaybackSnapshot()->voices.size() == 1U,
 				"A complete valid batch must become visible after the following AudioCommit boundary.");
-			system.Shutdown();
-			system.SetConfiguredProvider("terra.miniaudio");
 		});
 
 		registry.Add("Audio.Playback.PendingAssetsAndMutePreserveLogicalSemantics", [](TestContext& context) {
@@ -128,9 +145,9 @@ namespace TerraEngine::Tests {
 		registry.Add("Audio.Playback.PlayOnStartMissingClipAndSceneRemovalStaySafe", [](TestContext& context) {
 			ComponentRegistry::RegisterAllComponents();
 			ObjectManager& objects = ObjectManager::instance();
-			auto& system = Audio::AudioSystem::Instance();
+			IsolatedAudioSystem fixture;
+			auto& system = fixture.system;
 			objects.clear();
-			system.Shutdown();
 			// An unavailable provider keeps this lifecycle test headless while the
 			// protected AudioCommit path still publishes deterministic snapshots.
 			system.SetConfiguredProvider("test.missing");
@@ -163,9 +180,6 @@ namespace TerraEngine::Tests {
 			context.Expect(removedPublication && removedPublication->voices.empty(),
 				"Removing an audio-source object must remove its logical instance at the next AudioCommit boundary.");
 
-			system.Shutdown();
-			system.SetRuntimePlaybackEnabled(true);
-			system.SetConfiguredProvider("terra.miniaudio");
 	});
 	}
 }

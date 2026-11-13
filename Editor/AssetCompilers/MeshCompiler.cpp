@@ -21,6 +21,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <numeric>
 #include <span>
 #include <sstream>
@@ -4185,9 +4186,39 @@ static bool CompileMeshFromRawInternal(
 	}
 
 	const std::filesystem::path tempRoot = std::filesystem::temp_directory_path() / "TerraEngineRawMeshCompile";
-	std::filesystem::create_directories(tempRoot);
-	const std::string stableName = output.filename().replace_extension(".obj").string();
-	const std::filesystem::path stagedObj = tempRoot / stableName;
+	std::error_code stageError;
+	std::filesystem::create_directories(tempRoot, stageError);
+	// Atomic directory creation grants exclusive ownership even when independent
+	// processes happen to choose the same name. Never delete an unclaimed path.
+	struct OwnedRawStage {
+		std::filesystem::path directory;
+		~OwnedRawStage() noexcept {
+			if(!directory.empty()) {
+				std::error_code ignored;
+				std::filesystem::remove_all(directory, ignored);
+			}
+		}
+	} stage;
+	static std::atomic<std::uint64_t> nextStage{0};
+	const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+	for(unsigned attempt = 0; !stageError && attempt < 512; ++attempt) {
+		auto candidate = tempRoot / ("raw-" + std::to_string(stamp) + "-" + std::to_string(nextStage.fetch_add(1, std::memory_order_relaxed)));
+		if(std::filesystem::create_directory(candidate, stageError)) {
+			stage.directory = std::move(candidate);
+			break;
+		}
+		if(stageError == std::errc::file_exists) stageError.clear();
+	}
+	if(stage.directory.empty()) {
+		if(outReport != nullptr) {
+			outReport->assetPath = logicalSource;
+			outReport->formatVersion = kMeshCurrentVersion;
+			outReport->status = "compile_fail";
+			outReport->failureReason = "raw-stage-reservation-failed";
+		}
+		return false;
+	}
+	const std::filesystem::path stagedObj = stage.directory / "geometry.obj";
 
 	ReportMeshProgress(progressCallback, 0.02f, "Mesh Stage", "Staging decoded package geometry for mesh compile.");
 	{
@@ -4203,6 +4234,11 @@ static bool CompileMeshFromRawInternal(
 			}
 			return false;
 		}
+
+		// Float text must round-trip independently of the user's locale. The
+		// default six digits can merge distinct large positions or UV values.
+		out.imbue(std::locale::classic());
+		out << std::setprecision(std::numeric_limits<float>::max_digits10);
 
 		// OBJ is used here only as a short-lived interchange stream into the
 		// existing static mesh cleanup path. The glTF package parser has already
@@ -4259,8 +4295,7 @@ static bool CompileMeshFromRawInternal(
 		adaptiveSettings, std::move(progressCallback), coneSafetySettings,
 		preserveSourceVertexIdentity ? &rawVertexWeldIdentities : nullptr,
 		outFinalSourceVertexIndices);
-	std::error_code removeError;
-	std::filesystem::remove(stagedObj, removeError);
+	// The stage owner removes its directory on success, rejection and exceptions.
 	if (outReport != nullptr)
 	{
 		outReport->assetPath = logicalSource;
@@ -5082,14 +5117,22 @@ namespace
 		}
 		std::uint32_t rebuiltPageSize =
 			directory.directory.header.logicalPageSizeBytes;
+		// Each indivisible procedural blob also owns one page/block descriptor
+		// and the builder's worst-case directory alignment. Reserve that complete
+		// packet budget before choosing a profile; payload bytes alone can fit
+		// while the physical allocation does not. Subtraction avoids overflow.
+		constexpr std::size_t completePageOverhead = sizeof(TemfPageDescriptor)
+			+ sizeof(TemfBlockDescriptor) + (kTemfDirectoryAlignment - 1u);
 		for (const CanonicalDemandedPageCookedBlob& cooked : demandedPageBlobs)
 		{
-			if (cooked.bytes.empty()
-				|| cooked.bytes.size() > kTemfPageSize128KiB)
+			if (cooked.bytes.empty()) return false;
+			if (cooked.bytes.size() > kTemfPageSize128KiB - completePageOverhead)
 			{
+				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
 				return false;
 			}
-			if (cooked.bytes.size() > rebuiltPageSize)
+			if (rebuiltPageSize < completePageOverhead
+				|| cooked.bytes.size() > rebuiltPageSize - completePageOverhead)
 			{
 				// Deformation adds skin/source records to an otherwise valid
 				// geometry page. Promote the canonical page profile when that

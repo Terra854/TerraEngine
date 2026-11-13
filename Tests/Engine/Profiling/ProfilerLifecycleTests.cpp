@@ -401,6 +401,12 @@ void RegisterProfilerLifecycleTests(TestRegistry& registry)
 		ProfilerThreadPoolSession pool;
 		ProfilerTestSupport::TemporaryWorkspace workspace("ProfilerLifecycleSlowSink");
 		auto sink = std::make_shared<ProfilerTestSupport::ControlledJournalSink>();
+		// Assertions throw: release a held writer before the pool owner unwinds,
+		// otherwise an ordinary failed assertion could strand shutdown itself.
+		struct ReleaseSinkOnExit {
+			std::shared_ptr<ProfilerTestSupport::ControlledJournalSink> sink;
+			~ReleaseSinkOnExit() { sink->Release(); }
+		} releaseSink{sink};
 		// Write one is the header. Hold the first segment write until the test
 		// proves both EndFrame and Finish returned on the interactive thread.
 		sink->BlockWrite(2u);
@@ -428,13 +434,11 @@ void RegisterProfilerLifecycleTests(TestRegistry& registry)
 			}
 		}
 
-		const auto finishStart = std::chrono::steady_clock::now();
+		// Returning a ticket before releasing write two is the semantic proof that
+		// Finish does not wait for storage. The process watchdog bounds a broken
+		// synchronous implementation; a 50 ms wall-clock check measured preemption.
 		const ProfilerJournalFinalizationTicket ticket = profiler.FinishRecording();
-		const double finishMilliseconds = std::chrono::duration<double, std::milli>(
-			std::chrono::steady_clock::now() - finishStart).count();
 		context.Expect(ticket.accepted, "Finish should publish a journal ticket while storage is blocked.");
-		context.Expect(finishMilliseconds <= 50.0,
-			"Finish must return within 50 ms without waiting for a blocked sink or merging a dense partial frame.");
 		context.Expect(sink->WaitUntilBlocked(std::chrono::seconds(2)),
 			"The persistence worker should seal the deferred partial frame before its blocked write.");
 		const ProfilerCaptureHealth blockedHealth = profiler.GetCaptureHealth();

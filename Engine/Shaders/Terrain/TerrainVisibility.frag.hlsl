@@ -32,10 +32,15 @@ float4 TerrainVisibilityDiagnosticPattern(float2 surfaceUv)
 
 float4 main(TerrainFragmentInput input) : SV_Target0
 {
-	const uint2 texel = uint2(input.position.xy);
+	// Coverage belongs to authored terrain UVs, not screen pixels. Each mask
+	// owns its dimensions independently of the control map and the other mask.
+	uint holeWidth = 0u;
+	uint holeHeight = 0u;
+	terrainHoleMask.GetDimensions(holeWidth, holeHeight);
+	const uint2 holeTexel = TerrainControlTexelFromUv(input.uv, uint2(holeWidth, holeHeight));
 	// Hole coverage is sampled by every visibility path, including shadows and
 	// picking. Discarding here prevents a render-only surface over a physical gap.
-	if (terrainHoleMask.Load(int3(texel, 0)) != 0u)
+	if (terrainHoleMask.Load(int3(holeTexel, 0)) != 0u)
 		discard;
 	uint controlWidth = 0u;
 	uint controlHeight = 0u;
@@ -46,7 +51,11 @@ float4 main(TerrainFragmentInput input) : SV_Target0
 		? TerrainDiagnosticSurfaceUv(
 			input.uv, terrainAreaMapping, terrainLayerMappings[0])
 		: input.uv;
-	if (terrainFallbackMask.Load(int3(texel, 0)) != 0u)
+	uint fallbackWidth = 0u;
+	uint fallbackHeight = 0u;
+	terrainFallbackMask.GetDimensions(fallbackWidth, fallbackHeight);
+	const uint2 fallbackTexel = TerrainControlTexelFromUv(input.uv, uint2(fallbackWidth, fallbackHeight));
+	if (terrainFallbackMask.Load(int3(fallbackTexel, 0)) != 0u)
 		return TerrainVisibilityDiagnosticPattern(diagnosticUv);
 	// Painted layer selection is an exact control-map load. Tile size, phase,
 	// rotation, and future triplanar projection never feed this address.

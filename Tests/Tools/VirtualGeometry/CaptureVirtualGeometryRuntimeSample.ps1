@@ -72,6 +72,30 @@ function Get-EnvironmentOverride([string]$Name, [string]$Fallback)
 	return $value
 }
 
+function Resolve-RuntimeAdapterRoots([string]$ScriptDirectory)
+{
+	# Both layouts keep this script under Tests/Tools/VirtualGeometry. Three
+	# parents therefore reach the repository root or the installed Build root.
+	# Only a real root CMakeLists.txt selects the source-tree install fallback;
+	# environment overrides are still resolved later against this working root.
+	$root = [IO.Path]::GetFullPath((Join-Path $ScriptDirectory '../../..'))
+	$isSourceTree = Test-Path -LiteralPath (Join-Path $root 'CMakeLists.txt') -PathType Leaf
+	$install = if($isSourceTree)
+	{
+		[IO.Path]::GetFullPath((Join-Path $root 'out/build/RelWithDebInfo/Build'))
+	}
+	else
+	{
+		$root
+	}
+	return [pscustomobject]@{
+		sourceTree = $isSourceTree
+		repositoryRoot = $root
+		installedRoot = $install
+		workingRoot = $root
+	}
+}
+
 function Get-OptionalProperty($Value, [string]$Name)
 {
 	if($null -eq $Value)
@@ -218,36 +242,11 @@ if($backend -ne 'vulkan')
 }
 
 $scriptRoot = [IO.Path]::GetFullPath($PSScriptRoot)
-$twoLevelsUp = [IO.Path]::GetFullPath((Join-Path $scriptRoot '../..'))
-$sourceTree = Test-Path -LiteralPath (
-	Join-Path $twoLevelsUp 'CMakeLists.txt') -PathType Leaf
-$repositoryRoot = if($sourceTree)
-{
-	$twoLevelsUp
-}
-else
-{
-		# In the install tree this is the Build directory containing Editor,
-		# Tests, Tools, and Docs.
-	$twoLevelsUp
-}
-$installedRoot = if($sourceTree)
-{
-	[IO.Path]::GetFullPath((Join-Path $repositoryRoot (
-		'out/build/RelWithDebInfo/Build')))
-}
-else
-{
-	$repositoryRoot
-}
-$workingRoot = if($sourceTree)
-{
-	$repositoryRoot
-}
-else
-{
-	$installedRoot
-}
+$runtimeRoots = Resolve-RuntimeAdapterRoots $scriptRoot
+$sourceTree = $runtimeRoots.sourceTree
+$repositoryRoot = $runtimeRoots.repositoryRoot
+$installedRoot = $runtimeRoots.installedRoot
+$workingRoot = $runtimeRoots.workingRoot
 
 $isAnimatedWorkload = $workload -in @('animated-hero', 'animated-crowd')
 $isAuthoredSceneWorkload = $workload -in @('existing-4000-animated', 'dense-animated-vg', 'mixed-animation')

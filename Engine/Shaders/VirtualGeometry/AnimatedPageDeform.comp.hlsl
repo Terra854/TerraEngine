@@ -104,19 +104,33 @@ float3 TransformDirection(float3 direction, uint localJoint, TeAnimatedDeformati
 		dot(paletteRows[row + 2u].xyz, direction));
 }
 
+// A failed current generation must not expose a previous finite allocation as
+// current geometry. Existing bounds and graphics consumers reject nonfinite XYZ.
+// The previous-generation buffer remains immutable, preserving history ownership.
+void InvalidateCurrentOutput(uint outputIndex)
+{
+	TeAnimatedDeformedVertex invalid = (TeAnimatedDeformedVertex)0;
+	invalid.currentPosition = float4(asfloat(0x7fc00000u), 0.0F, 0.0F, 0.0F);
+	currentVertices[outputIndex] = invalid;
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
 	// Y selects one immutable page record while X covers that page's vertices.
 	// A single rectangular dispatch can therefore process an entire generation;
 	// shorter pages simply reject lanes beyond their exact vertex count.
-	const uint workRecordIndex =
-		deformationPush.workRecordIndex + dispatchThreadId.y;
+	uint workCount = 0u, workStride = 0u;
+	deformationWork.GetDimensions(workCount, workStride);
+	const uint admittedWorkCount = min(workCount, deformationPush.workRecordCount);
+	// Subtraction proves the addition cannot wrap before indexing the packet.
 	if(deformationPush.abiVersion != TE_ANIMATED_GEOMETRY_ABI_VERSION
-		|| workRecordIndex >= deformationPush.workRecordCount)
+		|| deformationPush.workRecordIndex >= admittedWorkCount
+		|| dispatchThreadId.y >= admittedWorkCount - deformationPush.workRecordIndex)
 	{
 		return;
 	}
+	const uint workRecordIndex = deformationPush.workRecordIndex + dispatchThreadId.y;
 
 	const TeAnimatedDeformationWorkRecord work =
 		deformationWork[workRecordIndex];
@@ -126,15 +140,31 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
-	const TeAnimatedGenerationRecord generation =
-		generationRecords[work.generationRecordIndex];
+	uint outputCount = 0u, outputStride = 0u;
+	currentVertices.GetDimensions(outputCount, outputStride);
+	// Prove the destination before invalidating it: a malformed output offset
+	// must never turn a conservative failure into an out-of-bounds store.
+	if(work.currentOutputOffset >= outputCount || vertexIndex >= outputCount - work.currentOutputOffset)
+	{
+		InterlockedOr(deformationDiagnostics[0], TE_ANIMATED_GEOMETRY_DIAGNOSTIC_INVALID_RECORD);
+		return;
+	}
 	const uint outputIndex = work.currentOutputOffset + vertexIndex;
+	uint generationCount = 0u, generationStride = 0u;
+	generationRecords.GetDimensions(generationCount, generationStride);
+	if(work.generationRecordIndex >= generationCount)
+	{
+		InvalidateCurrentOutput(outputIndex);
+		InterlockedOr(deformationDiagnostics[0], TE_ANIMATED_GEOMETRY_DIAGNOSTIC_INVALID_RECORD);
+		return;
+	}
+	const TeAnimatedGenerationRecord generation = generationRecords[work.generationRecordIndex];
 	if(all(generation.stableInstanceId == uint2(0u, 0u))
 		|| all(generation.pageContentGeneration == uint2(0u, 0u))
 		|| all(generation.rendererGeneration == uint2(0u, 0u)))
 	{
-		InterlockedOr(deformationDiagnostics[0],
-			TE_ANIMATED_GEOMETRY_DIAGNOSTIC_INVALID_RECORD);
+		InvalidateCurrentOutput(outputIndex);
+		InterlockedOr(deformationDiagnostics[0], TE_ANIMATED_GEOMETRY_DIAGNOSTIC_INVALID_RECORD);
 		return;
 	}
 
@@ -197,6 +227,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
 	if(!IsFiniteFloat3(position) || !IsFiniteFloat3(normal) || !IsFiniteFloat3(tangent))
 	{
+		InvalidateCurrentOutput(outputIndex);
 		InterlockedOr(deformationDiagnostics[0],
 			TE_ANIMATED_GEOMETRY_DIAGNOSTIC_NONFINITE_OUTPUT);
 		return;
@@ -206,6 +237,14 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	output.currentPosition = float4(position, 1.0F);
 	output.normal = float4(normalize(normal), 0.0F);
 	output.tangentAndSign = float4(normalize(tangent), tangentSign);
+	// Normalization itself can fail for a zero direction; qualify the actual
+	// stored basis as well as its finite inputs before publishing current bytes.
+	if(!IsFiniteFloat3(output.normal.xyz) || !IsFiniteFloat3(output.tangentAndSign.xyz))
+	{
+		InvalidateCurrentOutput(outputIndex);
+		InterlockedOr(deformationDiagnostics[0], TE_ANIMATED_GEOMETRY_DIAGNOSTIC_NONFINITE_OUTPUT);
+		return;
+	}
 	output.previousPosition = output.currentPosition;
 	if((work.flags & kWorkHistoryValid) != 0u)
 	{

@@ -14,6 +14,9 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#if defined(TERRAENGINE_EDITOR_TESTS)
+#include <functional>
+#endif
 
 enum class ScriptBuildProfile
 {
@@ -88,7 +91,26 @@ struct ScriptCompilationStatus
 class ScriptCompilationSubsystem : public IEditorSubsystem
 {
 public:
+	// One detached build task owns these values. The protected editor owner
+	// prepares the workspace and SDK before dispatch; workers never consult
+	// ProjectManager, workspace status, or mutable editor profile state.
+	struct ScriptBuildInputs
+	{
+		ScriptBuildProfile profile = ScriptBuildProfile::Release;
+		std::filesystem::path projectRoot;
+		std::filesystem::path projectPath;
+		std::filesystem::path assemblyPath;
+		std::filesystem::path dotnetExecutable;
+	};
+
 	static ScriptCompilationSubsystem& Instance();
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	// Hooks are immutable while a job is active; fixtures release and drain the
+	// worker before replacing either callback or destroying captured state.
+	void SetWorkerEntryHookForTests(std::function<void()> hook) { m_WorkerEntryHookForTests = std::move(hook); }
+	void SetBuildInputObserverForTests(std::function<void(const ScriptBuildInputs&)> observer) { m_BuildInputObserverForTests = std::move(observer); }
+	void SetWorkspaceAccessObserverForTests(std::function<void(std::string_view)> observer) { m_WorkspaceService.SetAccessObserverForTests(std::move(observer)); }
+#endif
 
 	void Initialize(EditorContext& context) override;
 	void Update(float deltaTime) override;
@@ -133,6 +155,10 @@ private:
 	};
 
 	ScriptCompilationSubsystem() = default;
+#if defined(TERRAENGINE_EDITOR_TESTS)
+	std::function<void()> m_WorkerEntryHookForTests;
+	std::function<void(const ScriptBuildInputs&)> m_BuildInputObserverForTests;
+#endif
 
 	void PrepareForBuild();
 	void RestorePausedGameplayState();
@@ -147,7 +173,7 @@ private:
 	void CancelAndDrainActiveBuild();
 	void UpdateSharedState();
 
-	[[nodiscard]] ScriptBuildResult RunBuildJob(ScriptBuildProfile profile);
+	[[nodiscard]] ScriptBuildResult RunBuildJob(const ScriptBuildInputs& inputs);
 
 	EditorContext* m_Context = nullptr;
 	ScriptWorkspaceService m_WorkspaceService;

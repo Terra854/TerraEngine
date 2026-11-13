@@ -5,7 +5,11 @@
 [CmdletBinding()]
 param(
 	[string]$InstalledEditor = 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe',
-	[string]$Project = 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project',
+	# Performance evidence must name its reviewed project explicitly; no user's
+	# personal checkout may become an accidental benchmark input.
+	[Parameter(Mandatory)]
+	[ValidateNotNullOrEmpty()]
+	[string]$Project,
 	[string]$OutputDirectory = 'Tests/Fixtures/RendererPerformanceBaseline/results/profiler',
 	[ValidateRange(1, 20)]
 	[int]$PairCount = 5,

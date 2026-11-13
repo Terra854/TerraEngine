@@ -29,6 +29,51 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterAnimationControllerAuthoringServiceTests(TestRegistry& registry) {
+		registry.Add("Editor.Animation.ControllerAuthoring.NoOpCommitLeavesNextEditUsable", [](TestContext& context) {
+			using namespace TerraEngine::Animation;
+			using namespace TerraEngine::Editor::Animation;
+			// Own the complete workspace so a failing no-op assertion cannot leak files.
+			struct Workspace {
+				std::filesystem::path path = std::filesystem::temp_directory_path()
+					/ ("TerraControllerNoOp-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+				~Workspace() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+			} workspace;
+			std::filesystem::create_directories(workspace.path);
+			const auto path = workspace.path / "Controller.teanimctrl";
+			AnimationControllerAsset starter;
+			std::vector<std::uint8_t> original;
+			context.Expect(AnimationControllerAuthoringService::CreateStarterDocument(starter, original) == AnimationStatus::Ok
+				&& WriteAll(path, original), "The no-op fixture requires a real persisted starter controller.");
+			AnimationControllerAuthoringService service;
+			context.Expect(service.Open(path, 1U) == AnimationAuthoringStatus::Ok
+				&& service.BeginEdit(starter.assetId, 1U) == AnimationAuthoringStatus::Ok,
+				"Open and detach the unchanged controller through the production service.");
+			AnimationAuthoringCompileRequest request;
+			context.Expect(service.PrepareCommit(request) == AnimationAuthoringStatus::Ok,
+				"An unchanged edit must reach the production commit state machine.");
+			const auto product = AnimationControllerAuthoringService::CompileCandidate(request);
+			context.Expect(product.authoring.succeeded && service.CompleteCommit(product) == AnimationAuthoringStatus::Ok,
+				"A successful no-op publication must finish adoption instead of failing history after publication.");
+			context.Expect(!service.HasCandidate() && service.UndoDepth() == 0U && service.RedoDepth() == 0U
+				&& ReadAll(path) == original && service.Published() != nullptr,
+				"No-op commit must preserve durable bytes, clear edit state, and avoid a phantom undo entry.");
+			// Use the adopted generation rather than imposing a no-op generation policy.
+			context.Expect(service.BeginEdit(service.AssetId(), service.Generation()) == AnimationAuthoringStatus::Ok,
+				"The next edit must begin from the revision adopted by the no-op commit.");
+			std::uint64_t parameter = 0U;
+			context.Expect(service.AddParameter("AfterNoOp", AnimationControllerParameterType::Float, parameter) == AnimationAuthoringStatus::Ok
+				&& service.PrepareCommit(request) == AnimationAuthoringStatus::Ok,
+				"A durable change must remain authorable after an unchanged commit.");
+			const auto changed = AnimationControllerAuthoringService::CompileCandidate(request);
+			context.Expect(changed.authoring.succeeded && service.CompleteCommit(changed) == AnimationAuthoringStatus::Ok
+				&& !service.HasCandidate() && service.UndoDepth() == 1U,
+				"A later real edit must publish exactly one grouped history entry.");
+			AnimationControllerAsset decoded;
+			context.Expect(DeserializeAnimationControllerAsset(ReadAll(path), 0U, decoded) == AnimationStatus::Ok
+				&& decoded.parameters.size() == 1U && decoded.parameters.front().name == "AfterNoOp",
+				"The later commit must persist the actual changed controller, not stale no-op bytes.");
+		});
+
 		registry.Add("Editor.Animation.ControllerAuthoring.StarterDocumentDecodesAndCompiles", [](TestContext& context) {
 			using namespace TerraEngine::Animation;
 			using TerraEngine::Editor::Animation::AnimationControllerAuthoringService;

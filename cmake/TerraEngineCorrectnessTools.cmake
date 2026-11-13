@@ -1,0 +1,12 @@
+# Validate mandatory install-proof prerequisites while configuration is still cheap.
+function(terraengine_validate_correctness_tools)
+	if(BUILD_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		if(NOT CMAKE_READELF OR NOT EXISTS "${CMAKE_READELF}" OR IS_DIRECTORY "${CMAKE_READELF}")
+			message(FATAL_ERROR "Linux BUILD_TESTING requires a runnable GNU/LLVM readelf; set CMAKE_READELF in the toolchain.")
+		endif()
+		execute_process(COMMAND "${CMAKE_READELF}" --version RESULT_VARIABLE tool_status OUTPUT_QUIET ERROR_QUIET TIMEOUT 10)
+		if(NOT tool_status STREQUAL "0")
+			message(FATAL_ERROR "CMAKE_READELF cannot run; Linux correctness installation requires readelf --version to succeed.")
+		endif()
+	endif()
+endfunction()

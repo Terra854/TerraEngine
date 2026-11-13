@@ -5,6 +5,7 @@
 #include "../Default/Default.frag.hlsl"
 #include "VirtualGeometryAbi.hlsli"
 #include "VirtualGeometryRasterTriangle.hlsli"
+#include "VirtualGeometryReconstruction.hlsli"
 
 struct CompositeConstants
 {
@@ -24,11 +25,6 @@ struct CompositeOutput
 	uint4 identity : SV_Target1;
 	float depth : SV_Depth;
 };
-
-float2 UnpackCompositeUnorm2x16(uint packed)
-{
-	return float2(packed & 0xffffu, packed >> 16u) / 65535.0f;
-}
 
 CompositeOutput main(float4 pixelPosition : SV_Position)
 {
@@ -61,24 +57,13 @@ CompositeOutput main(float4 pixelPosition : SV_Position)
 		discard;
 	}
 
-	const float2 barycentricXY = UnpackCompositeUnorm2x16(record.y);
-	const float3 screenBarycentrics = float3(
-		barycentricXY,
-		max(0.0f, 1.0f - barycentricXY.x - barycentricXY.y));
-	const float3 reciprocalW = float3(
-		rcp(max(abs(source.clip0.w), 1.0e-6f)),
-		rcp(max(abs(source.clip1.w), 1.0e-6f)),
-		rcp(max(abs(source.clip2.w), 1.0e-6f)));
-	float3 perspectiveWeights = screenBarycentrics * reciprocalW;
-	perspectiveWeights /= max(
-		dot(perspectiveWeights, float3(1.0f, 1.0f, 1.0f)),
-		1.0e-6f);
-
+	// Resolve has already diagnosed stale/malformed raw producers. Its V2 tag
+	// prevents an old transient encoding from being interpreted as this surface.
+	const VirtualGeometryReconstruction reconstruction = ReconstructVirtualGeometrySurface(record);
+	if (!reconstruction.valid) discard;
+	const float3 perspectiveWeights = reconstruction.sourceWeights;
+	const float depth = reconstruction.depth;
 	TerraSurfaceInput surface;
-	const float depth = saturate(
-		source.clip0.z / source.clip0.w * screenBarycentrics.x
-		+ source.clip1.z / source.clip1.w * screenBarycentrics.y
-		+ source.clip2.z / source.clip2.w * screenBarycentrics.z);
 	surface.position = float4(pixelPosition.xy, depth, 1.0f);
 	surface.uv = source.uv0.xy * perspectiveWeights.x
 		+ source.uv1.xy * perspectiveWeights.y

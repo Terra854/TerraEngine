@@ -250,7 +250,9 @@ namespace TerraEngine::Navigation {
 			std::size_t revokedCount = 0U;
 			for(NavigationSlotIndex index = 0U; index < slots_.size(); ++index) {
 				Slot& slot = slots_[index];
-				if(slot.owner != owner || slot.state == SlotState::Retired || slot.state == SlotState::Destroyed) {
+				// Full owner/world generations must match, and only not-yet-revoked
+				// live/expired ownership may contribute this slot to the free list once.
+				if(slot.owner != owner || (slot.state != SlotState::Alive && slot.state != SlotState::Expired)) {
 					continue;
 				}
 				slot.state = SlotState::Revoked;

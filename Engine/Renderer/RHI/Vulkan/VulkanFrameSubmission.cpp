@@ -4,6 +4,7 @@
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
 #include "VulkanContextSource.h"
+#include "Tests/Support/ReviewRemediation/DiscardedPrimaryReviewHooks.h"
 
 // These receipt operations run only at the existing protected queue/fence
 // boundaries. Their clocks describe actual submissions, never CPU recording.
@@ -224,6 +225,10 @@ bool VulkanContext::Impl::DrainEmptyRuntimeAcquire()
 #endif
 	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty acquisition drain submit"); return false; }
 	swapchainAcquireWaitConsumed = true;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	emptyFrameValidationReceipt.acquireWaitConsumedAfter = swapchainAcquireWaitConsumed.load(std::memory_order_acquire);
+	emptyFrameValidationReceipt.acquireWaitConsumedAfterObserved = true;
+#endif
 	result = vkWaitForFences(device, 1, &emptyFrameAcquireDrainFence, VK_TRUE, UINT64_MAX);
 	if (result != VK_SUCCESS) { MarkDeviceLost(result, "empty acquisition drain completion"); return false; }
 	vkDestroyFence(device, emptyFrameAcquireDrainFence, nullptr);
@@ -470,6 +475,10 @@ void VulkanContext::EndFrame() {
 			}
 			(void)emptyProgress.SubmitAccepted();
 			impl->swapchainAcquireWaitConsumed = true;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			impl->emptyFrameValidationReceipt.acquireWaitConsumedAfter = impl->swapchainAcquireWaitConsumed.load(std::memory_order_acquire);
+			impl->emptyFrameValidationReceipt.acquireWaitConsumedAfterObserved = true;
+#endif
 
 			VkPresentInfoKHR presentInfo{};
 			presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -642,6 +651,12 @@ void VulkanContext::EndFrame() {
 		impl->emptyFrameValidationReceipt.submitAttempted = true;
 #endif
 		VkResult submitResult = impl->SubmitGraphicsQueue(1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
+		// Copy the actual submitted primary/fence identity; no result is invented.
+		for (const auto command : cmds)
+			TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
+				TerraEngine::Tests::Review::PrimaryReviewPoint::Submit, impl->pendingBackendFrameBreakdown.frameId,
+				reinterpret_cast<std::uintptr_t>(command), reinterpret_cast<std::uintptr_t>(impl->inFlightFences[impl->currentFrame]),
+				{}, 0, 0, submitResult });
 #if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
 		impl->emptyFrameValidationReceipt.submitResult = submitResult;
 #endif
@@ -682,6 +697,13 @@ void VulkanContext::EndFrame() {
 		}
 	}
 #if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	// Copy actual protected ledger state after accepted ordinary submission,
+	// before presentation clears it. This can be false: submit acceptance is
+	// not a substitute for the independently tracked acquisition ledger value.
+	if (!impl->editorMode && impl->swapchainImageAcquired) {
+		impl->emptyFrameValidationReceipt.acquireWaitConsumedAfter = impl->swapchainAcquireWaitConsumed.load(std::memory_order_acquire);
+		impl->emptyFrameValidationReceipt.acquireWaitConsumedAfterObserved = true;
+	}
 	impl->emptyFrameValidationReceipt.ordinarySubmitAccepted = true;
 	impl->emptyFrameValidationReceipt.ordinarySubmissionSerial = ++impl->emptyFrameValidationOrdinarySerial;
 	impl->emptyFrameValidationReceipt.commandBufferCount = submitInfo.commandBufferCount;

@@ -328,6 +328,11 @@ public:
 
 	const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
+	// Asset writes may target a missing leaf below a directory redirect. Resolve
+	// the existing prefix physically before appending that leaf; reject escapes
+	// and parent components. Output is canonical, not a catalog lookup spelling.
+	[[nodiscard]] static bool ResolveContainedAssetIoPath(const std::filesystem::path& root,
+		const std::filesystem::path& candidate, std::filesystem::path& canonical);
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
 	const AssetMetadata* FindAssetByGuid(const TerraEngine::UUID& guid) const;
 	// Physics reads this immutable value after the asset database has completed
@@ -395,6 +400,9 @@ public:
 	AssetImportAdmissionDiagnostics GetImportAdmissionDiagnostics() const;
 
 #ifdef TERRAENGINE_EDITOR_TESTS
+	// Native compiler ownership tests call the actual launcher without exposing
+	// process handles through editor automation or replacing compiler behavior.
+	friend struct AssetDatabaseCompilerProcessTestAccess;
 	enum class ImportAdmissionBoundaryForTests { ExecutorCreation, Enqueue, Finalization, BeforePublication };
 	using ImportAdmissionHookForTests = std::function<void(const std::filesystem::path&, ImportAdmissionBoundaryForTests)>;
 	void SetImportAdmissionHookForTests(ImportAdmissionHookForTests hook) { importAdmissionHookForTests = std::move(hook); }

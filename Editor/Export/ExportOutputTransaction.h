@@ -11,6 +11,9 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <vector>
+#include <functional>
+#include <system_error>
 
 class ExportCancellationState;
 
@@ -39,6 +42,10 @@ struct ExportOutputTransactionOptions {
 	/// Disabling recovery makes every existing lock an output conflict. This is
 	/// useful to callers that prefer manual inspection over automatic cleanup.
 	bool recoverStaleLocks = true;
+
+	/// Default-null fault seam: return an error to refuse removal of this private
+	/// path. Install before use; normal exports perform native filesystem IO.
+	std::function<std::error_code(const std::filesystem::path&)> cleanupFailureForTests;
 };
 
 /// Owns the exclusive lock, private work directories, commit, and rollback for
@@ -63,6 +70,7 @@ public:
 
 	/// Removes only safe orphan paths for this run and creates empty staging and
 	/// scratch directories on the same volume as the final output.
+	/// An unresolved prior file-publication journal is retained for manual recovery.
 	[[nodiscard]] bool Prepare(std::string& error);
 
 	/// Convenience operation used by the pipeline before it starts writing.
@@ -73,6 +81,8 @@ public:
 
 	/// Overwrites matching destination files from validated staging while keeping
 	/// the destination directory identity and every unmentioned path intact.
+	/// Each complete file is replaced atomically; a failed commit restores the
+	/// published prefix. This does not promise atomic visibility of the full tree.
 	[[nodiscard]] bool Commit(std::string& error);
 	// Cancellation accepted before this protected publication wins. A completed
 	// commit permanently rejects later cancellation without relabeling success.
@@ -80,6 +90,7 @@ public:
 
 	/// Removes this run's private files and restores any backed-up prior output.
 	/// Calling Rollback after a successful Commit only performs leftover cleanup.
+	/// Secondary restoration failure retains the original journal and owned lock.
 	[[nodiscard]] bool Rollback(std::string& error);
 
 	[[nodiscard]] const std::filesystem::path& FinalDirectory() const;
@@ -109,6 +120,7 @@ private:
 	[[nodiscard]] bool ReadLockMetadata(LockMetadata& metadata, std::string& error) const;
 	[[nodiscard]] bool ReleaseOwnedLock(std::string& warning);
 	[[nodiscard]] bool RestoreBackup(std::string& error);
+	[[nodiscard]] bool RollbackPublication(std::string& error);
 	[[nodiscard]] bool CleanupPath(const std::filesystem::path& path, std::string& error) const;
 	[[nodiscard]] bool IsSafeTransactionSibling(const std::filesystem::path& path, std::string_view suffix) const;
 	void AppendCleanupWarning(std::string warning);
@@ -129,4 +141,32 @@ private:
 	bool m_HadPreviousOutput = false;
 	bool m_WasPublished = false;
 	bool m_RecoveredStaleLock = false;
+
+	// Keep the journal alive when secondary rollback I/O fails, so Rollback()
+	// and the destructor can retry without discarding the only original bytes.
+	struct PublicationFile {
+		std::filesystem::path destination;
+		std::filesystem::path replacement;
+		std::filesystem::path original;
+		std::filesystem::file_time_type originalTime{};
+		bool hadOriginal = false;
+		bool published = false;
+		bool restoreTimePending = false;
+	};
+	struct PublicationDirectoryTime {
+		std::filesystem::path path;
+		std::filesystem::file_time_type originalTime;
+	};
+	struct PublicationDirectory {
+		std::filesystem::path path;
+		bool created = false;
+	};
+	std::vector<PublicationFile> m_PublicationFiles;
+	std::vector<PublicationDirectory> m_PublicationDirectories;
+	std::vector<PublicationDirectoryTime> m_PublicationDirectoryTimes;
+	std::filesystem::path m_PublicationJournalDirectory;
+	bool m_PublicationJournalOwned = false;
+	bool m_RequiresManualRecovery = false;
+	// Preparation found only a durably completed, cleanup-only prior journal.
+	bool m_CompletedJournalCleanupOnly = false;
 };

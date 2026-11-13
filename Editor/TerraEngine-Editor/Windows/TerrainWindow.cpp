@@ -3,6 +3,7 @@
 #include "TerrainWindow.h"
 
 #include "../Terrain/TerrainCreationService.h"
+#include "../Terrain/TerrainPrecommitJob.h"
 #include "../Terrain/TerrainHistoryCommand.h"
 #include "../Subsystems/UndoRedoSystem.h"
 
@@ -17,6 +18,7 @@
 #include "File Formats/TerraEngineTextureFile.h"
 #include "Physics/Terrain/TerrainCollisionSystem.h"
 #include "Physics/Terrain/TerrainHeightFieldActiveRect.h"
+#include "Physics/Terrain/TerrainCollisionSeamPreparation.h"
 #include "Physics/PhysicsSystem.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Terrain/TerrainRenderProxyRegistry.h"
@@ -163,9 +165,10 @@ TerrainWindow::~TerrainWindow()
 		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().ClearPublication(terrainStore.get());
 }
 
-bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
+bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError, bool* pending, bool prepareForPlay)
 {
 	outError.clear();
+	if(pending) *pending = false;
 	if(!terrainStore) return true;
 	if(committedHeightMm.size() != TerraEngine::Terrain::kTerrainAreaSampleCount)
 	{
@@ -175,14 +178,57 @@ bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
 
 	// Edit Mode deliberately owns no live physics world. Keep the request armed;
 	// StartPlayMode calls this method again immediately after world creation.
-	if(!TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid())
+	const bool worldActive = TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid();
+	if(!worldActive && !prepareForPlay)
 		return true;
+	if(ThreadPool::instance().getThreadCount() == 0u)
+	{
+		outError = "Automatic terrain collision preparation requires an active terrain worker pool.";
+		return false;
+	}
 
 	const auto capture = terrainStore->CaptureRoot();
 	if(!capture.IsValid())
 	{
 		outError = "Automatic terrain collision requires a current immutable root.";
 		return false;
+	}
+	// Poll only; an occupied pool must never hold the editor frame. Late tasks
+	// own immutable values and may finish safely after timeout/window retirement.
+	if(automaticCollisionFuture.valid()) {
+		const auto polled = TerraEngine::Editor::Terrain::PollTerrainPrecommitJob(automaticCollisionFuture, automaticCollisionReady, outError);
+		if(polled == TerraEngine::Editor::Terrain::TerrainPreparationPoll::Pending) {
+			if(std::chrono::steady_clock::now() - automaticCollisionStarted > std::chrono::seconds(10)) {
+				automaticCollisionFuture = {};
+				outError = "Automatic terrain collision preparation exceeded its deadline.";
+				return false;
+			}
+			if(pending) *pending = true;
+			return true;
+		}
+		if(polled == TerraEngine::Editor::Terrain::TerrainPreparationPoll::Failed) return false;
+		if(!automaticCollisionReady->complete) {
+			automaticCollisionReady.reset();
+			outError = "Automatic terrain collision seam preparation or cook was rejected.";
+			return false;
+		}
+	}
+	if(automaticCollisionReady) {
+		auto& ready = *automaticCollisionReady;
+		const bool current = ready.recipe.terrainAssetId == capture.root->assetUuid
+			&& ready.sourceRootHash == capture.root->rootContentHash
+			&& ready.sourcePublicationGeneration == capture.publicationGeneration
+			&& ready.recipe.areaX == selectedTerrainArea.x && ready.recipe.areaZ == selectedTerrainArea.z
+			&& ready.recipe.sampleSpacingMetres == authoredSampleSpacingMetres;
+		if(current) {
+			if(worldActive) {
+				TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().SetPreparedCandidate(std::move(ready));
+				automaticCollisionReady.reset();
+			}
+			return true;
+		}
+		// A newer authoring root invalidates old worker output before publication.
+		automaticCollisionReady.reset();
 	}
 	const auto started = std::chrono::steady_clock::now();
 	TerraEngine::Physics::TerrainHeightFieldRecipe recipe;
@@ -204,26 +250,62 @@ bool TerrainWindow::QueueAutomaticTerrainCollision(std::string& outError)
 	recipe.holeBits = committedHoleMask;
 	if(recipe.holeBits.size() != TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount)
 		recipe.holeBits.assign(TerraEngine::Physics::TerrainHeightFieldRecipe::kHoleByteCount, 0u);
-	const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(
-		capture.root->authoredBounds, selectedTerrainArea);
-	if(!active || !TerraEngine::Physics::Terrain::ApplyTerrainActiveRectToRecipe(recipe, *active))
-	{
-		// Keep the committed authoring mask untouched. Only this detached candidate is
-		// rejected, so the next valid root publication can retry without data loss.
-		outError = "Automatic terrain collision requires a valid authored active rectangle.";
-		return false;
+	TerraEngine::Physics::Terrain::TerrainCollisionRootCapture collisionCapture{};
+	collisionCapture.assetId = capture.root->assetUuid;
+	collisionCapture.rootHash = capture.root->rootContentHash;
+	collisionCapture.generation = capture.publicationGeneration;
+	// Capture only the selected area and its positive seam owners while editor
+	// storage is protected. The worker receives no window/store/ECS pointers.
+	for(std::int64_t dz = 0; dz < 2; ++dz)
+		for(std::int64_t dx = 0; dx < 2; ++dx)
+		{
+			if((dx && selectedTerrainArea.x == std::numeric_limits<std::int64_t>::max())
+				|| (dz && selectedTerrainArea.z == std::numeric_limits<std::int64_t>::max())) continue;
+			const TerraEngine::Terrain::TerrainAreaCoordinate coordinate{selectedTerrainArea.x + dx, selectedTerrainArea.z + dz};
+			const auto active = TerraEngine::Terrain::TerrainActiveRectForArea(capture.root->authoredBounds, coordinate);
+			if(!active) continue;
+			const auto found = committedAreaHeightMm.find(coordinate);
+			if(found != committedAreaHeightMm.end())
+				collisionCapture.areas.emplace(coordinate,
+					TerraEngine::Physics::Terrain::TerrainCollisionAreaCapture{*active,
+						std::make_shared<const std::vector<std::int32_t>>(found->second)});
+			else if(coordinate == selectedTerrainArea)
+				collisionCapture.areas.emplace(coordinate,
+					TerraEngine::Physics::Terrain::TerrainCollisionAreaCapture{*active,
+						std::make_shared<const std::vector<std::int32_t>>(committedHeightMm)});
+		}
+	// PostFrame reads immutable authored roots and prepares geometry on workers.
+	// Future polling/staging stays protected; TerrainCollisionSystem still adopts
+	// Before Physics. Play remains pending until this future is ready.
+	try {
+		auto task = ThreadPool::instance().createTask(
+			[recipe = std::move(recipe), collisionCapture = std::move(collisionCapture), started]() mutable {
+				if(!TerraEngine::Physics::Terrain::PrepareTerrainCollisionSeams(recipe, collisionCapture)
+					|| !TerraEngine::Physics::Terrain::CookTerrainCollisionRecipe(recipe))
+					recipe.holeBits.clear();
+				auto result = TerraEngine::Physics::Terrain::PrepareTerrainCollisionCandidate(
+					std::move(recipe), collisionCapture.rootHash, collisionCapture.generation);
+				result.buildLatencyMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+				return result;
+			});
+		automaticCollisionStarted = started;
+		automaticCollisionFuture = task->getFuture();
+		ThreadPool::instance().enqueue(task, TerraEngine::Physics::TerrainHeightFieldRecipe::kSampleCount);
+	} catch(const std::exception& error) {
+		automaticCollisionFuture = {};
+		outError = error.what(); return false;
 	}
-	auto candidate = TerraEngine::Physics::Terrain::PrepareTerrainCollisionCandidate(
-		std::move(recipe), capture.root->rootContentHash, capture.publicationGeneration);
-	candidate.buildLatencyMilliseconds = std::chrono::duration<double, std::milli>(
-		std::chrono::steady_clock::now() - started).count();
-	if(!candidate.complete)
-	{
-		outError = "The automatic terrain collision recipe failed provider-neutral validation.";
-		return false;
-	}
-	TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().SetPreparedCandidate(std::move(candidate));
+	if(pending) *pending = true;
 	return true;
+}
+
+void TerrainWindow::CancelAutomaticTerrainCollision()
+{
+	// Releasing a task-system future does not join its worker. Removing both
+	// observation slots prevents any late value from regaining publish authority.
+	automaticCollisionFuture = {};
+	automaticCollisionReady.reset();
+	TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().CancelPreparedCandidate();
 }
 
 void TerrainWindow::ScheduleRenderProxyBuild()
@@ -769,6 +851,10 @@ void TerrainWindow::ReleaseProjectTerrainState()
 
 void TerrainWindow::ResetSceneTerrainState(std::string_view statusMessage)
 {
+	// Cancel only at this window's actual terrain lifetime boundary; removal of
+	// an unrelated terrain asset must not discard its active preparation job.
+	automaticCollisionFuture = {};
+	automaticCollisionReady.reset();
 	// The worker owns copied terrain values. Cancellation prevents an obsolete
 	// completion from being admitted after a different project becomes active.
 	if(terrainRenderProxyCancellation)
@@ -1106,7 +1192,7 @@ TerraEngine::Editor::Terrain::TerrainAutomationCommandResult TerrainWindow::Exec
 	}
 	if(capability == "terrain.collision-cancel")
 	{
-		TerraEngine::Physics::Terrain::TerrainCollisionSystem::Instance().CancelPreparedCandidate();
+		CancelAutomaticTerrainCollision();
 		return {true, {}, "Terrain collision candidate cancelled before publication."};
 	}
 	if(capability == "terrain.export")
@@ -2702,6 +2788,9 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	TerraEngine::UUID existingObjectId,
 	std::optional<TerraEngine::Terrain::TerrainSampleBounds> authoredBounds)
 {
+	// Switching assets revokes old preparation before the new store can be
+	// observed. A slow prior cook must neither publish nor delay this asset.
+	CancelAutomaticTerrainCollision();
 	// Terrain stroke commands retain references into the previous store. Remove
 	// only that tool-owned domain before replacing it; scene/object history must
 	// survive opening or creating a terrain asset.
@@ -2838,9 +2927,6 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	// Terrain always owns heightfield collision. In Edit Mode this remains armed
 	// until Play Mode creates its world; exported/editor worlds that already exist
 	// receive the candidate immediately.
-	std::string collisionError;
-	if(!QueueAutomaticTerrainCollision(collisionError) && !collisionError.empty())
-		status = collisionError;
 	automationAdapter.SetPrepareCallback([this](const TerraEngine::Editor::Automation::TerrainAutomationRequest& request, std::string& error) { return PrepareAutomationTransaction(request,error); });
 	terrainDirtyState.MarkSaved(terrainStore->CaptureRoot());
 	// A terrain always starts with one stable fallback layer. Surface authoring
@@ -2862,6 +2948,11 @@ void TerrainWindow::InitializeAuthoringTerrain(
 	// Persisted roots can contain holes and painted weights in addition to height.
 	// Rehydrate all channels through the same path used after history replay.
 	(void)SynchronizeCommittedAuthoringStateFromPublishedRoot();
+	// Collision identity and all area samples must describe the same persisted
+	// root. Capture only after the complete authoring mirror has been hydrated.
+	std::string collisionError;
+	if(!QueueAutomaticTerrainCollision(collisionError) && !collisionError.empty())
+		status = collisionError;
 	selectedLayerId = TerraEngine::Editor::Terrain::TerrainSurfaceBrush::ResolveEnabledLayerId(
 		committedLayerStack, 1u);
 	surfaceBrushSettings.layerId = selectedLayerId;
@@ -4055,6 +4146,11 @@ bool TerrainWindow::QueuePreviewForPublication()
 
 void TerrainWindow::ProcessProtectedAuthoringBoundary()
 {
+	// Resume already admitted collision work even when no Inspector is visible.
+	if(automaticCollisionFuture.valid()) {
+		std::string error;
+		if(!QueueAutomaticTerrainCollision(error)) status = std::move(error);
+	}
 	// Resource publication belongs to the same protected editor boundary as the
 	// terrain receipt. A completed worker mesh cannot appear mid-render-frame.
 	SynchronizeTerrainMaterial();
@@ -4274,6 +4370,10 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> TerrainWindow::De
 			workload.work = [this](TerraEngine::Scheduling::JobGraphContext&) { ProcessProtectedAuthoringBoundary(); };
 			workload.writes.push_back(
 				TerraEngine::Scheduling::kResourceTerrainRenderProxies);
+			// Collision future adoption is part of this existing protected publish
+			// workload; the physics owner retains its declared Before Physics flush.
+			workload.reads.push_back(TerraEngine::Scheduling::kResourceTerrainAssetRoots);
+			workload.writes.push_back(TerraEngine::Scheduling::kResourceTerrainPreparedCollision);
 		}
 	}
 	return workloads;

@@ -3,6 +3,7 @@
 // Implements the editor's core logic, including ImGui initialization, workspace layout management, and event callback chaining. It manages the loading of the managed editor assembly and provides the bridge between native engine events and C# UI windows.
 
 #include "EditorSystem.h"
+#include "WorkspaceLayoutDecode.h"
 #include "EditorSchedulerDeclaration.h"
 #include "CheckedImGuiVulkanBridge.h"
 #include "ProjectHubSubsystem.h"
@@ -428,6 +429,10 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 
 void EditorSystem::Setup(Engine* enginePtr) {
 	if (initialized) return;
+	// Reset validation ownership once per editor lifetime. A deferred renderer
+	// retry must retain accepted requests so each receives its matching receipt.
+	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); pendingRendererEfficiencyDeviceRecreation.reset(); rendererEfficiencyDeviceRecreationReceipt = {}; }
+	awaitingRendererInitialization = false;
 
 	// Setup Context
 	context.engine = enginePtr;
@@ -619,39 +624,39 @@ void EditorSystem::LoadWorkspaceLayout() {
 
 			auto windows = mainEditor->GetWindows();
 
-			for (const auto& winJson : layout["windows"]) {
-				std::string title = winJson["title"];
-				bool visible = winJson["visible"];
-				bool isManaged = winJson.contains("managed") && winJson["managed"].get<bool>();
-
-
-				if (isManaged) {
-					if (managedSetWindowVisibility) {
-						managedSetWindowVisibility(title.c_str(), visible);
+			// Each section owns its validation. Bad visibility inventory must not
+			// discard an otherwise valid camera from the same project workspace.
+			TerraEngine::Editor::ApplyWorkspaceLayoutSections(layout,
+				[&](const TerraEngine::Editor::WorkspaceWindowVisibility& decoded) {
+					if(decoded.managed)
+					{
+						if(managedSetWindowVisibility)
+							managedSetWindowVisibility(decoded.title.c_str(), decoded.visible);
 					}
-				} else {
-
-					for (auto& win : windows) {
-
-						if (win->GetTitle() == title) {
-							win->SetVisible(visible);
+					else for(auto& win : windows)
+					{
+						if(win->GetTitle() == decoded.title)
+						{
+							win->SetVisible(decoded.visible);
 							break;
 						}
 					}
-				}
-			}
-			if(layout.contains("sceneViewCamera"))
-			{
-				if(auto sceneView = mainEditor->GetWindow<SceneViewWindow>())
-				{
-					std::string cameraError;
-					if(!sceneView->RestoreWorkspaceState(layout["sceneViewCamera"], cameraError))
+				},
+				[&](const nlohmann::json& camera) {
+					if(auto sceneView = mainEditor->GetWindow<SceneViewWindow>())
 					{
-						TERRAENGINE_LOG(LogLevel::Warning,
-							"Ignored invalid Scene View camera workspace state: " << cameraError);
+						std::string cameraError;
+						if(!sceneView->RestoreWorkspaceState(camera, cameraError))
+							TERRAENGINE_LOG(LogLevel::Warning,
+								"Ignored invalid Scene View camera workspace state: " << cameraError);
 					}
-				}
-			}
+				},
+				[](TerraEngine::Editor::WorkspaceLayoutIssue issue) {
+					if(issue == TerraEngine::Editor::WorkspaceLayoutIssue::InvalidWindowInventory)
+						TERRAENGINE_LOG(LogLevel::Warning, "Ignored invalid EditorLayout.terra window inventory.");
+					else
+						TERRAENGINE_LOG(LogLevel::Warning, "Ignored invalid EditorLayout.terra window entry: title and visible must have valid types.");
+				});
 		} catch (...) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Failed to load EditorLayout.terra");
 		}
@@ -660,9 +665,6 @@ void EditorSystem::LoadWorkspaceLayout() {
 
 
 void EditorSystem::Initialize() {
-	// An editor restart cannot carry a request or failed native binding from the
-	// preceding lifetime into its newly created ImGui context.
-	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); pendingRendererEfficiencyDeviceRecreation.reset(); rendererEfficiencyDeviceRecreationReceipt = {}; }
 	rendererEfficiencyBackendUnavailable = false;
 	// Initialize ImGui and Backends
 	
@@ -676,6 +678,12 @@ void EditorSystem::Initialize() {
 		return;
 	}
 	
+	if (!vulkan->IsReady()) {
+		// No ImGui or native handles escape while presentation is deferred.
+		awaitingRendererInitialization = vulkan->IsInitializationDeferred();
+		return;
+	}
+	awaitingRendererInitialization = false;
 	vulkan->EnableEditorMode();
 	VulkanContext::EditorHandles handles;
 	vulkan->GetEditorHandles(handles);
@@ -842,7 +850,24 @@ void EditorSystem::Initialize() {
 
 
 void EditorSystem::Update(float deltaTime) {
-	if (!initialized) return;
+	if (awaitingRendererInitialization) {
+		// Editor UI remains on its declared protected PostFrame boundary.
+		if (auto* native = dynamic_cast<VulkanContext*>(RenderSystem::Instance().GetContext()); native && native->IsReady()) Initialize();
+	}
+	// PostFrame service progress uses immutable publications, retained futures and
+	// typed protected mutations. It requires no ImGui/native presentation state,
+	// including while renderer initialization is deferred. Keep its attribution
+	// inside the editor profiler boundary even on that early-return path.
+	TerraEngine::Profiling::ProfilerEditorWorkScope editorProfilerBoundary;
+	if (context.editorMcpBridge) {
+		context.editorMcpBridge->PumpAnimationRecordingsAtProtectedFrame();
+		context.editorMcpBridge->PumpExportJobsAtProtectedFrame();
+		context.editorMcpBridge->PumpRendererValidationMutationsAtProtectedFrame();
+		context.editorMcpBridge->PumpTerrainAutomationJobsAtProtectedFrame();
+	}
+	// Setup readiness does not imply ImGui/native resource readiness. Keep all
+	// UI and project work behind the same protected presentation startup edge.
+	if (awaitingRendererInitialization || !initialized) return;
 	if(nativeCloseRequested && mainEditor) {
 		// Both callbacks and this consumer run on the protected main thread.
 		// No worker touches the intent or releases project/copy owners.
@@ -852,7 +877,6 @@ void EditorSystem::Update(float deltaTime) {
 	// Editor UI runs as a protected PostFrame system, but it must not appear in
 	// the CPU Engine sample tree. This outer boundary measures the complete editor
 	// interval separately and suppresses every nested editor-only profiler marker.
-	TerraEngine::Profiling::ProfilerEditorWorkScope editorProfilerBoundary;
 	EditorCpuStageBatch editorStages;
 
 	// Keep this idempotent fallback so future delayed-startup paths still open
@@ -864,16 +888,6 @@ void EditorSystem::Update(float deltaTime) {
 		// Accept them at this protected boundary before any profiler window can
 		// render, so close/switch invalidation and UI publication are atomic.
 		context.editorProfiler->Update(deltaTime);
-	}
-	// Animation authority has already published through the scheduler by the time
-	// this protected PostFrame system runs. Advance durable recorder sessions before
-	// any editor-only early return so capture never depends on MCP polling, listener
-	// enablement, ImGui visibility, or the installed physics-validation path.
-	if (context.editorMcpBridge) {
-		context.editorMcpBridge->PumpAnimationRecordingsAtProtectedFrame();
-		context.editorMcpBridge->PumpExportJobsAtProtectedFrame();
-		context.editorMcpBridge->PumpRendererValidationMutationsAtProtectedFrame();
-		context.editorMcpBridge->PumpTerrainAutomationJobsAtProtectedFrame();
 	}
 	// The opt-in installed acceptance mode must observe the prior frame's
 	// script-coordinator publication before beginning another ImGui frame.
@@ -1207,6 +1221,7 @@ void EditorSystem::Shutdown() {
 	context.projectManager.reset();
 
 	initialized = false;
+	awaitingRendererInitialization = false;
 	// A failed release is reported after all stages have been attempted and
 	// cannot produce an orderly-shutdown acceptance claim.
 	if(firstFailure) std::rethrow_exception(firstFailure);
@@ -1285,7 +1300,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> EditorSystem::Dec
 	// adding TerrainAuthoringSystem does not accidentally omit the main editor.
 	auto editorUpdate = MakeProtectedCommitPhase("EditorSystemUpdate", SystemName(),
 		SchedulerDeclaration().reads, SchedulerDeclaration().writes,
-		"Runs the protected editor update and UI lifecycle.", "EditorSystem.Update");
+		"Runs the protected editor update and UI lifecycle; deferred UI startup waits for renderer readiness.", "EditorSystem.Update");
 	editorUpdate.stableDescriptorId = "EditorSystem/PostFrame/EditorSystemUpdate";
 	editorUpdate.work = [this, deltaTime](JobGraphContext&) { Update(deltaTime); };
 	std::vector<FrameWorkloadDeclaration> workloads; workloads.push_back(std::move(editorUpdate));

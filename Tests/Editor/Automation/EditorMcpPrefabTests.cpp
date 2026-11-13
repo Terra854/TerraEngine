@@ -144,6 +144,19 @@ namespace TerraEngine::EditorTests
 
 	void RegisterEditorMcpPrefabTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.MCP.Prefab.SceneOpenPreservesUnsavedEdits", [](TestContext& context) {
+			PrefabAutomationFixture fixture("DirtySceneOpen");
+			context.Expect(fixture.ready, "The real automation fixture must open its initial scene.");
+			auto& objects = ObjectManager::instance();
+			const auto edited = objects.createObject("Unsaved edit");
+			const auto id = objects.getUUID(edited);
+			SceneManager::Instance().ForceMarkActiveSceneDirty();
+			const auto result = fixture.service.HandleTool("scene.open",
+				{{"path", "Assets/Scenes/PrefabTests.tescene"}}, WriteMode::WritesEnabled, "dirty-open");
+			context.Expect(!result.value("ok", true) && objects.getObject(id).has_value()
+				&& SceneManager::Instance().IsActiveSceneDirty(),
+				"Opening the same disk scene must reject before discarding unsaved live objects or clearing dirtiness.");
+		});
 		registry.Add("Editor.MCP.Prefab.InstantiatesRegisteredProjectAssetAfterServiceStartup", [](TestContext& context) {
 			PrefabAutomationFixture fixture("ExistingProjectAsset");
 			context.Expect(fixture.ready, "Existing-prefab fixture should create and open a project scene.");

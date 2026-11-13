@@ -22,6 +22,23 @@ namespace TerraEngine::Physics::Backend {
 		std::uint32_t queued = 0U;
 		std::uint32_t activePumps = 0U;
 	};
+	struct CharacterShapeDimensions { float radius = 0.0F, height = 0.0F; };
+	enum class PhysicsShapeRepresentation : std::uint8_t { Other, HeightField, TriangleMesh, Empty };
+	struct PhysicsShapeMemoryObservation {
+		std::size_t nativeSizeBytes = 0u;
+		std::uint32_t triangleCount = 0u;
+		// Whole-world strong-cache count accompanies the observation to detect
+		// accidental terrain opt-in, without exposing a mutable cache or pointer.
+		std::size_t worldStrongCacheEntries = 0u;
+		PhysicsShapeRepresentation representation = PhysicsShapeRepresentation::Other;
+	};
+	// One latest value per live actor, never an accumulating failure history.
+	struct CharacterResizeObservation {
+		PhysicsCharacterHandle handle;
+		PhysicsTick tick = 0U;
+		float requestedHeight = 0.0F, retainedHeight = 0.0F;
+		bool accepted = false;
+	};
 	struct JoltPhysicsBackendConfiguration {
 		std::uint32_t maximumPhysicsWorkers = 0U;
 		std::uint32_t maximumBarriers = 8U;
@@ -29,6 +46,13 @@ namespace TerraEngine::Physics::Backend {
 		std::size_t temporaryAllocatorBytes = 32U * 1024U * 1024U;
 	};
 
+	// Actual provider record ownership, separated from world-lifetime cache entries.
+	struct PhysicsBackendOwnershipObservation
+	{
+		std::size_t shapeRecords = 0u, bodyRecords = 0u;
+		std::size_t stagedShapeRecords = 0u, stagedBodyRecords = 0u;
+		std::size_t strongCacheEntries = 0u;
+	};
 	class TERRAENGINE_API JoltPhysicsBackend final : public IPhysicsBackend {
 	public:
 		explicit JoltPhysicsBackend(
@@ -42,6 +66,12 @@ namespace TerraEngine::Physics::Backend {
 		JoltPhysicsBackend& operator=(JoltPhysicsBackend&&) = delete;
 
 		PhysicsBackendResult Initialize() override;
+		// Read-only native fixture evidence; no Jolt shape/reference escapes.
+		[[nodiscard]] std::optional<CharacterShapeDimensions> CharacterDimensionsForTesting(PhysicsCharacterHandle handle) const;
+		[[nodiscard]] std::optional<CharacterResizeObservation> LatestCharacterResize(PhysicsCharacterHandle handle) const;
+		[[nodiscard]] PhysicsBackendOwnershipObservation OwnershipForTesting() const;
+		// Vendor shape statistics only, not allocator totals or serialized bytes.
+		[[nodiscard]] std::optional<PhysicsShapeMemoryObservation> ShapeMemoryForTesting(PhysicsShapeHandle handle) const;
 		PhysicsBackendResult Shutdown() override;
 		PhysicsBackendResult CreateWorld(const PhysicsBackendWorldConfiguration& configuration) override;
 		PhysicsBackendResult DestroyWorld(PhysicsWorldHandle world) override;

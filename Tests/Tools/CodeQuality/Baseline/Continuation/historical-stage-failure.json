@@ -1,0 +1,304 @@
+{
+  "portableProjection": {
+    "representation": "portable-derived-projection",
+    "originalRawSha256": "0d0cae86cd8844f660e5ebcdd9cb51f07e2c52a924ccf3a2ec43b560845cf00d",
+    "originalRawBytes": 11090,
+    "originalPreservedAt": "<work>/coderabbit-fixes-20261108/sol4/originals/Tests/Tools/CodeQuality/Baseline/Continuation/historical-stage-failure.json",
+    "normalization": "Only local repository/work prefixes and path separators are normalized. Original execution outcomes and historical source identities are unchanged. This projection is not the original raw receipt."
+  },
+  "schemaVersion": "stage-ownership-structural-verification-v1",
+  "status": "Failed",
+  "structuralOnly": true,
+  "semanticCompletenessProven": false,
+  "lifetimeAcceptance": false,
+  "files": [
+    {
+      "braceCount": 44,
+      "codeLines": 323,
+      "path": "Engine/Renderer/Frame/RenderAnimatedGeometryPreparation.cpp",
+      "sourceSha256": "6e1e8f162e37e6086531eaf6fa3d6d1d80cdf7ff8cd48adb4422b2339d0675b4"
+    },
+    {
+      "braceCount": 13,
+      "codeLines": 128,
+      "path": "Engine/Renderer/Frame/RenderBackendCommit.cpp",
+      "sourceSha256": "da6bec5a020022a6f58a87baaa3ddfa6dedc3e89c1bfbcbe9fbb705c04589c8b"
+    },
+    {
+      "braceCount": 1,
+      "codeLines": 21,
+      "path": "Engine/Renderer/Frame/RenderCaptureOperationState.h",
+      "sourceSha256": "d130054a981cc06149a1918565a0da9d6250f907df2660eb995234a4cb961828"
+    },
+    {
+      "braceCount": 81,
+      "codeLines": 786,
+      "path": "Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp",
+      "sourceSha256": "417749bff218e677008000d387defcc7656d7e0f39d3b168f018ede05c3830dc"
+    },
+    {
+      "braceCount": 21,
+      "codeLines": 306,
+      "path": "Engine/Renderer/Frame/RenderDynamicPublication.cpp",
+      "sourceSha256": "fe500734baafa77972e88c360ca359731cb9fa100f14d263dbaf3284f787689e"
+    },
+    {
+      "braceCount": 1,
+      "codeLines": 23,
+      "path": "Engine/Renderer/Frame/RenderFrameAlgorithms.h",
+      "sourceSha256": "933e05f174801446cf519ffaa1452fcbfd25d4720c212abf4d89d1a2c0476072"
+    },
+    {
+      "braceCount": 41,
+      "codeLines": 348,
+      "path": "Engine/Renderer/Frame/RenderFrameCaches.h",
+      "sourceSha256": "1d6836ce154564ed808af4c8cf480ea14ebcdeaae69514836f169a4d48cf56c0"
+    },
+    {
+      "braceCount": 310,
+      "codeLines": 2218,
+      "path": "Engine/Renderer/Frame/RenderFrameCapture.cpp",
+      "sourceSha256": "f520fccdc7037a99ac3a12ccb9efd9039930fac094cf4f6d201ec1c896b0a855"
+    },
+    {
+      "braceCount": 19,
+      "codeLines": 153,
+      "path": "Engine/Renderer/Frame/RenderFrameCapture.h",
+      "sourceSha256": "a1ea545968d9fd29291de05eb9fd81cd520f744b65531d1fd17f979a535e8362"
+    },
+    {
+      "braceCount": 85,
+      "codeLines": 802,
+      "path": "Engine/Renderer/Frame/RenderFrameSealing.cpp",
+      "sourceSha256": "1ff03cac089b724d8b30654731ccf82340ac03bf349e464f099c6a802d5b3859"
+    },
+    {
+      "braceCount": 9,
+      "codeLines": 37,
+      "path": "Engine/Renderer/Frame/RenderFrameSealing.h",
+      "sourceSha256": "789ed9cd1a13468613ea4fb90dee46cb64ddb2d471f88552c99bc1a5794c4aa0"
+    },
+    {
+      "braceCount": 24,
+      "codeLines": 96,
+      "path": "Engine/Renderer/Frame/RenderFrameState.h",
+      "sourceSha256": "9e0d45480ad1d76cc2692675ea54fe25ac06987e09c6df180a28db5c3633c08f"
+    },
+    {
+      "braceCount": 53,
+      "codeLines": 377,
+      "path": "Engine/Renderer/Frame/RenderLightingPreparation.cpp",
+      "sourceSha256": "99620b153eef9102774d8ebb979e8cce21007b120020ed5a4f80c467d0aaab49"
+    },
+    {
+      "braceCount": 11,
+      "codeLines": 55,
+      "path": "Engine/Renderer/Frame/RenderPreparationTasks.h",
+      "sourceSha256": "9331f84628fb47ff414f25f1bdfbd705420eda7a3e05739566137a93a8553280"
+    },
+    {
+      "braceCount": 3,
+      "codeLines": 18,
+      "path": "Engine/Renderer/Frame/RenderScratchEpisode.h",
+      "sourceSha256": "51f24594a1f169d376b603c931d81f15e00d23fd2b17e813780e350679a23753"
+    },
+    {
+      "braceCount": 74,
+      "codeLines": 488,
+      "path": "Engine/Renderer/Frame/RenderShadowPreparation.cpp",
+      "sourceSha256": "b15939af7ff558a79b54825f1d03873b56793ecf1574297201eded4ebda5d32c"
+    },
+    {
+      "braceCount": 110,
+      "codeLines": 965,
+      "path": "Engine/Renderer/Frame/RenderSnapshotPreparation.cpp",
+      "sourceSha256": "0f819a59d6c9d9fb7a2282ed0bdcc930791e14a8d1f91cd01e14be7712b9620b"
+    },
+    {
+      "braceCount": 7,
+      "codeLines": 71,
+      "path": "Engine/Renderer/Frame/RenderSnapshotPreparation.h",
+      "sourceSha256": "c819f9db6a9856186c3c4d27b96a67d92ddd29dab558be7bb9cfd35072f2b878"
+    },
+    {
+      "braceCount": 61,
+      "codeLines": 523,
+      "path": "Engine/Renderer/Frame/RenderSpatialPreparation.cpp",
+      "sourceSha256": "5df966c58f762398a65da98abcb3547dd90fbd4c164f7da43251f277ad9da06c"
+    },
+    {
+      "braceCount": 30,
+      "codeLines": 169,
+      "path": "Engine/Renderer/Frame/RenderStreamingFeedback.cpp",
+      "sourceSha256": "b16b91de1d2663f1186131f3e576acdfd8967ff4f2f2ebf4e143ed293eaaa696"
+    },
+    {
+      "braceCount": 42,
+      "codeLines": 359,
+      "path": "Engine/Renderer/Frame/RenderTopologyPreparation.cpp",
+      "sourceSha256": "02c01dea4a100483371f54bbdb2b934aee138156af3aa3f3e3d2696ae5bbf050"
+    },
+    {
+      "braceCount": 48,
+      "codeLines": 468,
+      "path": "Engine/Renderer/Frame/RenderViewBuilders.cpp",
+      "sourceSha256": "b92a151fbbb7c91881c26d1f1022aa5f003e23cb759ea6a16d19a0982b287b1f"
+    },
+    {
+      "braceCount": 35,
+      "codeLines": 334,
+      "path": "Engine/Renderer/Frame/RenderViewGrouping.cpp",
+      "sourceSha256": "b2293df1a9a4de30a9051b416e2285c6a42e957eba2b0adf0d0090b02d6949d5"
+    },
+    {
+      "braceCount": 65,
+      "codeLines": 581,
+      "path": "Engine/Renderer/Frame/RenderViewPreparation.cpp",
+      "sourceSha256": "4d117f58ab256abc72702dcaeb7a5bfc0974d750ab2566c2f3dd8f0b133c3133"
+    },
+    {
+      "braceCount": 2,
+      "codeLines": 18,
+      "path": "Engine/Renderer/Frame/RenderViewPreparation.h",
+      "sourceSha256": "b9ddd022da8e0c1455d7538153eabdcac8c355276e7c655dbabd657cb64a4b48"
+    },
+    {
+      "braceCount": 156,
+      "codeLines": 1210,
+      "path": "Engine/Renderer/Frame/RenderVirtualGeometryPackets.cpp",
+      "sourceSha256": "2a2cd7ae34fb2efee6e85f7b94402fe799755abad7331a364bb03783610bb17f"
+    },
+    {
+      "braceCount": 215,
+      "codeLines": 1786,
+      "path": "Engine/Renderer/Frame/RenderVirtualGeometrySelection.cpp",
+      "sourceSha256": "66039b032860e5be38560d9dbc5adcbaac3947b29018ef532776c04b98300035"
+    },
+    {
+      "braceCount": 7,
+      "codeLines": 94,
+      "path": "Engine/Renderer/Frame/RenderVirtualGeometrySelection.h",
+      "sourceSha256": "817ed455a74d29cde9f0ed60c1125dc589a07a1ff41dcce1b1500743cfab3fa6"
+    },
+    {
+      "braceCount": 227,
+      "codeLines": 1926,
+      "path": "Engine/Renderer/RenderSystem.cpp",
+      "sourceSha256": "8a50b7dc7ce518f1def9c1b70c8506b3a2472853346871ef3c81cc2047c33c62"
+    },
+    {
+      "braceCount": 71,
+      "codeLines": 885,
+      "path": "Engine/Renderer/RenderSystem.h",
+      "sourceSha256": "4fe156a2ae4bfcd7c0ef62f4b2930fac64365fc0937d60dbbd9ad3e4d13f8362"
+    },
+    {
+      "braceCount": 129,
+      "codeLines": 684,
+      "path": "Engine/Renderer/RenderSystemCapture.cpp",
+      "sourceSha256": "d640883e82d6a7852d8bd958bc5c879a043ef48c19851cacd8f4752e3c76cf34"
+    },
+    {
+      "braceCount": 24,
+      "codeLines": 135,
+      "path": "Engine/Renderer/RenderSystemDiagnostics.cpp",
+      "sourceSha256": "0214324b0e9acc997192d1f194e838feb634d156cd892c5e83f7e4d5c902e2e8"
+    },
+    {
+      "braceCount": 45,
+      "codeLines": 213,
+      "path": "Engine/Renderer/RenderSystemResources.cpp",
+      "sourceSha256": "7f06ab95d6fb7e46c1883595bf96291cfd04cfd2e4c245c5b1cd2c5faaa3c70e"
+    },
+    {
+      "braceCount": 116,
+      "codeLines": 672,
+      "path": "Engine/Renderer/RenderSystemSettings.cpp",
+      "sourceSha256": "ab4939554a35fa1f5dfafdff7fdb40316b6cf790e9b8e0a89a8c5f645311ade5"
+    },
+    {
+      "braceCount": 71,
+      "codeLines": 367,
+      "path": "Engine/Animation/AnimationSystem.cpp",
+      "sourceSha256": "9bac18bfd883cae1029f17345ec60bf45d6fef69ce1980a704f83555f604de54"
+    },
+    {
+      "braceCount": 279,
+      "codeLines": 1221,
+      "path": "Engine/Animation/AnimationSystemBindings.cpp",
+      "sourceSha256": "0ed7b8765409b5be598d95242311f82b00d73542cbaf7a233b6876b70f75270a"
+    },
+    {
+      "braceCount": 46,
+      "codeLines": 293,
+      "path": "Engine/Animation/AnimationSystemDiagnostics.cpp",
+      "sourceSha256": "183fcce07a9a890b1e62af5944af803d369371599dce05aaf0456f1fcb545df1"
+    },
+    {
+      "braceCount": 297,
+      "codeLines": 1555,
+      "path": "Engine/Animation/AnimationSystemLifecycle.cpp",
+      "sourceSha256": "435cd429cd2063e9f25344f83773c37f35d17c27261405ad434048d59a6902dd"
+    },
+    {
+      "braceCount": 144,
+      "codeLines": 1058,
+      "path": "Engine/Animation/Frame/AnimationFrameRuntime.h",
+      "sourceSha256": "1706ebd34c790e888a5eebbcb44d655bac2c276a4ad4a6090bb4857640453878"
+    },
+    {
+      "braceCount": 287,
+      "codeLines": 1634,
+      "path": "Engine/Animation/Frame/AnimationAuthorityPublication.cpp",
+      "sourceSha256": "5b1c7de6dd6b7e553e876f563f2cdd3739bcbc5919a920bf06f1fb229a578113"
+    },
+    {
+      "braceCount": 107,
+      "codeLines": 701,
+      "path": "Engine/Animation/Frame/AnimationAuthoritySealing.cpp",
+      "sourceSha256": "ace36bb959fbe6104a5c3ff660c4be46ce998e236e99d9316a160ff27cb1656e"
+    },
+    {
+      "braceCount": 12,
+      "codeLines": 79,
+      "path": "Engine/Animation/Frame/AnimationCompactEvaluation.cpp",
+      "sourceSha256": "331787a46a32a599124afdf3d9236af8bea32625be9b128dfed01b96c4c3d0ce"
+    },
+    {
+      "braceCount": 266,
+      "codeLines": 1553,
+      "path": "Engine/Animation/Frame/AnimationCompleteEvaluation.cpp",
+      "sourceSha256": "064f7b73f6a3ddc846daeac722100c71dfca98d81f65e9cf7a33a99e663a1eee"
+    },
+    {
+      "braceCount": 83,
+      "codeLines": 538,
+      "path": "Engine/Animation/Frame/AnimationFrameCapture.cpp",
+      "sourceSha256": "4c809105597d0076ab2351db7e43e9bf5afd3f38a76355df5a1c37e98fad6cb5"
+    },
+    {
+      "braceCount": 235,
+      "codeLines": 1508,
+      "path": "Engine/Animation/Frame/AnimationFramePlanning.cpp",
+      "sourceSha256": "93c08e709c8424d7f74b060a23bc058d195428a69e77426bee936ab7eebe97a6"
+    },
+    {
+      "braceCount": 46,
+      "codeLines": 398,
+      "path": "Engine/Animation/Frame/AnimationRuntimeRootPreparation.cpp",
+      "sourceSha256": "097017da27dc5dc379296929788dfdb274d7a2e673babb4468199b5ca61bf3ec"
+    }
+  ],
+  "symbols": 0,
+  "nonCallableBraces": 0,
+  "nativeBraces": 0,
+  "manifest": {
+    "path": "<work>/review-remediation/sol-2/source-continuation/joined-6.json.work/historical/Tests/Tools/CodeQuality/Baseline/stage-ownership.json",
+    "sha256": "5d5dd1c6a54c1e8c707428168a04fea1ec0536c1efebebc2d02eff19b71e4394"
+  },
+  "auditExecutable": {
+    "path": "<repo>/out/build/RelWithDebInfo/Build/Tests/Tools/CodeQuality/TerraEngine-SourceReviewAudit.exe",
+    "sha256": "58d38cb1f457468e5a362adbe38cd00da277f17fdbecff9446dcf3c8c6c5e363"
+  },
+  "error": "Stale source hash: Engine/Animation/AnimationSystem.h"
+}

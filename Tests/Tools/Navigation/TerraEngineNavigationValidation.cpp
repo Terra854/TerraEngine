@@ -9,6 +9,8 @@
 #include "Navigation/Persistence/SavedNavigationCache.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/FrameWorkload.h"
+#include "Core/Scheduling/JobGraph.h"
 #include "Resource/ResourceManager.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/Serializer.h"
@@ -21,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <iomanip>
@@ -31,16 +34,33 @@
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <sstream>
 #include <span>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+// Keep the platform header from defining min/max macros over standard APIs.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 namespace
 {
+	// Native command-line adapters provide UTF-8 bytes. Construct paths from
+	// those explicit code units so Windows never decodes them using its ANSI page.
+	std::filesystem::path CommandLinePath(std::string_view value)
+	{
+		return std::filesystem::path(std::u8string(
+			reinterpret_cast<const char8_t*>(value.data()), value.size()));
+	}
 	bool WriteProviderCacheFixture(std::string_view mode, const std::filesystem::path& output)
 	{
 		if((mode != "current" && mode != "stale") || !output.is_absolute()) return false;
@@ -87,10 +107,28 @@ namespace
 			{"expectedSettingsFingerprint", expectedSettings}, {"tileBytes", chunks.chunks.front().bytes.size()},
 			{"readBackAccepted", readBack.accepted}, {"readBackReason", readBack.reason},
 			{"runtimeTileConsumptionProven", false}};
-		std::ofstream metadata(output.string() + ".json", std::ios::binary | std::ios::trunc);
+		auto metadataPath = output;
+		metadataPath += ".json";
+		std::ofstream metadata(metadataPath, std::ios::binary | std::ios::trunc);
 		if(!metadata) return false;
 		metadata << state.dump(2) << '\n';
 		return metadata.good();
+	}
+
+	nlohmann::json CaptureRuntimeWorkerEvidence()
+	{
+		// Observe the existing process-owned pool; do not initialize extra workers
+		// merely to make an evidence label pass. Capacity is not executed work.
+		ThreadPool& pool = ThreadPool::instance();
+		const auto telemetry = pool.GetTelemetrySnapshot();
+		nlohmann::json executed = nlohmann::json::array();
+		if(telemetry) for(const auto& worker : telemetry->workers)
+			if(worker.dispatchCount != 0u) executed.push_back(worker.workerIndex);
+		return {{"observedPoolCapacity", pool.getThreadCount()},
+			{"executingWorkerIndices", executed},
+			{"executionAvailability", executed.empty() ? "unavailable-no-runtime-worker-dispatch" : "observed"},
+			{"executionEvidenceSource", "ThreadPool process-lifetime dispatch counters since initialization"},
+			{"poolCapacitySource", "ThreadPool::getThreadCount"}};
 	}
 
 	struct Options
@@ -110,6 +148,7 @@ namespace
 		// that complete denominator by default while still enforcing a hard cap.
 		std::uint32_t rawSampleLimit = 1'000'000U;
 		bool qualification = false;
+		bool qualificationWorkerIdentity = false;
 	};
 
 	bool ParseUnsigned(std::string_view text, std::uint32_t& value)
@@ -126,6 +165,10 @@ namespace
 	{
 		for(int index = 1; index < argc; ++index) {
 			const std::string_view argument(argv[index]);
+			if(argument == "--qualification-worker-identity") {
+				options.qualificationWorkerIdentity = true;
+				continue;
+			}
 			if(argument == "--qualification") {
 				options.qualification = true;
 				continue;
@@ -133,7 +176,7 @@ namespace
 			if(index + 1 >= argc) return false;
 			const std::string_view value(argv[++index]);
 			if(argument == "--lane") options.lane = value;
-			else if(argument == "--manifest") options.manifest = std::filesystem::path(value);
+			else if(argument == "--manifest") options.manifest = CommandLinePath(value);
 			else if(argument == "--matrices") {
 				options.matrices.clear();
 				std::string matrixList(value);
@@ -148,7 +191,7 @@ namespace
 				}
 			}
 			else if(argument == "--mode") options.matrices = {std::string(value)};
-			else if(argument == "--output") options.output = std::filesystem::path(value);
+			else if(argument == "--output") options.output = CommandLinePath(value);
 			else if(argument == "--agents") { if(!ParseUnsigned(value, options.agents)) return false; }
 			else if(argument == "--requests-per-second") { if(!ParseUnsigned(value, options.requestsPerSecond)) return false; }
 			else if(argument == "--duration-seconds") { if(!ParseUnsigned(value, options.durationSeconds)) return false; }
@@ -471,12 +514,393 @@ namespace
 		}
 		return system.QueueInitialGroundBuilds(std::move(builds));
 	}
+
+	// This validation host runs the existing production Navigation graph. It owns
+	// the standalone process's pool, never a second engine system or scheduler
+	// phase. Protected capture/publish stay on the caller; workers see copied data.
+	class OrdinaryScheduledNavigationHost final
+	{
+	public:
+		explicit OrdinaryScheduledNavigationHost(TerraEngine::Navigation::NavigationSystem& navigation)
+			: navigation_(navigation), pool_(ThreadPool::instance())
+		{
+			if(pool_.getThreadCount() != 0U)
+				throw std::runtime_error("Ordinary navigation host requires exclusive fresh pool ownership.");
+		}
+		OrdinaryScheduledNavigationHost(const OrdinaryScheduledNavigationHost&) = delete;
+		OrdinaryScheduledNavigationHost& operator=(const OrdinaryScheduledNavigationHost&) = delete;
+		void Initialize()
+		{
+			// Acquire cleanup responsibility before initialization can partially fail.
+			ownsPool_ = true;
+			pool_.initialize();
+			navigation_.Shutdown();
+			navigation_.Initialize();
+		}
+		void StartStreaming()
+		{
+			ownsStreaming_ = true;
+			TerraEngine::Scene::WorldStreamingSystem::Instance().Initialize();
+		}
+		void Settle()
+		{
+			if(settled_) return;
+			// Retire immutable navigation/provider ingress first. No object, mutation
+			// or streaming input is destroyed while a copied pool task can still run.
+			navigation_.Shutdown();
+			if(ownsStreaming_) TerraEngine::Scene::WorldStreamingSystem::Instance().Shutdown();
+			if(ownsPool_) pool_.shutdown();
+			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+			ObjectManager::instance().clear();
+			settled_ = true;
+		}
+		~OrdinaryScheduledNavigationHost() noexcept
+		{
+			if(settled_) return;
+			try { Settle(); }
+			catch(...) {
+				// A cleanup error is never success. Join before fail-closed process
+				// termination rather than unwinding live scene owners past pool work.
+				try { if(ownsPool_) pool_.shutdown(); } catch(...) {}
+				std::terminate();
+			}
+		}
+		void Tick(bool measuredRoute = false)
+		{
+			using namespace TerraEngine::Scheduling;
+			using namespace TerraEngine::Profiling;
+			struct ObservedRange {
+				std::optional<std::size_t> worker;
+				std::size_t begin = 0U, end = 0U;
+				bool completed = false;
+			};
+			const auto before = navigation_.PublishedDiagnostics();
+			const std::uint64_t beforeSearches = before ? before->routeWorkerSearchCount : 0U;
+			std::array<ObservedRange, 256U> observations{};
+			auto declarations = navigation_.DeclareFrameWorkloads(0.0F);
+			if(declarations.empty()) return;
+			for(auto& declaration : declarations) {
+				if(declaration.stableDescriptorId != "NavigationSystem/Navigation/Prepare") continue;
+				if(!declaration.rangeWork) throw std::runtime_error("Navigation preparation lacks its production callback.");
+				auto realWork = std::move(declaration.rangeWork);
+				declaration.rangeWork = [&, realWork = std::move(realWork)](
+					const FrameWorkloadPartition& partition, JobGraphContext& context) {
+					if(partition.partitionIndex >= observations.size())
+						throw std::runtime_error("Navigation worker observation capacity exceeded.");
+					const auto worker = pool_.CurrentExecutingWorkerIndex();
+					realWork(partition, context);
+					if(!context.IsCancellationRequested()) observations[partition.partitionIndex] =
+						{worker, partition.itemBegin, partition.itemEnd, true};
+				};
+			}
+			FrameWorkloadExecutionOptions options;
+			options.formatDiagnostics = false;
+			const auto plan = ExecuteFrameWorkloads(std::move(declarations),
+				"navigation-ordinary-" + std::to_string(++ticks_), options);
+			if(!plan.valid || !plan.completed || plan.droppedExecutionRecordCount != 0U)
+				throw std::runtime_error("Ordinary navigation scheduler graph did not settle with complete execution records.");
+			const auto after = navigation_.PublishedDiagnostics();
+			const std::uint64_t afterSearches = after ? after->routeWorkerSearchCount : 0U;
+			if(afterSearches < beforeSearches) { ++counterEpochs_; return; }
+			const std::uint64_t searches = afterSearches - beforeSearches;
+			// Empty provider polling has an estimated work item but performs no route
+			// search. Public production counters prevent counting that as useful work.
+			if(searches == 0U) return;
+			std::set<std::size_t> episodeWorkers;
+			for(const auto& record : plan.executionRecords) {
+				if(record.ownerSystem != "NavigationSystem" || record.descriptorId != "NavigationSystem/Navigation/Prepare"
+					|| record.selectedPath != WorkloadExecutionPath::Worker || record.status != WorkloadExecutionStatus::Completed
+					|| record.itemEnd <= record.itemBegin || record.usefulWorkItemCount == 0U) continue;
+				if(record.partitionIndex >= observations.size()) throw std::runtime_error("Navigation execution record lacks an observation owner.");
+				const auto& observed = observations[record.partitionIndex];
+				if(!observed.completed || !observed.worker || *observed.worker >= pool_.getThreadCount()
+					|| observed.begin != record.itemBegin || observed.end != record.itemEnd)
+					throw std::runtime_error("Navigation range lacks matching actual completed pool-worker execution.");
+				episodeWorkers.insert(*observed.worker);
+				if(rows_.size() < 128U) rows_.push_back({{"frameId",record.frameId},{"workerId",*observed.worker},
+					{"itemBegin",record.itemBegin},{"itemEnd",record.itemEnd},{"measuredRouteStage",measuredRoute},
+					{"actualRouteSearchesInEpisode",searches}});
+				else ++representativesOmitted_;
+			}
+			if(episodeWorkers.empty()) throw std::runtime_error("Useful navigation route search did not execute on an observed worker.");
+			workers_.insert(episodeWorkers.begin(), episodeWorkers.end());
+			searches_ += searches;
+			if(measuredRoute) {
+				measuredWorkers_.insert(episodeWorkers.begin(), episodeWorkers.end());
+				measuredSearches_ += searches;
+			}
+		}
+		template<class Predicate>
+		bool AwaitProvider(Predicate ready)
+		{
+			return AwaitProvider(std::move(ready), [](std::uint32_t) {});
+		}
+		template<class Predicate, class BeforeTick>
+		bool AwaitProvider(Predicate ready, BeforeTick beforeTick)
+		{
+			// Only provider readiness replaces immediate synchronous polling turns.
+			// Route-result loops keep their four turns and original latency budgets.
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+			for(std::uint32_t turn = 0U; turn < 32768U; ++turn) {
+				beforeTick(turn);
+				Tick();
+				if(ready()) return true;
+				if(std::chrono::steady_clock::now() >= deadline) return false;
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			return false;
+		}
+		bool AwaitWorld()
+		{
+			return AwaitProvider([this] {
+				const auto root = navigation_.PublishedWorld();
+				return root && !root->coverage.empty()
+					&& root->terrainState == TerraEngine::Navigation::NavigationTerrainState::Available
+					&& IsIdle();
+			});
+		}
+		bool IsIdle()
+		{
+			// Availability of one profile is not completion of every queued provider.
+			// Declaration is a public diagnostic-only read; empty means capture has
+			// no queued/current/retired work left to publish a later surprise root.
+			return navigation_.DeclareFrameWorkloads(0.0F).empty();
+		}
+		[[nodiscard]] bool MeasuredRoutesObserved() const noexcept { return measuredSearches_ != 0U && !measuredWorkers_.empty(); }
+		[[nodiscard]] nlohmann::json Evidence() const
+		{
+			return {{"executionMode","scheduled-native-v1"},{"schedulerTicks",ticks_},
+				{"routeSearches",searches_},{"measuredRouteSearches",measuredSearches_},{"counterEpochChanges",counterEpochs_},
+				{"executingRouteWorkerIndices",workers_},{"measuredRouteWorkerIndices",measuredWorkers_},
+				{"representativePolicy","first128 completed range observations; aggregate counts cover every episode"},
+				{"representativeRowsOmitted",representativesOmitted_},{"representativeRows",rows_}};
+		}
+	private:
+		TerraEngine::Navigation::NavigationSystem& navigation_;
+		ThreadPool& pool_;
+		bool ownsPool_ = false, ownsStreaming_ = false, settled_ = false;
+		std::uint64_t ticks_ = 0U, searches_ = 0U, measuredSearches_ = 0U, counterEpochs_ = 0U, representativesOmitted_ = 0U;
+		std::set<std::size_t> workers_, measuredWorkers_;
+		nlohmann::json rows_ = nlohmann::json::array();
+	};
+
+	// Keep this bounded identity-only mode separate from ordinary measured runs.
+	// Its own real scheduler/pool lifetime and output contract remain unchanged.
+	int RunWorkerIdentityQualification(const Options& options, const char* executable)
+	{
+		using namespace TerraEngine::Navigation;
+		using namespace TerraEngine::Scheduling;
+		using namespace TerraEngine::Profiling;
+		using Json = nlohmann::json;
+		Json receipt{{"schemaVersion", "navigation-worker-identity-v1"}, {"status", "Failed"},
+			{"success", false}, {"nativePerformanceMeasured", false},
+			{"workloadId", "navigation-scheduled-worker-identity"}, {"lane", "headless"}};
+		int exitCode = 1;
+		try {
+			const auto require = [](bool accepted, const char* reason) {
+				if(!accepted) throw std::runtime_error(reason);
+			};
+			require(options.agents == 256U && options.matrices == std::vector<std::string>{"semantic"}
+				&& !options.qualification, "Worker identity mode requires its bounded256-owner semantic workload, not a performance/soak qualification.");
+			const ManifestContract manifest = ParseManifestContract(options.manifest);
+			require(manifest.parsed && manifest.semanticCasesValid, "Scheduled worker identity requires the maintained semantic manifest.");
+			ThreadPool& pool = ThreadPool::instance();
+			require(pool.getThreadCount() == 0U, "A fresh standalone qualification child must exclusively own its pool lifecycle.");
+			NavigationSystem& navigation = NavigationSystem::Instance();
+			ObjectManager& objects = ObjectManager::instance();
+			auto& mutations = TerraEngine::Scene::SceneMutationQueue::Instance();
+			struct OwnedHost final {
+				ThreadPool& pool;
+				NavigationSystem& navigation;
+				ObjectManager& objects;
+				TerraEngine::Scene::SceneMutationQueue& mutations;
+				bool settled = false;
+				void Settle() {
+					// Retire navigation packets first, then join their actual pool
+					// owners before destroying any scene objects or mutation leases.
+					navigation.Shutdown();
+					pool.shutdown();
+					mutations.Clear();
+					objects.clear();
+					settled = true;
+				}
+				~OwnedHost() {
+					if(settled) return;
+					// Even a rejected candidate/timeout must settle copied jobs before
+					// scene teardown. A pool-join failure must never become a pass or
+					// let live jobs observe destroyed fixture state.
+					try { navigation.Shutdown(); } catch(...) {}
+					try { pool.shutdown(); } catch(...) { std::terminate(); }
+					mutations.Clear(); objects.clear();
+				}
+			} host{pool, navigation, objects, mutations};
+			navigation.Shutdown(); objects.clear(); mutations.Clear();
+			const NavigationSettings settings = NavigationSettings::Defaults();
+			require(navigation.ConfigureSettings(settings), "Could not configure fresh qualification navigation settings.");
+			navigation.Initialize();
+			const auto bootstrap = CaptureAutomaticBootstrap(true);
+			require(bootstrap.accepted && bootstrap.terrainAvailable && QueueAutomaticBootstrap(navigation, bootstrap),
+				"Could not queue real terrain/mesh bootstrap packets for scheduled preparation.");
+			std::vector<TerraEngine::UUID> owners;
+			owners.reserve(options.agents);
+			for(std::uint32_t index = 0U; index < options.agents; ++index) {
+				const Object object = objects.createObject("Scheduled navigation owner " + std::to_string(index));
+				require(objects.AddComponent<Transform>(object) != nullptr, "Could not attach a real route-owner transform.");
+				owners.push_back(objects.getUUID(object));
+			}
+			// Capture one coherent transaction only AFTER every protected object
+			// creation; later creation would otherwise stale its scene read set.
+			TerraEngine::Scene::TransactionalMutationBuilder placement(
+				"scheduled-navigation-worker-identity-owners", TerraEngine::Scene::TransactionOrigin::Test,
+				"NavigationWorkerIdentityQualification");
+			for(const auto& id : owners) {
+				TerraEngine::Scene::WorldPose pose{};
+				pose.position.offsetMetres = {1.0, 0.0, 1.0};
+				placement.SetWorldTransform(objects, id, pose);
+			}
+			mutations.EnqueueTransaction(std::move(placement).Build());
+			const auto placed = mutations.Apply(objects, "Scheduled navigation owner placement");
+			require(placed.transactionResults.size() == 1U
+				&& placed.transactionResults.front().status == TerraEngine::Scene::TransactionStatus::Committed
+				&& placed.transactionResults.front().appliedWriteCount == owners.size(),
+				"Protected initial owner placement failed atomically.");
+			// No scene state is created while workers run. Existing engine startup
+			// reads this same environment override; observe its result, never copy it.
+			pool.initialize();
+			Json usefulRanges = Json::array();
+			std::set<std::uint32_t> navigationWorkers;
+			std::size_t droppedRanges = 0U;
+			std::uint64_t schedulerFrames = 0U;
+			bool qualifyingRoutePhase = false;
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+			const auto tick = [&]() {
+				require(std::chrono::steady_clock::now() < deadline, "Scheduled navigation qualification exceeded its bounded30-second deadline.");
+				// This is the normal SystemScheduler workload executor, without
+				// unrelated no-op systems or manually enqueued dummy tasks.
+				struct ObservedRange final {
+					std::optional<std::size_t> worker;
+					std::size_t begin = 0U;
+					std::size_t end = 0U;
+					bool completed = false;
+				};
+				// Each production partition owns one distinct fixed observation slot.
+				// The executor settles every callback before these caller-owned slots
+				// are read or destroyed; no process-global observer or copied work exists.
+				std::array<ObservedRange, 256U> observedRanges{};
+				auto declarations = navigation.DeclareFrameWorkloads(0.0F);
+				if(qualifyingRoutePhase) {
+					for(auto& declaration : declarations) {
+						if(declaration.stableDescriptorId != "NavigationSystem/Navigation/Prepare") continue;
+						require(static_cast<bool>(declaration.rangeWork), "Real navigation preparation must expose its production range callback.");
+						auto realWork = std::move(declaration.rangeWork);
+						declaration.rangeWork = [&, realWork = std::move(realWork)](
+							const FrameWorkloadPartition& partition, JobGraphContext& context) {
+							require(partition.partitionIndex < observedRanges.size(), "Navigation observation exceeded its bounded partition capacity.");
+							const auto worker = pool.CurrentExecutingWorkerIndex();
+							// Execute the actual immutable-input search and typed prepared
+							// publication callback unchanged, then observe successful return.
+							realWork(partition, context);
+							if(!context.IsCancellationRequested()) observedRanges[partition.partitionIndex] =
+								{worker, partition.itemBegin, partition.itemEnd, true};
+						};
+					}
+				}
+				const auto plan = ExecuteFrameWorkloads(std::move(declarations),
+					"navigation-worker-identity-" + std::to_string(++schedulerFrames));
+				require(plan.valid && plan.completed, "Production navigation workload graph failed to settle.");
+				// Bootstrap may schedule an empty route descriptor while its separate
+				// provider packet builds. It cannot supply route-worker identity proof.
+				if(!qualifyingRoutePhase) return;
+				for(const auto& record : plan.executionRecords) {
+					if(record.ownerSystem != "NavigationSystem" || record.descriptorId != "NavigationSystem/Navigation/Prepare"
+						|| record.selectedPath != WorkloadExecutionPath::Worker || record.status != WorkloadExecutionStatus::Completed
+						|| record.itemEnd <= record.itemBegin || record.usefulWorkItemCount == 0U) continue;
+					require(record.partitionIndex < observedRanges.size(), "Completed navigation range lacks a bounded observation slot.");
+					const auto& observed = observedRanges[record.partitionIndex];
+					require(observed.completed && observed.worker.has_value()
+						&& observed.begin == record.itemBegin && observed.end == record.itemEnd,
+						"Completed production navigation range lacks matching actual pool-worker observation.");
+					require(*observed.worker < pool.getThreadCount()
+						&& *observed.worker <= std::numeric_limits<std::uint32_t>::max(),
+						"Observed actual worker index must fit the independently observed pool and receipt field.");
+					const auto workerId = static_cast<std::uint32_t>(*observed.worker);
+					navigationWorkers.insert(workerId);
+					if(usefulRanges.size() < 256U) usefulRanges.push_back({{"frameId", record.frameId}, {"descriptorId", record.descriptorId}, {"stage", "SubmittedObjectRoutes"},
+						{"workerId", workerId}, {"workerIdentityAvailable", true},
+						{"workerIdentitySource", "ThreadPool::CurrentExecutingWorkerIndex inside actual production range callback"},
+						{"completed", record.status == WorkloadExecutionStatus::Completed}, {"itemBegin", record.itemBegin}, {"itemEnd", record.itemEnd},
+						{"usefulWorkItemCount", record.usefulWorkItemCount}, {"completionSequence", record.completionSequence}});
+					else ++droppedRanges;
+				}
+			};
+			std::shared_ptr<const NavigationWorldRoot> root;
+			do {
+				tick(); root = navigation.PublishedWorld();
+				if(!root || root->coverage.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			} while(!root || root->coverage.empty());
+			std::vector<NavigationRequestHandle> requests;
+			requests.reserve(owners.size());
+			for(const auto& owner : owners) {
+				const auto admitted = navigation.RequestRoute(objects, owner, Location(root->world, 10.0), NavigationProfile::Defaults());
+				require(admitted.Succeeded() && admitted.request.IsValid(), "A real protected object route request was rejected.");
+				requests.push_back(admitted.request);
+			}
+			qualifyingRoutePhase = true;
+			std::size_t completed = 0U;
+			do {
+				tick(); completed = 0U;
+				for(const auto request : requests) {
+					const auto result = navigation.ReadRequest(request);
+					if(!result.record || result.record->outcome != NavigationOutcome::Complete) continue;
+					const auto route = navigation.ReadRoute(navigation.PublishedRouteForRequest(request));
+					require(route.IsValid() && route.points.size() >= 2U
+						&& route.points.front().position == Location(root->world, 1.0).position
+						&& route.points.back().position == Location(root->world, 10.0).position,
+						"A completed scheduled route lacks its real start/destination geometry.");
+					++completed;
+				}
+			} while(completed != requests.size());
+			Json runtimeWorkers = CaptureRuntimeWorkerEvidence();
+			const auto observedCapacity = runtimeWorkers.at("observedPoolCapacity").get<std::size_t>();
+			const std::string manifestHash = HashFile(options.manifest);
+			const std::string buildHash = HashFile(std::filesystem::absolute(CommandLinePath(executable)));
+			require(!manifestHash.empty() && !buildHash.empty(), "Scheduled qualification input/executable pins are unavailable.");
+			const Json settingsIdentity{{"maxConcurrentSearches", settings.maxConcurrentSearches}, {"profile", "default"},
+				{"mode", "scheduled-worker-identity"}};
+			const Json workloadIdentity{{"owners", owners.size()}, {"requests", requests.size()}, {"start", {1, 0, 1}}, {"destination", {10, 0, 1}}};
+			receipt["identity"] = {{"buildSha256", buildHash}, {"sourceSha256", manifestHash},
+				{"settingsSha256", Sha256Hex(std::string_view(settingsIdentity.dump()))},
+				{"workloadSha256", Sha256Hex(std::string_view(workloadIdentity.dump()))},
+				{"renderer", "TerraEngine"}, {"powerMode", "unknown"}, {"workerCount", observedCapacity}};
+			receipt["content"] = {{"agents", owners.size()}, {"submittedRouteCount", requests.size()}, {"completedRouteCount", completed},
+				{"executionMode", "scheduled-worker-identity"}, {"schedulerFrames", schedulerFrames},
+				{"runtimeWorkerEvidence", std::move(runtimeWorkers)}, {"navigationExecutingWorkerIndices", navigationWorkers},
+				{"navigationWorkerExecutionRecords", std::move(usefulRanges)}, {"droppedNavigationWorkerRecords", droppedRanges}};
+			receipt["success"] = observedCapacity > 0U && !navigationWorkers.empty() && droppedRanges == 0U;
+			receipt["status"] = receipt["success"].get<bool>() ? "Passed" : "Unverified";
+			if(!receipt["success"].get<bool>()) receipt["reason"] = "Actual completed routes lacked complete useful navigation-worker identity observations.";
+			host.Settle();
+			receipt["content"]["poolCapacityAfterCleanup"] = pool.getThreadCount();
+			require(pool.getThreadCount() == 0U, "Owned qualification pool did not settle before receipt publication.");
+			exitCode = receipt["success"].get<bool>() ? 0 : 2;
+		} catch(const std::exception& error) {
+			receipt["success"] = false; receipt["status"] = "Failed"; receipt["reason"] = error.what();
+		}
+		std::error_code error;
+		if(options.output.has_parent_path()) std::filesystem::create_directories(options.output.parent_path(), error);
+		std::ofstream output(options.output, std::ios::binary | std::ios::trunc);
+		if(!output) return 4;
+		output << receipt.dump(2);
+		return output.good() ? exitCode : 5;
+	}
+
 }
 
-int main(int argc, char** argv)
+static int RunNavigationMain(int argc, char** argv)
+try
 {
 	if(argc == 4 && std::string_view(argv[1]) == "--write-cache-fixture") {
-		const std::filesystem::path output(argv[3]);
+		const std::filesystem::path output = CommandLinePath(argv[3]);
 		if(!output.is_absolute()) {
 			std::cerr << "Cache fixture output must be an absolute path.\n";
 			return 2;
@@ -485,14 +909,16 @@ int main(int argc, char** argv)
 			std::cerr << "Could not write provider-generated navigation cache fixture.\n";
 			return 2;
 		}
-		std::cout << "Wrote provider-generated " << argv[2] << " cache fixture: " << output << '\n';
+		std::cout << "Wrote provider-generated " << argv[2] << " cache fixture: " << argv[3] << '\n';
 		return 0;
 	}
 	Options options;
 	if(!ParseOptions(argc, argv, options)) {
-		std::cerr << "Usage: TerraEngineNavigationAcceptance --lane <editor|export-rendered|export-headless> --manifest <file> --output <file> --matrices <comma-separated> [--duration-seconds N] [--cycles N]\n";
+		std::cerr << "Usage: TerraEngineNavigationAcceptance --lane <editor|export-rendered|export-headless> --manifest <file> --output <file> --matrices <comma-separated> [--duration-seconds N] [--cycles N] [--qualification-worker-identity]\n";
 		return 2;
 	}
+
+	if(options.qualificationWorkerIdentity) return RunWorkerIdentityQualification(options, argv[0]);
 
 	using namespace TerraEngine::Navigation;
 	const ManifestContract manifestContract = ParseManifestContract(options.manifest);
@@ -501,8 +927,13 @@ int main(int argc, char** argv)
 		return 6;
 	}
 	NavigationSystem& system = NavigationSystem::Instance();
-	system.Shutdown();
-	system.Initialize();
+	OrdinaryScheduledNavigationHost host(system);
+	ObjectManager& objects = ObjectManager::instance();
+	TerraEngine::Scene::SceneMutationQueue& mutations = TerraEngine::Scene::SceneMutationQueue::Instance();
+	// Initial fixture clearing precedes every worker; later cleanup belongs to host.
+	mutations.Clear();
+	objects.clear();
+	host.Initialize();
 	// Route availability must come from the same automatic terrain-plus-physical
 	// geometry capture boundary used by an installed scene, never a hand-built
 	// source that could hide a missing-terrain or eligibility regression.
@@ -511,13 +942,11 @@ int main(int argc, char** argv)
 		&& automaticBootstrap.eligibleSourceIndex != nullptr
 		&& automaticBootstrap.eligibleSourceIndex->Records().size() >= 2U;
 	if(!automaticCapturePassed || !QueueAutomaticBootstrap(system, automaticBootstrap)) {
-		system.Shutdown();
 		return 3;
 	}
-	system.Update(0.0F);
+	const bool bootstrapReady = host.AwaitWorld();
 	const auto root = system.PublishedWorld();
-	if(!root || root->coverage.empty()) {
-		system.Shutdown();
+	if(!bootstrapReady || !root || root->coverage.empty()) {
 		return 3;
 	}
 	const NavigationOwnerHandle owner{root->world, {1U}, 1U};
@@ -527,10 +956,6 @@ int main(int argc, char** argv)
 	// its throughput workload begins: one object targets another object's copied
 	// canonical pose, receives a route, and moves through its waypoints using the
 	// same typed transactional boundary available to a character controller.
-	ObjectManager& objects = ObjectManager::instance();
-	TerraEngine::Scene::SceneMutationQueue& mutations = TerraEngine::Scene::SceneMutationQueue::Instance();
-	objects.clear();
-	mutations.Clear();
 	const Object navigatorObject = objects.createObject("Installed Navigating Object");
 	Transform* navigatorTransform = objects.AddComponent<Transform>(navigatorObject);
 	const Object targetObject = objects.createObject("Installed Target Object");
@@ -554,8 +979,6 @@ int main(int argc, char** argv)
 		|| initialPlacementResult.transactionResults.size() != 1U
 		|| initialPlacementResult.transactionResults.front().status != TerraEngine::Scene::TransactionStatus::Committed
 		|| initialPlacementResult.transactionResults.front().appliedWriteCount != 2U) {
-		objects.clear();
-		system.Shutdown();
 		return 3;
 	}
 	const auto locationReceipt = system.RequestRoute(objects, objects.getUUID(navigatorObject),
@@ -565,7 +988,7 @@ int main(int argc, char** argv)
 	// Preparation is deliberately bounded to one copied route packet per update.
 	// Advance enough protected turns to observe both independently admitted public
 	// requests rather than mistaking an honest queued record for a failed route.
-	for(std::uint32_t frame = 0U; frame < 4U; ++frame) system.Update(0.0F);
+	for(std::uint32_t frame = 0U; frame < 4U; ++frame) host.Tick();
 	const auto locationRequest = locationReceipt.request.IsValid()
 		? system.ReadRequest(locationReceipt.request) : NavigationStoreReadResult<NavigationRequestRecord>{};
 	const auto destinationRoute = destinationReceipt.request.IsValid()
@@ -613,8 +1036,6 @@ int main(int argc, char** argv)
 		const Object object = objects.createObject("Installed Navigation Workload Object " + std::to_string(index));
 		Transform* transform = objects.AddComponent<Transform>(object);
 		if(transform == nullptr) {
-			objects.clear();
-			system.Shutdown();
 			return 3;
 		}
 		workloadObjectIds.push_back(objects.getUUID(object));
@@ -633,8 +1054,6 @@ int main(int argc, char** argv)
 	if(workloadPlacementResult.transactionResults.size() != 1U
 		|| workloadPlacementResult.transactionResults.front().status != TerraEngine::Scene::TransactionStatus::Committed
 		|| workloadPlacementResult.transactionResults.front().appliedWriteCount != workloadObjectIds.size()) {
-		objects.clear();
-		system.Shutdown();
 		return 3;
 	}
 	// Prove the first ordinary workload object can use the identical public route
@@ -645,7 +1064,7 @@ int main(int argc, char** argv)
 		objects, workloadObjectIds.front(), destination, NavigationProfile::Defaults());
 	NavigationStoreReadResult<NavigationRequestRecord> workloadProbeRead{};
 	for(std::uint32_t frame = 0U; workloadProbeReceipt.Succeeded() && frame < 4U; ++frame) {
-		system.Update(0.0F);
+		host.Tick();
 		workloadProbeRead = system.ReadRequest(workloadProbeReceipt.request);
 		if(workloadProbeRead.record && workloadProbeRead.record->lifecycle == NavigationRequestLifecycle::Terminal) break;
 	}
@@ -653,7 +1072,7 @@ int main(int argc, char** argv)
 		&& workloadProbeRead.record->outcome == NavigationOutcome::Complete;
 	if(workloadProbeReceipt.Succeeded()) (void)system.ReleaseRequestResult(workloadProbeReceipt.request);
 	const std::string manifestHash = HashFile(options.manifest);
-	const std::string buildHash = HashFile(std::filesystem::absolute(argv[0]));
+	const std::string buildHash = HashFile(std::filesystem::absolute(CommandLinePath(argv[0])));
 	// The installed manifest is the source-free semantic corpus. Hashing __FILE__
 	// would accidentally make evidence depend on a developer checkout whenever
 	// an installed qualification happens to run on the build machine.
@@ -708,17 +1127,13 @@ int main(int argc, char** argv)
 			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count()) / 1000.0;
 		const bool timingGeometryStaged = StageDynamicMutationGeometry(system,
 			NavigationUuid{timingProbeSource}, receipt.intent.operation, receipt.intent.committedSourceRevision, 1025.0);
-		for(std::uint32_t attempt = 0U; attempt < 1000U; ++attempt) {
-			if(!timingGeometryStaged) break;
-			system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, attempt + 1U);
-			system.Update(0.0F);
+		dynamicPublicationProbePassed = timingGeometryStaged && host.AwaitProvider([&] {
 			const auto after = system.PublishedWorld();
-			if(after && after->rootGeneration > dirtyObserved->rootGeneration
-				&& system.DynamicDirtyIndexForTesting().PendingPreparationCount() == 0U) {
-				dynamicPublicationProbePassed = true;
-				break;
-			}
-		}
+			return after && after->rootGeneration > dirtyObserved->rootGeneration
+				&& system.DynamicDirtyIndexForTesting().PendingPreparationCount() == 0U && host.IsIdle();
+		}, [&](std::uint32_t turn) {
+			system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, turn + 1U);
+		});
 	}
 	}
 	// The synthetic off-corridor receipt intentionally invalidates the published
@@ -728,7 +1143,7 @@ int main(int argc, char** argv)
 	// unavailable interval rather than its required usable recovery.
 	const NavigationSceneBootstrapCapture postDynamicCapture = CaptureAutomaticBootstrap(true);
 	bool postDynamicWorldRecovered = QueueAutomaticBootstrap(system, postDynamicCapture);
-	for(std::uint32_t frame = 0U; postDynamicWorldRecovered && frame < 4U; ++frame) system.Update(0.0F);
+	if(postDynamicWorldRecovered) postDynamicWorldRecovered = host.AwaitWorld();
 	postDynamicWorldRecovered = postDynamicWorldRecovered && system.PublishedWorld() != nullptr
 		&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
 
@@ -767,16 +1182,16 @@ int main(int argc, char** argv)
 	std::vector<std::uint64_t> frameSamplesMicroseconds;
 	frameSamplesMicroseconds.reserve(std::min<std::uint32_t>(options.rawSampleLimit, 200'000U));
 	TerraEngine::Scene::WorldStreamingSystem& streaming = TerraEngine::Scene::WorldStreamingSystem::Instance();
-	streaming.Initialize();
+	host.StartStreaming();
 	// Prepare a concrete, asset-free region snapshot. Publishing it through the
 	// declared frame-end API measures real streaming residency without inventing
 	// an asset load or touching renderer state from this validation tool.
 	const TerraEngine::Scene::WorldRegionKey soakRegion{};
 	const bool streamingRegionPrepared = streaming.Directory().Upsert({soakRegion, "navigation-soak.tenregion", manifestHash, 1U, 0U,
 		TerraEngine::Scene::WorldRegionState::Prepared, {}, {}});
-	const auto advanceNavigationFrame = [&system, &frameSamplesMicroseconds, &options] {
+	const auto advanceNavigationFrame = [&host, &frameSamplesMicroseconds, &options] {
 		const auto began = std::chrono::steady_clock::now();
-		system.Update(0.0F);
+		host.Tick(true);
 		if(frameSamplesMicroseconds.size() < options.rawSampleLimit) {
 			frameSamplesMicroseconds.push_back(static_cast<std::uint64_t>(std::max<std::int64_t>(0,
 				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count())));
@@ -809,13 +1224,14 @@ int main(int argc, char** argv)
 		}
 	};
 
-	auto submitScheduledRoute = [&](const std::string& mode, std::uint64_t sequence) {
+	auto submitScheduledRoute = [&](const std::string& mode, std::uint64_t sequence,
+		std::optional<NavigationLocation> destinationOverride = std::nullopt) {
 		const std::uint32_t agentIndex = static_cast<std::uint32_t>(sequence % workloadObjectIds.size());
 		const auto began = std::chrono::steady_clock::now();
 		// Object capture is a protected API, so retain the public object-to-location
 		// route call on this boundary rather than borrowing object state in a worker.
 		const NavigationSystem::ObjectRouteReceipt receipt = system.RequestRoute(
-			objects, workloadObjectIds[agentIndex], destination, NavigationProfile::Defaults());
+			objects, workloadObjectIds[agentIndex], destinationOverride.value_or(destination), NavigationProfile::Defaults());
 		if(!receipt.Succeeded()) {
 			recordOutcome(mode, agentIndex, receipt.outcome, receipt.reason, 0U);
 			return;
@@ -1000,7 +1416,11 @@ int main(int argc, char** argv)
 				// route. A route prepared from the just-retired root must fail stale by
 				// design, so deferring this boundary until the next request would turn a
 				// valid independent route into a scheduling artifact.
-				system.Update(0.0F);
+				const bool mutationSettled = host.AwaitProvider([&] {
+					const auto& dirty = system.DynamicDirtyIndexForTesting();
+					return dirty.PendingPreparationCount() == 0U && dirty.DirtyCoverage().empty() && dirty.DirtySeams().empty() && host.IsIdle();
+				});
+				if(!mutationSettled) throw std::runtime_error("Soak mutation provider did not reach its protected publication boundary.");
 				streaming.SubmitObserverInterest({"navigation-soak", TerraEngine::Scene::ObserverInterestKind::Automation, start.position, {}, 128.0,
 					TerraEngine::Scene::ObserverInterestPriority::Normal, modeSubmitted});
 				streaming.Update(0.0F);
@@ -1027,13 +1447,14 @@ int main(int argc, char** argv)
 		// The final mutation is submitted after the last paced route. Drive bounded
 		// protected frames so its worker candidate either publishes and acknowledges
 		// the complete dirty tuple or remains visible as a fail-closed test failure.
-		for(std::uint32_t frame = 0U; frame < 64U
-			&& system.DynamicDirtyIndexForTesting().PendingPreparationCount() != 0U; ++frame) {
-			system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, 1'000'000U + frame);
-			system.Update(0.0F);
-		}
+		const bool providerDrained = host.AwaitProvider([&] {
+			const auto& dirty = system.DynamicDirtyIndexForTesting();
+			return dirty.PendingPreparationCount() == 0U && dirty.DirtyCoverage().empty() && dirty.DirtySeams().empty() && host.IsIdle();
+		}, [&](std::uint32_t turn) {
+			system.ObserveProtectedBoundary(NavigationProtectedBoundary::FrameEnd, 1'000'000U + turn);
+		});
 		const NavigationDirtyIndex& dirty = system.DynamicDirtyIndexForTesting();
-		soakDirtyIndexDrained = dirty.PendingPreparationCount() == 0U
+		soakDirtyIndexDrained = providerDrained && dirty.PendingPreparationCount() == 0U
 			&& dirty.DirtyCoverage().empty() && dirty.DirtySeams().empty();
 	}
 	const NavigationDirtyIndex& finalSoakDirtyIndex = system.DynamicDirtyIndexForTesting();
@@ -1081,7 +1502,7 @@ int main(int argc, char** argv)
 		// depend on which matrix happened to run first.
 		const NavigationSceneBootstrapCapture postLifecycleCapture = CaptureAutomaticBootstrap(true);
 		bool postLifecycleWorldReady = QueueAutomaticBootstrap(system, postLifecycleCapture);
-		for(std::uint32_t frame = 0U; postLifecycleWorldReady && frame < 4U; ++frame) system.Update(0.0F);
+		if(postLifecycleWorldReady) postLifecycleWorldReady = host.AwaitWorld();
 		postLifecycleWorldReady = postLifecycleWorldReady && system.PublishedWorld() != nullptr
 			&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
 		if(!postLifecycleWorldReady) ++lifecycleFailures;
@@ -1091,7 +1512,12 @@ int main(int argc, char** argv)
 	if(std::find(options.matrices.begin(), options.matrices.end(), "usability") != options.matrices.end()) {
 		// Time the same first real route a developer previews before exercising the
 		// five deliberately invalid scenes used by the explanation workflow.
-		submitScheduledRoute("usability", 0U);
+		// A preceding lifecycle matrix replaces the world lifetime. Capture this
+		// normal route's CURRENT public owner with the identical destination point;
+		// stale-handle rejection is still tested separately below without rebasing.
+		const auto usabilityWorld = system.PublishedWorld();
+		if(!usabilityWorld) throw std::runtime_error("Usability setup lacks its recovered public navigation world.");
+		submitScheduledRoute("usability", 0U, Location(usabilityWorld->world, 10.0));
 		// Exercise five distinct engine-owned diagnosis paths rather than assigning
 		// labels to malformed data in the tool. These scenes use only neutral
 		// analytic geometry and the public ground-query/clearance contract.
@@ -1188,7 +1614,7 @@ int main(int argc, char** argv)
 		unavailableDestination.world = system.PublishedWorld()->world;
 	const NavigationSystem::ObjectRouteReceipt unavailableReceipt = system.RequestRoute(
 		objects, workloadObjectIds.front(), unavailableDestination, NavigationProfile::Defaults());
-	system.Update(0.0F);
+	host.Tick();
 	const auto unavailableRead = system.ReadRequest(unavailableReceipt.request);
 	const bool unavailableMissingTerrainPassed = unavailableWorldPublished && unavailableReceipt.Succeeded()
 		&& unavailableRead.record.has_value() && unavailableRead.record->outcome == NavigationOutcome::UnavailableCoverage
@@ -1196,7 +1622,7 @@ int main(int argc, char** argv)
 
 	const NavigationSceneBootstrapCapture recoveredCapture = CaptureAutomaticBootstrap(true);
 	bool recoveredAutomaticWorld = QueueAutomaticBootstrap(system, recoveredCapture);
-	for(std::uint32_t frame = 0U; recoveredAutomaticWorld && frame < 4U; ++frame) system.Update(0.0F);
+	if(recoveredAutomaticWorld) recoveredAutomaticWorld = host.AwaitWorld();
 	recoveredAutomaticWorld = recoveredAutomaticWorld && system.PublishedWorld() != nullptr
 		&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
 	const NavigationWorldHandle recoveredWorld = recoveredAutomaticWorld ? system.PublishedWorld()->world : NavigationWorldHandle{};
@@ -1222,7 +1648,7 @@ int main(int argc, char** argv)
 		&& staleHandleStatus == NavigationHandleStatus::StaleWorld;
 	const NavigationSceneBootstrapCapture postRevokeCapture = CaptureAutomaticBootstrap(true);
 	bool postRevokeWorldReady = QueueAutomaticBootstrap(system, postRevokeCapture);
-	for(std::uint32_t frame = 0U; postRevokeWorldReady && frame < 4U; ++frame) system.Update(0.0F);
+	if(postRevokeWorldReady) postRevokeWorldReady = host.AwaitWorld();
 	postRevokeWorldReady = postRevokeWorldReady && system.PublishedWorld() != nullptr
 		&& system.PublishedWorld()->terrainState == NavigationTerrainState::Available;
 	NavigationLocation postRevokeDestination = destination;
@@ -1298,16 +1724,16 @@ int main(int argc, char** argv)
 	const bool streamedOut = !streamOutCapture.accepted && system.PublishUnavailableTerrain(streamOutCapture.eligibleSourceIndex);
 	const NavigationSystem::ObjectRouteReceipt streamUnavailableReceipt = system.RequestRoute(objects,
 		workloadObjectIds.front(), postRevokeDestination, NavigationProfile::Defaults());
-	system.Update(0.0F);
+	host.Tick();
 	const auto streamUnavailableRead = system.ReadRequest(streamUnavailableReceipt.request);
 	const NavigationSceneBootstrapCapture streamInCapture = CaptureAutomaticBootstrap(true);
 	bool streamedIn = QueueAutomaticBootstrap(system, streamInCapture);
-	for(std::uint32_t frame = 0U; streamedIn && frame < 4U; ++frame) system.Update(0.0F);
+	if(streamedIn) streamedIn = host.AwaitWorld();
 	NavigationLocation streamDestination = postRevokeDestination;
 	streamDestination.world = streamedIn && system.PublishedWorld() ? system.PublishedWorld()->world : NavigationWorldHandle{};
 	const NavigationSystem::ObjectRouteReceipt streamRecoveredReceipt = streamedIn ? system.RequestRoute(objects,
 		workloadObjectIds.front(), streamDestination, NavigationProfile::Defaults()) : NavigationSystem::ObjectRouteReceipt{};
-	system.Update(0.0F);
+	host.Tick();
 	const auto streamRecoveredRead = system.ReadRequest(streamRecoveredReceipt.request);
 	const bool streamingWorldQueryPassed = streamedRegionPublished && streamedOut
 		&& streamUnavailableRead.record.has_value() && streamUnavailableRead.record->outcome == NavigationOutcome::UnavailableCoverage
@@ -1370,6 +1796,7 @@ int main(int argc, char** argv)
 	const bool qualificationObjectLoadPassed = !options.qualification
 		|| (workloadObjectIds.size() == 256U && options.agents == 256U && options.requestsPerSecond == 100U);
 	const bool success = semanticContractPassed && objectTargetMovementPassed
+		&& (!soakRequested || host.MeasuredRoutesObserved())
 		&& submitted > 0U && objects.getRootObjects().size() >= workloadObjectIds.size() + 2U
 		&& failed == 0U && lifecycleFailures == 0U && usabilityPassed
 		&& qualificationObjectLoadPassed
@@ -1380,7 +1807,12 @@ int main(int argc, char** argv)
 				|| streamingPublicationMeasured)));
 	const std::string lane = options.lane == "export-headless" || options.lane == "headless" ? "headless" : "rendered";
 	const std::string workloadId = options.matrices.size() == 1U ? options.matrices.front() : "navigation-matrix";
-	const nlohmann::json content = {
+	// Copy actual pool observations once; agent population is a workload input.
+	nlohmann::json runtimeWorkerEvidence = CaptureRuntimeWorkerEvidence();
+	runtimeWorkerEvidence["scheduledHost"] = host.Evidence();
+	nlohmann::json content = {
+		{"executionMode", "scheduled-native-v1"},
+		{"frameTimingBoundary", "NavigationCapture+Prepare+Publish via ExecuteFrameWorkloads; includes bounded host provenance observation"},
 		{"completed", completed}, {"durationSeconds", options.durationSeconds}, {"failed", failed},
 		{"lane", lane}, {"matrices", options.matrices}, {"rejected", rejected}, {"submitted", submitted},
 		{"agents", options.agents}, {"registeredObjects", options.agents}, {"requestsPerSecond", options.requestsPerSecond},
@@ -1428,11 +1860,17 @@ int main(int argc, char** argv)
 		{"medianFrameMicroseconds", medianFrameMicroseconds}, {"frameSamplesMicroseconds", frameSamplesMicroseconds},
 		{"lifecycleCycles", options.cycles}, {"lifecycleRevocations", lifecycleRevocations}, {"lifecycleSamples", lifecycleSamples},
 		{"invalidExplanations", invalidExplanations}, {"distinctInvalidExplanations", distinctInvalidExplanations.size()},
+		{"runtimeWorkerEvidence", runtimeWorkerEvidence},
 		{"workloadId", workloadId}};
+	// Cohort keys compare identity fields, not contentSha256. Runtime observations
+	// stay in the existing integrity-hashed content evidence, outside input identity.
+	// Settle actual jobs before output failures can destroy fixture owners.
+	host.Settle();
+	content["runtimeWorkerEvidence"]["poolCapacityAfterCleanup"] = ThreadPool::instance().getThreadCount();
 	const nlohmann::json evidence = {
 		{"schemaVersion", 1U}, {"identity", {
 			{"buildSha256", buildHash}, {"sourceSha256", sourceHash}, {"settingsSha256", settingsHash},
-			{"workloadSha256", workloadHash}, {"renderer", "TerraEngine"}, {"powerMode", "unknown"}, {"workerCount", options.agents}}},
+			{"workloadSha256", workloadHash}, {"renderer", "TerraEngine"}, {"powerMode", "unknown"}, {"workerCount", runtimeWorkerEvidence.at("observedPoolCapacity")}}},
 		{"content", content}, {"contentSha256", Sha256Hex(std::string_view(content.dump()))},
 		{"metrics", { {"routeLatencyMilliseconds", Percentile(latencyMicroseconds, 0.95) / 1000.0},
 			{"dynamicPublicationResponsivenessMilliseconds", dynamicPublicationResponsivenessMilliseconds >= 0.0
@@ -1452,9 +1890,51 @@ int main(int argc, char** argv)
 	if(!output) return 4;
 	output << evidence.dump(2);
 	if(!output.good()) return 5;
-	streaming.Shutdown();
-	mutations.Clear();
-	objects.clear();
-	system.Shutdown();
 	return success ? 0 : 1;
 }
+catch(const std::exception& error)
+{
+	// Function-try cleanup destroys the scoped host before reporting any failure.
+	std::cerr << "Ordinary navigation host failed: " << error.what() << '\n';
+	return 3;
+}
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv)
+{
+	// The Windows CRT's narrow entry point can replace Unicode path characters
+	// before parsing begins. Own strict UTF-8 arguments for the complete run;
+	// the existing parser and workload keep their original exit-code semantics.
+	std::vector<std::string> arguments;
+	std::vector<char*> pointers;
+	try {
+		arguments.reserve(static_cast<std::size_t>(argc));
+		for(int index = 0; index < argc; ++index) {
+			const std::wstring_view wide(argv[index]);
+			if(wide.empty()) { arguments.emplace_back(); continue; }
+			if(wide.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) return 2;
+			const int length = static_cast<int>(wide.size());
+			const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+				wide.data(), length, nullptr, 0, nullptr, nullptr);
+			if(bytes <= 0) return 2;
+			std::string utf8(static_cast<std::size_t>(bytes), '\0');
+			if(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), length,
+				utf8.data(), bytes, nullptr, nullptr) != bytes) return 2;
+			arguments.push_back(std::move(utf8));
+		}
+		pointers.reserve(arguments.size() + 1U);
+		for(auto& argument : arguments) pointers.push_back(argument.data());
+		pointers.push_back(nullptr);
+	} catch(const std::exception& error) {
+		std::cerr << "Navigation command-line conversion failed: " << error.what() << '\n';
+		return 2;
+	}
+	return RunNavigationMain(argc, pointers.data());
+}
+#else
+int main(int argc, char** argv)
+{
+	// Unix native arguments already carry their filesystem UTF-8 bytes.
+	return RunNavigationMain(argc, argv);
+}
+#endif

@@ -4,6 +4,7 @@
 // still flow through VulkanContext::Impl so frame-fence lifetime rules remain unchanged.
 
 #include "VulkanResourceSource.h"
+#include "VulkanUploadPlanning.h"
 
 void VulkanContext::Impl::RetireVulkanAnimationFrameResources(VulkanAnimationFrameResources& resources)
 {
@@ -76,78 +77,14 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		return false;
 	}
 
-	// Synchronized visual clones publish distinct instance records, but their
-	// local-space palette and morph bytes are often identical. Build one immutable
-	// upload slice per 128-bit content identity, then point every clone bridge at
-	// that slice. Model transforms remain draw-owned, so sharing these bytes cannot
-	// collapse object placement or instance generations.
-	struct SharedCpuAnimationContentKey
-	{
-		std::uint64_t low = 0U;
-		std::uint64_t high = 0U;
-
-		bool operator==(const SharedCpuAnimationContentKey&) const = default;
-	};
-	struct SharedCpuAnimationContentKeyHash
-	{
-		std::size_t operator()(const SharedCpuAnimationContentKey& key) const noexcept
-		{
-			const std::uint64_t rotatedHigh = (key.high << 1U) | (key.high >> 63U);
-			return static_cast<std::size_t>(key.low ^ rotatedHigh);
-		}
-	};
-	struct SharedCpuAnimationUploadSlice
-	{
-		const TerraEngine::Renderer::CpuAnimationDeformationData* data = nullptr;
-		std::uint64_t paletteOffsetBytes = 0U;
-		std::uint64_t morphOffsetBytes = 0U;
-	};
-
-	std::size_t paletteCount = 0U;
-	std::size_t morphWeightCount = 0U;
-	std::vector<SharedCpuAnimationUploadSlice> sharedSlices;
-	std::vector<std::size_t> recordSliceIndices;
-	std::unordered_map<SharedCpuAnimationContentKey, std::size_t,
-		SharedCpuAnimationContentKeyHash> sharedSliceByContent;
-	try {
-		sharedSlices.reserve(plan.records.size());
-		recordSliceIndices.reserve(plan.records.size());
-		sharedSliceByContent.reserve(plan.records.size());
-	} catch(const std::bad_alloc&) {
-		return false;
-	}
-	for(const TerraEngine::Renderer::CpuAnimationDeformationRecord& record
-		: plan.records) {
-		if(!record.IsComplete()
-			|| record.rendererGeneration != plan.rendererGeneration) {
-			return false;
-		}
-
-		const SharedCpuAnimationContentKey key{
-			record.data->contentIdLow,
-			record.data->contentIdHigh};
-		const auto existing = sharedSliceByContent.find(key);
-		if(existing != sharedSliceByContent.end()) {
-			recordSliceIndices.push_back(existing->second);
-			continue;
-		}
-		if(record.data->paletteMatrices.size()
-				> std::numeric_limits<std::size_t>::max() - paletteCount
-			|| record.data->morphWeights.size()
-				> std::numeric_limits<std::size_t>::max() - morphWeightCount) {
-			return false;
-		}
-		const std::size_t sliceIndex = sharedSlices.size();
-		sharedSlices.push_back({
-			record.data.get(),
-			static_cast<std::uint64_t>(paletteCount)
-				* sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord),
-			static_cast<std::uint64_t>(morphWeightCount) * sizeof(float)});
-		sharedSliceByContent.emplace(key, sliceIndex);
-		recordSliceIndices.push_back(sliceIndex);
-		paletteCount += record.data->paletteMatrices.size();
-		morphWeightCount += record.data->morphWeights.size();
-	}
+	// Protected publication and deformation work share one exact dedup policy.
+	// This worker-owned scratch retains capacities across repeated publications.
+	thread_local TerraEngine::Renderer::Vulkan::CpuAnimationUploadLayout uploadLayout;
+	if (!TerraEngine::Renderer::Vulkan::BuildCpuAnimationUploadLayout(plan, uploadLayout)) return false;
+	const auto& sharedSlices = uploadLayout.slices;
+	const auto& recordSliceIndices = uploadLayout.recordSliceIndices;
+	const std::size_t paletteCount = static_cast<std::size_t>(uploadLayout.paletteBytes / sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord));
+	const std::size_t morphWeightCount = static_cast<std::size_t>(uploadLayout.morphBytes / sizeof(float));
 	if(paletteCount == 0U
 		|| paletteCount > std::numeric_limits<VkDeviceSize>::max()
 			/ sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord)
@@ -193,14 +130,15 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		palettes.reserve(paletteCount);
 		morphWeights.reserve(morphWeightCount);
 		bridgeRecords.reserve(plan.records.size());
-		for(const SharedCpuAnimationUploadSlice& slice : sharedSlices) {
-			if(slice.data == nullptr) return false;
+		for(const auto& slice : sharedSlices) {
+			const auto& data = plan.records[slice.sourceRecordIndex].data;
+			if(data == nullptr) return false;
 			palettes.insert(palettes.end(),
-				slice.data->paletteMatrices.begin(),
-				slice.data->paletteMatrices.end());
+				data->paletteMatrices.begin(),
+				data->paletteMatrices.end());
 			morphWeights.insert(morphWeights.end(),
-				slice.data->morphWeights.begin(),
-				slice.data->morphWeights.end());
+				data->morphWeights.begin(),
+				data->morphWeights.end());
 		}
 		const std::uint32_t planGeneration = static_cast<std::uint32_t>(
 			(plan.frameId % std::numeric_limits<std::uint32_t>::max()) + 1U);
@@ -212,7 +150,7 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 				|| recordSliceIndices[recordIndex] >= sharedSlices.size()) {
 				return false;
 			}
-			const SharedCpuAnimationUploadSlice& shared =
+			const auto& shared =
 				sharedSlices[recordSliceIndices[recordIndex]];
 
 			VulkanGpuAnimationGraphicsRecord bridge{};
@@ -627,34 +565,23 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			});
 		return found == sections.end() ? nullptr : &*found;
 	};
-	struct CpuPaletteOffsets
+	// Preserve the existing per-worker retained bucket capacity across frames.
+	thread_local TerraEngine::Renderer::Vulkan::CpuAnimationDeformationOffsetLayout cpuOffsetLayout;
+	cpuOffsetLayout.valid = false;
+	cpuOffsetLayout.byInstanceMesh.clear();
+	// Null pending input also clears the new slice-plan facts without discarding
+	// retained capacities; a later publication cannot inspect a prior frame's data.
+	cpuOffsetLayout.uploadScratch.valid = false;
+	cpuOffsetLayout.uploadScratch.paletteBytes = cpuOffsetLayout.uploadScratch.morphBytes = 0;
+	cpuOffsetLayout.uploadScratch.slices.clear();
+	cpuOffsetLayout.uploadScratch.recordSliceIndices.clear();
+	cpuOffsetLayout.uploadScratch.byContent.clear();
+	if (pendingCpuAnimationPlan != nullptr)
 	{
-		std::uint64_t paletteBytes = 0u;
-		std::uint64_t morphBytes = 0u;
-	};
-	thread_local std::unordered_map<std::uint64_t, CpuPaletteOffsets>
-		cpuPaletteOffsets;
-	cpuPaletteOffsets.clear();
-	try
-	{
-		if(pendingCpuAnimationPlan != nullptr)
-		{
-			cpuPaletteOffsets.reserve(pendingCpuAnimationPlan->records.size());
-			CpuPaletteOffsets next{};
-			for(const auto& record : pendingCpuAnimationPlan->records)
-			{
-				cpuPaletteOffsets.try_emplace(record.stableInstanceId, next);
-				next.paletteBytes += record.data->paletteMatrices.size()
-					* sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord);
-				next.morphBytes += record.data->morphWeights.size()
-					* sizeof(float);
-			}
-		}
+		if (!TerraEngine::Renderer::Vulkan::BuildCpuAnimationDeformationOffsets(*pendingCpuAnimationPlan, cpuOffsetLayout)) return false;
 	}
-	catch(const std::bad_alloc&)
-	{
-		return false;
-	}
+	const auto& cpuPaletteOffsets = cpuOffsetLayout.byInstanceMesh;
+
 	{
 		TERRAENGINE_PROFILE_SCOPE(
 			"Vulkan: Deformation Build Dynamic Uploads",
@@ -826,13 +753,14 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			}
 			authority = PaletteAuthority::Cpu;
 			const auto offsets = cpuPaletteOffsets.find(
-				source.sourceStableInstanceId);
+				TerraEngine::Renderer::Vulkan::CpuAnimationDeformationOffsetLayout::Identity{
+					source.sourceStableInstanceId, source.key.page.meshId});
 			if(offsets == cpuPaletteOffsets.end())
 			{
 				return false;
 			}
-			paletteOffsetBytes = offsets->second.paletteBytes;
-			morphOffsetBytes = offsets->second.morphBytes;
+			paletteOffsetBytes = offsets->second.paletteOffsetBytes;
+			morphOffsetBytes = offsets->second.morphOffsetBytes;
 			const auto& cpuResources =
 				cpuAnimationFrameResources[currentFrame];
 			paletteBuffer = cpuResources.paletteBuffer.buffer;

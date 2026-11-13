@@ -169,7 +169,17 @@ namespace
 		// Give rounding remainder to the already deterministic highest-ranked
 		// contributors, retaining both stable order and an exact sum of 255.
 		for (std::uint32_t remainder = 255u - assigned, index = 0u; remainder != 0u; --remainder, index = (index + 1u) % static_cast<std::uint32_t>(combined.size())) ++scaled[index];
-		for (std::size_t index = 0u; index < combined.size(); ++index) result.slots[index].weight = static_cast<std::uint8_t>(scaled[index]);
+		for (std::size_t index = 0u; index < combined.size(); ++index)
+		{
+			result.slots[index].weight = static_cast<std::uint8_t>(scaled[index]);
+			// Quantization can erase a tiny contributor. Empty slots carry no ID.
+			if (scaled[index] == 0u) result.slots[index] = {};
+		}
+		// Distinct source weights can quantize to ties. Canonical ordering is a
+		// property of the final bytes, not the original contribution magnitudes.
+		std::sort(result.slots.begin(), result.slots.end(), [](const auto& left, const auto& right) {
+			return left.weight != right.weight ? left.weight > right.weight : left.layerId < right.layerId;
+		});
 		return result;
 	}
 

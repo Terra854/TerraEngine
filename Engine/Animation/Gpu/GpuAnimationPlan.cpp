@@ -1237,6 +1237,15 @@ namespace TerraEngine::Animation {
                 return false;
               }
 
+				// Reusing a follower also reuses its source's scratch/palette. The
+				// current semantic key, including tick and parameters, must still match.
+				const auto sourceIndex = previousEvaluationSources[packetIndex];
+				if(sourceIndex != packetIndex
+					&& ((request.diagnosticIndex & 0x80000000U) == 0U
+						|| (requests[sourceIndex].diagnosticIndex & 0x80000000U) == 0U
+						|| MakeGpuAnimationEvaluationKey(request)
+							!= MakeGpuAnimationEvaluationKey(requests[sourceIndex]))) return false;
+
               ScratchLayout layout{};
               if (!BuildScratchLayout(request, layout) ||
                   layout.totalSizeBytes != packet.scratchSizeBytes) {
@@ -1421,6 +1430,10 @@ namespace TerraEngine::Animation {
 				? 0U
 				: previousBatches.front().firstWorkPacket
 					+ previousBatches.front().workPacketCount;
+			// The producer is visited once. Retain only typed semantic keys so each
+			// follower can validate against the current source without replaying jobs.
+			std::vector<GpuAnimationEvaluationKey> currentEvaluationKeys(requestCount);
+			std::vector<bool> currentSharingAllowed(requestCount);
 			for(std::size_t packetIndex = 0U; packetIndex < requestCount;
 				++packetIndex) {
 				while(batchIndex < previousBatches.size()
@@ -1463,6 +1476,13 @@ namespace TerraEngine::Animation {
 					|| previousEvaluationSources[packetIndex] > packetIndex) {
 					return false;
 				}
+
+				currentEvaluationKeys[packetIndex] = MakeGpuAnimationEvaluationKey(request);
+				currentSharingAllowed[packetIndex] = (request.diagnosticIndex & 0x80000000U) != 0U;
+				const auto sourceIndex = previousEvaluationSources[packetIndex];
+				if(sourceIndex != packetIndex
+					&& (!currentSharingAllowed[packetIndex] || !currentSharingAllowed[sourceIndex]
+						|| currentEvaluationKeys[packetIndex] != currentEvaluationKeys[sourceIndex])) return false;
 
 				ScratchLayout layout{};
 				if(!BuildScratchLayout(request, layout)

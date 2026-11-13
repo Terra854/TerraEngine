@@ -28,11 +28,11 @@ namespace TerraEngine::Tests {
 
 	namespace {
 		inline constexpr std::string_view kFrozenStressManifestSha256 =
-			"b5c78e9f01dc0036db4fb4674f632ebf06a736e4a7c010ec56e1f3804b92131d";
+			"fa9678871297579e074b9dfa1961ff44bf85509738948b35d8d40c23d60c9019";
 		inline constexpr std::string_view kFrozenRuntimeContractSha256 =
-			"774c6c7a40da4ebb8fa67feb3649e956235669428d4c50ad43cdb2dceca1a801";
+			"60bebb37e3e6dde8fbfb17614fd2c7403154fe172af2885b2262e452b1276ac4";
 		inline constexpr std::string_view kFrozenPerformanceWorkloadsSha256 =
-			"add34eb7debacbaddb03c07de115cf00f7935a3e62e849cf4b370f2cbf1bd707";
+			"475c24d5bde5fff92b1b4454a2892748f40fa87f080f182376f4ff5a15b73a3b";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{

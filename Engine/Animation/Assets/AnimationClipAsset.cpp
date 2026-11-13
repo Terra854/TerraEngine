@@ -581,6 +581,18 @@ namespace TerraEngine::Animation {
 
 		std::vector<AnimationClipTrack> tracks = asset.tracks;
 		std::sort(tracks.begin(), tracks.end(), TrackLess);
+		std::uint32_t rootTranslationTrackIndex = asset.rootMotion.translationTrackIndex;
+		std::uint32_t rootYawTrackIndex = asset.rootMotion.yawTrackIndex;
+		if(asset.rootMotion.enabled) {
+			// Track identity is unique after validation. Resolve both authored
+			// root channels in the sorted table before writing their disk indices.
+			auto remap = [&](std::uint32_t oldIndex) {
+				const auto& original = asset.tracks[oldIndex];
+				return static_cast<std::uint32_t>(std::lower_bound(tracks.begin(), tracks.end(), original, TrackLess) - tracks.begin());
+			};
+			rootTranslationTrackIndex = remap(rootTranslationTrackIndex);
+			rootYawTrackIndex = remap(rootYawTrackIndex);
+		}
 		std::vector<AnimationClipNamedChannel> namedChannels = asset.namedChannels;
 		std::sort(namedChannels.begin(), namedChannels.end(), [](const auto& left, const auto& right) {
 			return std::tie(left.stableId, left.name) < std::tie(right.stableId, right.name);
@@ -653,8 +665,8 @@ namespace TerraEngine::Animation {
 		header.namedChannelCount = static_cast<std::uint32_t>(namedChannels.size());
 		header.eventCount = static_cast<std::uint32_t>(events.size());
 		header.rootMotionFlags = asset.rootMotion.enabled ? kRootMotionEnabled : 0U;
-		header.rootTranslationTrackIndex = asset.rootMotion.translationTrackIndex;
-		header.rootYawTrackIndex = asset.rootMotion.yawTrackIndex;
+		header.rootTranslationTrackIndex = rootTranslationTrackIndex;
+		header.rootYawTrackIndex = rootYawTrackIndex;
 		header.accumulatedCycleTranslation = asset.rootMotion.accumulatedCycleTranslation;
 		header.accumulatedCycleYawRadians = asset.rootMotion.accumulatedCycleYawRadians;
 		header.compression = asset.compression;

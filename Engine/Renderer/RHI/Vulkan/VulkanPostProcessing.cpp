@@ -877,7 +877,8 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
-	if (cmd == VK_NULL_HANDLE
+	if (!vrsFeatures.attachmentFragmentShadingRate
+		|| cmd == VK_NULL_HANDLE
 		|| lightingComputePipelineLayout == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
 		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE

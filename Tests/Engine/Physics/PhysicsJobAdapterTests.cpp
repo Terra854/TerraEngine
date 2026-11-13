@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <thread>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -66,6 +67,36 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterPhysicsJobAdapterTests(TestRegistry& registry) {
+		registry.Add("Engine.Physics.JobAdapter.CookingFailuresStayLocalWithoutMaskingLiveFailures", [](TestContext& context) {
+			using namespace TerraEngine::Physics::Backend;
+			PhysicsAllocatorAdapter live;
+			const auto before = live.Diagnostics().allocationFailures;
+			{
+				ScopedPhysicsProviderFailureIsolation cooking;
+				PhysicsAllocatorAdapter cooker;
+				// Use the engine DLL's translated failure seam. A test executable's
+				// separately linked Jolt globals do not own the DLL's callback hooks.
+				cooker.ReportAllocationFailureForValidation(123U);
+				context.Expect(cooker.Diagnostics().allocationFailures == 1U && live.Diagnostics().allocationFailures == before,
+					"A malformed cook must retain its own failure without poisoning live backend health.");
+				context.Expect(cooker.LastError().code == PhysicsProviderErrorCode::AllocationFailure, "The isolated owner still receives its translated error.");
+				{
+					ScopedPhysicsProviderFailureIsolation nested;
+					PhysicsAllocatorAdapter inner;
+					inner.ReportAllocationFailureForValidation(456U);
+					context.Expect(inner.Diagnostics().allocationFailures == 1U && cooker.Diagnostics().allocationFailures == 1U, "Nested cooks own separate failure channels.");
+				}
+				// Concurrent live callbacks must remain visible while a cook owns the
+				// caller's thread-local channel. Never reset the global failure count.
+				std::thread worker([&] { live.ReportAllocationFailureForValidation(789U); });
+				worker.join();
+				live.ReportAllocationFailureForValidation(321U);
+				context.Expect(live.Diagnostics().allocationFailures == before + 2U && cooker.Diagnostics().allocationFailures == 1U,
+					"Real live-owner failures are not hidden by another thread or a nested cook scope.");
+			}
+			PhysicsAllocatorAdapter after;
+			context.Expect(after.Diagnostics().allocationFailures == before + 2U, "Leaving the scope restores the live diagnostic channel.");
+		});
 		registry.Add("Engine.Physics.JobAdapter.OneWorkerNestedPumpRunsInline", [](TestContext& context) {
 			ThreadPoolSession session(1U);
 			ThreadPool& sharedPool = ThreadPool::instance();

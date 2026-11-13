@@ -5,6 +5,8 @@
 // All allocations remain synchronized through VulkanContext::Impl and its existing locks.
 
 #include "VulkanResourceSource.h"
+#include "Tests/Support/ReviewRemediation/TextureUploadFailureHooks.h"
+#include <type_traits>
 #include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 
 namespace
@@ -52,169 +54,208 @@ namespace
 }
 
 
+namespace TerraEngine::Tests::Review {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	static thread_local TextureUploadFailureHook* uploadFailureHook = nullptr;
+	static thread_local ReviewTextureRole uploadReviewRole = ReviewTextureRole::None;
+#endif
+	bool SetTextureUploadFailureHook(TextureUploadFailureHook* hook) noexcept {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		if (hook && uploadFailureHook) return false;
+		uploadFailureHook = hook; uploadReviewRole = ReviewTextureRole::None; return true;
+#else
+		return hook == nullptr;
+#endif
+	}
+	static TextureUploadFailureHook* ReviewInstalled() noexcept {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		return uploadFailureHook;
+#else
+		return nullptr;
+#endif
+	}
+	static void ReviewOwnership(TextureUploadFailureHook& hook, ReviewUploadOwnershipPoint point) noexcept {
+		const auto sequence = ++hook.ownershipSequence;
+		if (hook.ownershipEventCount < hook.ownershipEvents.size())
+			hook.ownershipEvents[hook.ownershipEventCount++] = {point, sequence};
+		else hook.ownershipEventsOverflowed = true;
+		if (point == ReviewUploadOwnershipPoint::Retained) hook.retainedSequence = sequence;
+		if (point == ReviewUploadOwnershipPoint::RetirementProof) hook.retirementProofSequence = sequence;
+		if (point == ReviewUploadOwnershipPoint::DestroyAttempt) hook.lastDestroySequence = sequence;
+	}
+	static TextureUploadFailureHook* ReviewTarget() noexcept {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+		return uploadFailureHook && uploadFailureHook->role == uploadReviewRole ? uploadFailureHook : nullptr;
+#else
+		return nullptr;
+#endif
+	}
+	struct TextureReviewRoleScope {
+		ReviewTextureRole previous = ReviewTextureRole::None;
+		bool armed = false;
+		explicit TextureReviewRoleScope(ReviewTextureRole role) noexcept {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			if (uploadFailureHook) { previous = uploadReviewRole; uploadReviewRole = role; armed = true; }
+#else
+			(void)role;
+#endif
+		}
+		~TextureReviewRoleScope() {
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+			if (armed) uploadReviewRole = previous;
+#endif
+		}
+	};
+	template<class Handle> static std::uintptr_t ReviewHandle(Handle handle) noexcept {
+		if constexpr (std::is_pointer_v<Handle>) return reinterpret_cast<std::uintptr_t>(handle);
+		else return static_cast<std::uintptr_t>(handle);
+	}
+	static bool ReviewInject(ReviewTextureFailure point) noexcept {
+		auto* hook = ReviewTarget();
+		if (!hook || hook->failure != point || !hook->remaining) return false;
+		--hook->remaining; ++hook->reached; return true;
+	}
+	static void ReviewStagingCreated(VmaAllocator allocator, const VulkanBuffer& buffer) noexcept {
+		if (auto* hook = ReviewTarget(); hook && buffer.buffer) {
+			++hook->stagingCreated; hook->stagingHandle = ReviewHandle(buffer.buffer); hook->allocator = allocator;
+		}
+	}
+	static void ReviewStagingDestroyed(const VulkanBuffer& buffer) noexcept {
+		// Cleanup follows role-scope unwinding. Match the exact observed buffer
+		// through the installed hook so post-proof retirement is still observable.
+		if (auto* hook = ReviewInstalled(); hook && hook->stagingHandle == ReviewHandle(buffer.buffer) && buffer.buffer) {
+			++hook->stagingDestroyed; ReviewOwnership(*hook, ReviewUploadOwnershipPoint::DestroyAttempt);
+			if (hook->retirementProofSequence) ++hook->stagingDestroyedAfterRetirementProof;
+			else if (hook->callerAmbiguityInjected) ++hook->ambiguousStagingDestroyAttempts;
+		}
+	}
+	static void ReviewStagingRetained(const VulkanBuffer& buffer) noexcept {
+		if (auto* hook = ReviewTarget(); hook && hook->stagingHandle == ReviewHandle(buffer.buffer) && buffer.buffer) {
+			++hook->stagingRetained; ReviewOwnership(*hook, ReviewUploadOwnershipPoint::Retained);
+		}
+	}
+	static void ReviewUploadRetirementProof() noexcept {
+		if (auto* hook = ReviewInstalled(); hook && hook->stagingRetained)
+			ReviewOwnership(*hook, ReviewUploadOwnershipPoint::RetirementProof);
+	}
+	static VkResult ReviewCreateImage(VmaAllocator allocator, const VkImageCreateInfo* info,
+		const VmaAllocationCreateInfo* allocationInfo, VkImage* image, VmaAllocation* allocation, VmaAllocationInfo* details) {
+		if (ReviewInject(ReviewTextureFailure::ImageAllocation)) { *image = VK_NULL_HANDLE; *allocation = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+		const auto status = vmaCreateImage(allocator, info, allocationInfo, image, allocation, details);
+		if (auto* hook = ReviewTarget(); hook && status == VK_SUCCESS) {
+			++hook->imageCreated; hook->imageHandle = ReviewHandle(*image); hook->imageAllocation = *allocation; hook->allocator = allocator;
+		}
+		return status;
+	}
+	static void ReviewGuardImageUse(VmaAllocator allocator, VkImage image, VulkanBuffer& staging) {
+		if (auto* hook = ReviewTarget(); hook && hook->reached && !image) {
+			++hook->nullImageUseBlocked;
+			// No command referenced this staging allocation: stop before invalid
+			// Vulkan/VMA use, and reclaim only this unowned pre-submit test prefix.
+			if (staging.buffer) { vmaDestroyBuffer(allocator, staging.buffer, staging.allocation); staging = {}; ++hook->observerOnlyStagingReclaimed; }
+			throw TextureReviewObservationStop{};
+		}
+	}
+	static bool ReviewCompletedImmediate(std::string_view operation, VkCommandBuffer command, VkFence fence) noexcept {
+		auto* hook = ReviewTarget();
+		if (!hook || (operation != "buffer-to-image copy" && operation != "texture upload")) return false;
+		// Reached only after actual successful submit + successful fence wait and
+		// normal command cleanup. A false caller result is explicitly injected;
+		// it is never represented as a genuine in-flight native timeout.
+		hook->actualCopySubmitAndFenceSucceeded = true; hook->commandHandle = ReviewHandle(command); hook->fenceHandle = ReviewHandle(fence);
+		const bool inject = ReviewInject(ReviewTextureFailure::CompletedCopyCallerAmbiguity); hook->callerAmbiguityInjected |= inject; return inject;
+	}
+	static void ReviewPublicationAttempt(VkImage image) noexcept {
+		if (auto* hook = ReviewTarget(); hook && hook->imageHandle == ReviewHandle(image)) ++hook->publicationAttempts;
+	}
+	static VkResult ReviewCreateImageView(VkDevice device, const VkImageViewCreateInfo* info, const VkAllocationCallbacks* allocator, VkImageView* view) {
+		if (ReviewInject(ReviewTextureFailure::ImageView)) { *view = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY; }
+		return vkCreateImageView(device, info, allocator, view);
+	}
+}
+
 void VulkanContext::Impl::CreateDefaultTexture() {
 	defaultTextureShaderReadable = false;
-	// 1. Create Default White Texture (Index 0)
+	// Bootstrap is an existing sequential protected lifetime boundary. Every
+	// fallback pixel uses the same native ownership checks before descriptors
+	// may expose it; a partially uploaded default cannot become shader-readable.
+	const auto uploadPixel = [this](std::uint32_t pixel, VulkanImage& image, const char* label)
 	{
-		uint32_t whitePixel = 0xFFFFFFFF;
-		VkDeviceSize imageSize = 4;
-		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Generic Staging Buffer");
-		// This upload is also the cold HiZ fallback. Keep its temporary allocation
-		// owned on every failure path, and never publish a merely allocated image
-		// as shader-readable when an upload or layout submission failed.
-		struct WhiteStagingOwner
+		constexpr VkDeviceSize imageSize = sizeof(pixel);
+		VulkanBuffer staging = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, label);
+		TerraEngine::Tests::Review::ReviewStagingCreated(allocator, staging);
+		bool uploadMayBePending = false;
+		struct StagingOwner
 		{
-			VmaAllocator allocator;
-			VulkanBuffer& buffer;
-			~WhiteStagingOwner()
+			Impl& owner; VulkanBuffer& staging; bool& mayBePending;
+			~StagingOwner() noexcept
 			{
-				if (buffer.buffer != VK_NULL_HANDLE)
-					vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+				if (mayBePending) owner.RetainAmbiguousUpload(staging);
+				else owner.DestroyBufferImmediate(staging);
 			}
-		} stagingOwner{ allocator, stagingBuffer };
-		if (stagingBuffer.buffer == VK_NULL_HANDLE || !WriteMappedBuffer(allocator, stagingBuffer, &whitePixel, imageSize))
-			throw std::runtime_error("Failed to stage the default white texture.");
+		} stagingOwner{*this, staging, uploadMayBePending};
+		if (!staging.buffer || !WriteMappedBuffer(allocator, staging, &pixel, imageSize))
+			throw std::runtime_error("Failed to stage a default texture pixel.");
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 		imageInfo.imageType = VK_IMAGE_TYPE_2D;
 		imageInfo.extent = {1, 1, 1};
-		imageInfo.mipLevels = 1;
-		imageInfo.arrayLayers = 1;
+		imageInfo.mipLevels = 1; imageInfo.arrayLayers = 1;
 		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
 		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		VmaAllocationCreateInfo allocationInfo{};
+		allocationInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (TerraEngine::Tests::Review::ReviewCreateImage(allocator, &imageInfo, &allocationInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS)
+			throw std::runtime_error("Failed to allocate a default texture image.");
+		vmaSetAllocationName(allocator, image.allocation, label);
 
-		VmaAllocationCreateInfo allocInfo = {};
-		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultTexture.image, &defaultTexture.allocation, nullptr) != VK_SUCCESS)
-			throw std::runtime_error("Failed to allocate the default white texture.");
-		vmaSetAllocationName(allocator, defaultTexture.allocation, "Default White Texture");
-
-		// Reserve before submission so uncertain completion can transfer ownership
-		// without allocating. Cleanup releases retained uploads only at its existing
-		// idle/device-loss boundary; a failed fence does not prove this buffer unused.
+		// Reserve quarantine ownership BEFORE the first command can submit.
+		// The image already belongs to Impl; only staging needs a transfer slot.
 		ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 1U);
-		if (!TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-			|| !CopyBufferToImage(stagingBuffer.buffer, defaultTexture.image, 1, 1)
-			|| !TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+		// Any exception after entering a submission helper is conservative too.
+		// The destructor can transfer to the already-reserved slot without allocating.
+		uploadMayBePending = true;
+		if (!TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+			|| !CopyBufferToImage(staging.buffer, image.image, 1, 1)
+			|| !TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
 		{
-			RetainAmbiguousUpload(stagingBuffer);
-			throw std::runtime_error("Failed to complete the default white texture upload and shader-readable layout.");
+			RetainAmbiguousUpload(staging);
+			throw std::runtime_error("Failed to complete a default texture upload and shader-readable layout.");
 		}
-
-		defaultTexture.view = CreateImageView(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
-		if (defaultTexture.view == VK_NULL_HANDLE)
-			throw std::runtime_error("Failed to create the default white texture view.");
-
-		VkSamplerCreateInfo samplerInfo{};
-		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-		samplerInfo.magFilter = VK_FILTER_LINEAR;
-		samplerInfo.minFilter = VK_FILTER_LINEAR;
-		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		if (vkCreateSampler(device, &samplerInfo, nullptr, &defaultTexture.sampler) != VK_SUCCESS)
-			throw std::runtime_error("Failed to create the default white texture sampler.");
-
-		uint32_t idx = AllocateTextureIndex(); // Should be 0
-		UpdateGlobalTexture(idx, defaultTexture);
-	}
-
-	// 2. Create Default Normal Texture (Index 1)
+		uploadMayBePending = false;
+		// View/sampler creation follows proven upload completion. The persistent
+		// image wrapper remains owned by the initialization rollback on exceptions.
+		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+		if (!image.view) throw std::runtime_error("Failed to create a default texture view.");
+		VkSamplerCreateInfo sampler{};
+		sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		sampler.magFilter = VK_FILTER_LINEAR; sampler.minFilter = VK_FILTER_LINEAR;
+		sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		if (vkCreateSampler(device, &sampler, nullptr, &image.sampler) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create a default texture sampler.");
+		const auto index = AllocateTextureIndex();
+		TerraEngine::Tests::Review::ReviewPublicationAttempt(image.image);
+		UpdateGlobalTexture(index, image);
+	};
+	// These observer-only scopes identify existing native operations. Production
+	// uploadPixel takes native pixel/image values, not a validation role or plan.
 	{
-		uint32_t bluePixel = 0xFFFF7F7F; // (127, 127, 255, 255) -> Flat Normal
-		VkDeviceSize imageSize = 4;
-		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Default Normal Staging Buffer");
-		WriteMappedBuffer(allocator, stagingBuffer, &bluePixel, imageSize);
-
-		VkImageCreateInfo imageInfo{};
-		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-		imageInfo.imageType = VK_IMAGE_TYPE_2D;
-		imageInfo.extent = {1, 1, 1};
-		imageInfo.mipLevels = 1;
-		imageInfo.arrayLayers = 1;
-		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-
-		VmaAllocationCreateInfo allocInfo = {};
-		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultNormalTexture.image, &defaultNormalTexture.allocation, nullptr);
-
-		TransitionImageLayout(defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		CopyBufferToImage(stagingBuffer.buffer, defaultNormalTexture.image, 1, 1);
-		TransitionImageLayout(defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
-		defaultNormalTexture.view = CreateImageView(defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
-
-		VkSamplerCreateInfo samplerInfo{};
-		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-		samplerInfo.magFilter = VK_FILTER_LINEAR;
-		samplerInfo.minFilter = VK_FILTER_LINEAR;
-		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		vkCreateSampler(device, &samplerInfo, nullptr, &defaultNormalTexture.sampler);
-
-		uint32_t idx = AllocateTextureIndex(); // Should be 1
-		UpdateGlobalTexture(idx, defaultNormalTexture);
+		TerraEngine::Tests::Review::TextureReviewRoleScope role(TerraEngine::Tests::Review::ReviewTextureRole::White);
+		uploadPixel(0xFFFFFFFFU, defaultTexture, "Default White Texture");
 	}
-
-	// 3. Create Default Material Mask Texture (Index 2)
 	{
-		// Mask channels follow the fragment shader convention:
-		// R = occlusion, G = roughness, B = metallic, A = unused. A missing
-		// mask should describe a fully visible, rough, non-metal surface so
-		// untextured primitives receive ordinary diffuse lighting.
-		uint32_t maskPixel = 0xFF00FFFF; // (255, 255, 0, 255)
-		VkDeviceSize imageSize = 4;
-		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Default Material Mask Staging Buffer");
-		WriteMappedBuffer(allocator, stagingBuffer, &maskPixel, imageSize);
-
-		VkImageCreateInfo imageInfo{};
-		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-		imageInfo.imageType = VK_IMAGE_TYPE_2D;
-		imageInfo.extent = {1, 1, 1};
-		imageInfo.mipLevels = 1;
-		imageInfo.arrayLayers = 1;
-		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-
-		VmaAllocationCreateInfo allocInfo = {};
-		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-		vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultMaterialMaskTexture.image, &defaultMaterialMaskTexture.allocation, nullptr);
-		vmaSetAllocationName(allocator, defaultMaterialMaskTexture.allocation, "Default Material Mask Texture");
-
-		TransitionImageLayout(defaultMaterialMaskTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		CopyBufferToImage(stagingBuffer.buffer, defaultMaterialMaskTexture.image, 1, 1);
-		TransitionImageLayout(defaultMaterialMaskTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
-		defaultMaterialMaskTexture.view = CreateImageView(defaultMaterialMaskTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
-
-		VkSamplerCreateInfo samplerInfo{};
-		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-		samplerInfo.magFilter = VK_FILTER_LINEAR;
-		samplerInfo.minFilter = VK_FILTER_LINEAR;
-		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		vkCreateSampler(device, &samplerInfo, nullptr, &defaultMaterialMaskTexture.sampler);
-
-		uint32_t idx = AllocateTextureIndex(); // Should be 2
-		UpdateGlobalTexture(idx, defaultMaterialMaskTexture);
+		TerraEngine::Tests::Review::TextureReviewRoleScope role(TerraEngine::Tests::Review::ReviewTextureRole::Normal);
+		uploadPixel(0xFFFF7F7FU, defaultNormalTexture, "Default Normal Texture");
 	}
-	// Slot-zero publication follows its synchronous upload/layout transitions.
-	// The initialization grant records the actual native descriptor writes.
+	{
+		TerraEngine::Tests::Review::TextureReviewRoleScope role(TerraEngine::Tests::Review::ReviewTextureRole::Mask);
+		// R=occlusion, G=roughness, B=metallic, A=unused.
+		uploadPixel(0xFF00FFFFU, defaultMaterialMaskTexture, "Default Material Mask Texture");
+	}
 	defaultTextureShaderReadable = !deviceLost && textureDescriptorBootstrap.RequiredWritesComplete();
 }
 
@@ -259,6 +300,7 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 
 void VulkanContext::Impl::DestroyBufferImmediate(VulkanBuffer& buffer)
 {
+	TerraEngine::Tests::Review::ReviewStagingDestroyed(buffer);
 	if (buffer.buffer != VK_NULL_HANDLE && buffer.allocation != VK_NULL_HANDLE)
 	{
 		vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
@@ -301,6 +343,7 @@ bool VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkD
 }
 
 void VulkanContext::Impl::RetainAmbiguousUpload(VulkanBuffer& buffer) noexcept {
+	TerraEngine::Tests::Review::ReviewStagingRetained(buffer);
 	// Capacity is reserved before native submission; ownership transfer cannot allocate afterward.
 	if (buffer.buffer == VK_NULL_HANDLE) return;
 	assert(ambiguousUploadBuffers.size() < ambiguousUploadBuffers.capacity());
@@ -317,6 +360,8 @@ void VulkanContext::Impl::RetainAmbiguousUpload(VulkanImage& image) noexcept {
 
 void VulkanContext::Impl::ReleaseAmbiguousUploadsAfterIdle() noexcept {
 	// Caller supplies actual idle proof or terminal device-loss teardown.
+	// Every existing caller checked real queue/device idle or terminal loss.
+	TerraEngine::Tests::Review::ReviewUploadRetirementProof();
 	for (auto& buffer : ambiguousUploadBuffers) DestroyBufferImmediate(buffer);
 	for (auto& image : ambiguousUploadImages) {
 		if (image.sampler != VK_NULL_HANDLE) vkDestroySampler(device, image.sampler, nullptr);
@@ -449,7 +494,7 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer, s
 	vkDestroyFence(device, immediateFence, nullptr);
 
 	vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
-	return true;
+	return !TerraEngine::Tests::Review::ReviewCompletedImmediate(operation, commandBuffer, immediateFence);
 }
 
 
@@ -561,6 +606,7 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 
 
 bool VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+	if (TerraEngine::Tests::Review::ReviewInject(TerraEngine::Tests::Review::ReviewTextureFailure::CopyRefusal)) return false;
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	if (commandBuffer == VK_NULL_HANDLE)
 	{
@@ -602,7 +648,7 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 
 	VkImageView imageView;
 
-	if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+	if (TerraEngine::Tests::Review::ReviewCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create texture image view!");
 	}
 
@@ -789,6 +835,7 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	TerraEngine::Tests::Review::TextureReviewRoleScope reviewRole(TerraEngine::Tests::Review::ReviewTextureRole::Ordinary);
 	if (deviceLost || !initialized) return;
 	const auto textureOwner = ResourceManager::Instance().AcquireTextureSnapshot(textureId);
 	if (textureCache.contains(textureId)) {
@@ -920,7 +967,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
 
-	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &vImage.image, &vImage.allocation, nullptr) != VK_SUCCESS) {
+	if (TerraEngine::Tests::Review::ReviewCreateImage(allocator, &imageInfo, &allocInfo, &vImage.image, &vImage.allocation, nullptr) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create image for texture");
 		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 		return;
@@ -982,9 +1029,24 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		return;
 	}
 
-	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+	DestroyBufferImmediate(stagingBuffer);
 
+	struct ViewCreationImageOwner
+	{
+		VmaAllocator allocator; VulkanImage& image; bool accepted = false;
+		~ViewCreationImageOwner() noexcept
+		{
+			if (!accepted && image.image != VK_NULL_HANDLE)
+			{
+				// The actual texture upload completed above. A thrown image-view
+				// error cannot strand its newly allocated, unpublished image.
+				vmaDestroyImage(allocator, image.image, image.allocation);
+				image = {};
+			}
+		}
+	} imageOwner{allocator, vImage};
 	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT, residentMipCount);
+	imageOwner.accepted = true;
 	vImage.size = residentPayloadSize;
 	vImage.sourceMipCount = sourceMipCount;
 	vImage.residentMipCount = residentMipCount;

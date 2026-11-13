@@ -50,7 +50,10 @@ namespace TerraEngine::Navigation {
 			result.reason = "SavedNavigationCreateDirectoryFailed";
 			return result;
 		}
-		const std::filesystem::path staged = destination.string() + ".candidate.tmp";
+		// Retain the native path encoding while adding the ASCII staging suffix;
+		// narrowing a Windows Unicode destination would lose its exact location.
+		std::filesystem::path staged = destination;
+		staged += ".candidate.tmp";
 		{
 			std::ofstream output(staged, std::ios::binary | std::ios::trunc);
 			if(!output) {

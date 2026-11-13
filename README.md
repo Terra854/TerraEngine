@@ -45,7 +45,7 @@ The setup below uses the published source, recursive submodules, and CMake's pin
 | --- | --- |
 | **Host** | Windows x64 is recommended. Linux x64 is experimental; successful compilation and execution are not currently expected. |
 | **Native toolchain** | A C++20 compiler. On Windows, use Visual Studio's MSVC C++ tools and Windows SDK from an x64 developer shell. Experimental Linux builds use GCC or Clang. |
-| **Build tools** | Git, CMake **3.22.1 or newer**, and Ninja for the checked-in presets. |
+| **Build tools** | Git, CMake **3.24 or newer** (required for whole-archive target links), and Ninja for the checked-in presets. |
 | **Graphics** | A Vulkan **1.3** runtime and GPU/driver exposing `VK_EXT_mesh_shader` with `meshShader` support. Task-shader support enables the task/mesh paths that use it. A usable display is needed for the interactive editor. |
 | **Experimental Linux prerequisites** | X11 development libraries for the default GLFW backend. Optional Wayland configuration and intended setup are described in [the Linux notes](Docs/LinuxSupport.md); these are not confirmation of a working Linux build. |
 | **Initial network access** | Required to fetch submodules and populate the hash-pinned .NET SDK and NuGet caches. |

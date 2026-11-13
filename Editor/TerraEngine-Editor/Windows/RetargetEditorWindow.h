@@ -275,6 +275,9 @@ namespace TerraEngine::Editor::Animation {
 		AnimationAuthoringHistory history_;
 		std::string diagnostic_;
 		bool editing_ = false;
+		// Only the explicitly opened starter revision may rebind placeholders on
+		// cancellation. Published revisions keep their authored root selections.
+		bool bindSelectedSkeletons_ = false;
 	};
 }
 

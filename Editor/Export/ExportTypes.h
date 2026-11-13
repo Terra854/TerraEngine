@@ -149,29 +149,52 @@ struct ExportResult {
 
 enum class ExportCancellationDisposition { Accepted, TooLate, AlreadyTerminal };
 
-// One small arbiter orders cancellation against the filesystem publication.
-// It is independent from observation locks; never hold a mailbox during I/O.
+// One small arbiter orders cancellation against publication admission. The
+// admitted publisher owns bulk IO; observers only hold this short state lock.
 class ExportCancellationState final {
 public:
 	ExportCancellationDisposition RequestCancellation() {
 		std::lock_guard lock(mutex_);
-		if (committed_) return ExportCancellationDisposition::TooLate;
-		if (terminal_) return ExportCancellationDisposition::AlreadyTerminal;
+		if (publication_ == Publication::Publishing || publication_ == Publication::Committed)
+			return ExportCancellationDisposition::TooLate;
+		if (terminal_ || publication_ == Publication::Failed) return ExportCancellationDisposition::AlreadyTerminal;
 		requested.store(true, std::memory_order_relaxed);
 		return ExportCancellationDisposition::Accepted;
 	}
 	bool Commit(const std::function<bool()>& publish) {
-		std::lock_guard lock(mutex_);
-		if (requested.load(std::memory_order_relaxed)) return false;
-		committed_ = publish();
-		return committed_;
+		{
+			std::lock_guard lock(mutex_);
+			if (publication_ == Publication::Committed) return true;
+			if (publication_ != Publication::Pending || terminal_ || requested.load(std::memory_order_relaxed)) return false;
+			// This is the point of no return: subsequent cancellation is too late,
+			// but WasCommitted remains false until the actual publisher completes.
+			publication_ = Publication::Publishing;
+		}
+		bool committed = false;
+		try {
+			committed = publish();
+		} catch (...) {
+			// Preserve the original exception and settle admission before it leaves.
+			// No observer or future retry can repeat a partially failed publisher.
+			std::lock_guard lock(mutex_);
+			publication_ = Publication::Failed;
+			terminal_ = true;
+			throw;
+		}
+		{
+			std::lock_guard lock(mutex_);
+			publication_ = committed ? Publication::Committed : Publication::Failed;
+			if (!committed) terminal_ = true;
+		}
+		return committed;
 	}
 	void MarkTerminal() { std::lock_guard lock(mutex_); terminal_ = true; }
-	bool WasCommitted() const { std::lock_guard lock(mutex_); return committed_; }
+	bool WasCommitted() const { std::lock_guard lock(mutex_); return publication_ == Publication::Committed; }
 	std::atomic_bool requested = false;
 private:
+	enum class Publication { Pending, Publishing, Committed, Failed };
 	mutable std::mutex mutex_;
-	bool committed_ = false;
+	Publication publication_ = Publication::Pending;
 	bool terminal_ = false;
 };
 

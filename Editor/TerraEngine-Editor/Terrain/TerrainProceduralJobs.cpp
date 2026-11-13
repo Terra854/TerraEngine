@@ -150,6 +150,14 @@ namespace TerraEngine::Editor::Terrain
 		Completed completed = future.get();
 		std::scoped_lock lock(mutex);
 		active = false;
+		// Cancel and Take linearize on this mutex. A finished worker can retain a
+		// ReadyPreview value after cancellation; it must never escape to Apply.
+		if(cancellation && cancellation->load(std::memory_order_acquire))
+		{
+			progress.stage = TerrainProceduralStage::Cancelled;
+			runningState.reset();
+			return std::nullopt;
+		}
 		progress = completed.progress;
 		runningState.reset();
 		return std::move(completed.preview);

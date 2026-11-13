@@ -228,6 +228,13 @@ namespace TerraEngine::Navigation::Ground
 		Snapshot copy = *this; copy.revision_ = revision; return copy;
 	}
 
+	GroundRouteQuery::Result GroundRouteQuery::Search(const Request& request, const Snapshot& snapshot)
+	{
+		// Two-argument callers retain the same uncancelled synchronous search.
+		// Constructing the nested value here also works with GCC's class rules.
+		return Search(request, snapshot, Cancellation{});
+	}
+
 	GroundRouteQuery::Result GroundRouteQuery::Search(const Request& request, const Snapshot& snapshot, const Cancellation& cancellation)
 	{
 		Result result{};
@@ -291,10 +298,4 @@ namespace TerraEngine::Navigation::Ground
 		if(direct.accepted) return {NavigationOutcome::Complete, NavigationReason::None};
 		return SearchSceneRoute(request, clearanceRequest.scene, direct);
 	}
-}
-
-TerraEngine::Navigation::GroundRouteResult TerraEngine::Navigation::QueryGroundRoute(
-	const TerraEngine::Navigation::GroundRouteRequest& request)
-{
-	return TerraEngine::Navigation::Ground::QueryGroundRoute(request);
 }

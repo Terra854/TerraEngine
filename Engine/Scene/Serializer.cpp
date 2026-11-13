@@ -913,7 +913,7 @@ namespace {
 // SerializeObjectRecursive snapshots authored scene state through the canonical
 // Object handle path while still letting reflection read the underlying EnTT
 // registry needed for component serialization.
-nlohmann::json SerializeObjectRecursive(Object object) {
+nlohmann::json SerializeObjectRecursive(Object object, bool includeChildren = true) {
 	ObjectManager& objManager = ObjectManager::instance();
 	entt::registry& enttRegistry = objManager.getRegistry();
 	const entt::entity entity = object.EntityId();
@@ -1042,7 +1042,7 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 	
 	auto children = objManager.getChildren(object);
 
-	if (!children.empty()) {
+	if (includeChildren && !children.empty()) {
 		objJson["children"] = nlohmann::json::array();
 		for (Object child : children) {
 			objJson["children"].push_back(SerializeObjectRecursive(child));
@@ -1065,6 +1065,15 @@ nlohmann::json Serializer::SerializeObject(entt::entity entity) {
 
 nlohmann::json Serializer::SerializeObject(Object& obj) {
 	return SerializeObject(obj.EntityId());
+}
+
+nlohmann::json Serializer::SerializeObjectShallow(entt::entity entity) {
+	// The protected owner asks only for this object's authored components.
+	// Descendants are visited separately by reference scans, avoiding repeated
+	// serialization of the same subtree for every ancestor in a deep hierarchy.
+	std::lock_guard lock(ComponentAccessRegistryMutex());
+	const auto object = ObjectManager::instance().getObject(entity);
+	return object ? SerializeObjectRecursive(*object, false) : nlohmann::json::object();
 }
 
 

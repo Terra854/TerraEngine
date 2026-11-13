@@ -104,6 +104,8 @@ public:
 	static std::shared_ptr<PreparedComponentValue> PrepareComponentRestore(
 		const std::string& name, const nlohmann::json& data, std::string& reason);
 	static nlohmann::json SerializeComponentAuthored(const std::string& name, entt::registry& registry, entt::entity entity);
+	// Protected owner-only snapshot of one object, without descendant traversal.
+	static nlohmann::json SerializeObjectShallow(entt::entity entity);
 	// Protected callers holding the registration lock supply their captured access
 	// so history capture cannot recursively acquire a nonrecursive registry mutex.
 	static nlohmann::json SerializeComponentAuthored(const std::string& name, entt::registry& registry,

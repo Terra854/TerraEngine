@@ -73,6 +73,23 @@ namespace TerraEngine::Animation {
 		});
 	}
 
+	// Identity validation is separate from completed-step validation: Creating
+	// and dormant states may carry an incomplete pose, but never repeated joints.
+	// Callers reuse their bounded stack scratch; no live data is sorted or copied.
+	inline bool HaveUniquePhysicsPoseJoints(
+		std::span<const PhysicsPoseBodySnapshot> bodies,
+		std::array<std::size_t, kRagdollSnapshotMaximumBodies>& order) noexcept {
+		if(bodies.size() > order.size()) return false;
+		std::iota(order.begin(), order.begin() + bodies.size(), 0U);
+		std::sort(order.begin(), order.begin() + bodies.size(), [&bodies](std::size_t left, std::size_t right) {
+			return bodies[left].stableJointId < bodies[right].stableJointId;
+		});
+		for(std::size_t index = 1U; index < bodies.size(); ++index) {
+			if(bodies[order[index - 1U]].stableJointId == bodies[order[index]].stableJointId) return false;
+		}
+		return true;
+	}
+
 	inline AnimationStatus ValidatePhysicsPoseSnapshot(const PhysicsPoseSnapshot& value, const RagdollGenerationStamp& expected) noexcept {
 		if(!value.completeCurrentStep || !value.generation.IsValid() || value.generation != expected
 			|| value.bodies.empty() || value.bodies.size() > kRagdollSnapshotMaximumBodies) return AnimationStatus::StaleHandle;
@@ -87,6 +104,7 @@ namespace TerraEngine::Animation {
 				if(previous.bodyId == body.bodyId || previous.stableJointId == body.stableJointId) return AnimationStatus::InvalidArgument;
 			}
 		}
+		if(!HaveUniquePhysicsPoseJoints(value.bodies, order)) return AnimationStatus::InvalidArgument;
 		return AnimationStatus::Ok;
 	}
 

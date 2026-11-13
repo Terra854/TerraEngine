@@ -156,9 +156,15 @@ namespace TerraEngine::Tests
 			request.start = start;
 			request.destination = destination;
 			request.allowEndpointAdjustment = false;
-			// Use the parent provider-neutral facade explicitly. The implementation
-			// remains in Ground, whose ADL candidate would otherwise be ambiguous.
-			return ::TerraEngine::Navigation::QueryGroundRoute(request);
+			// All three spellings must name the same function. In particular, the
+			// unqualified call exercises ADL together with the parent namespace import.
+			const auto unqualified = QueryGroundRoute(request);
+			const auto qualified = ::TerraEngine::Navigation::QueryGroundRoute(request);
+			const auto ground = ::TerraEngine::Navigation::Ground::QueryGroundRoute(request);
+			if(unqualified.outcome != qualified.outcome || unqualified.reason != qualified.reason
+				|| ground.outcome != qualified.outcome || ground.reason != qualified.reason)
+				throw TestFailure("Qualified and ADL ground queries must return the same route result.");
+			return qualified;
 		}
 
 		struct MeshGroundCase

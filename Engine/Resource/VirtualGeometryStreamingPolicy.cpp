@@ -85,7 +85,9 @@ namespace TerraEngine::Resource
 			// A non-root page cannot be used safely until its authored fallback is
 			// planned too. Derived records are value-only and retain the root's
 			// generation/priority inputs; they never imply physical residency.
-			if (value.fallbackPageId != value.pageId)
+			// Optional absence is not a physical page identity and must never
+			// enter request, decode or upload planning as the invalid sentinel.
+			if (value.fallbackPageId != kVirtualGeometryInvalidIndex && value.fallbackPageId != value.pageId)
 			{
 				VirtualGeometryStreamingFeedback fallback = value;
 				fallback.pageId = value.fallbackPageId;

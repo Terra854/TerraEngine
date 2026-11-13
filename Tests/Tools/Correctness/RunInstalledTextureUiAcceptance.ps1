@@ -1,8 +1,9 @@
+#requires -Version 7.0
 <#
 .SYNOPSIS
 Run sealed installed texture, settlement and physical-pointer acceptance.
 .DESCRIPTION
-Prerequisites: BUILD_TESTING configure, full build/install and complete CTest.
+Prerequisites: PowerShell 7+, BUILD_TESTING configure, full build/install and complete CTest.
 Invoke only the installed copy with -AllowLiveAcceptance and a fresh WorkRoot.
 The editor uses a fresh authored project, both default layout files, isolated
 preferences and real managed callbacks. GPU capture must report backendReadback
@@ -12,7 +13,7 @@ texture regions with independent generator colors, and writes live-review.json.
 The runner does not inject clicks or infer acceptance from synthetic labels.
 Normal approvals remain in the editor UI; no token/policy bypass. Forced cleanup
 is failure. Preserve work/evidence; no caller files are removed.
-Example: ./Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1
+Example: pwsh -NoProfile -File ./Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1
  -InstallRoot ./Build -WorkRoot ./out/validation/texture-ui-live-new -AllowLiveAcceptance
 #>
 [CmdletBinding()]
@@ -36,6 +37,26 @@ if (Test-Path -LiteralPath $work) { throw 'WorkRoot must be fresh.' }
 function Below([string]$Root,[string]$Child) {
 	$prefix=[IO.Path]::GetFullPath($Root).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar
 	if (![IO.Path]::GetFullPath($Child).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw "Path escapes owned root: $Child" }
+}
+function Test-FixtureSceneIdentity {
+	param([AllowNull()]$State,[string]$ExpectedScenePath)
+	# The bridge publishes an absolute source filename independently of the
+	# authored display name. This is exact lexical owned-path identity after
+	# GetFullPath normalization, NOT junction/symlink alias canonicalization.
+	if ($null -eq $State -or [string]::IsNullOrWhiteSpace($ExpectedScenePath)) { return $false }
+	$property=$State.PSObject.Properties['activeScenePath']
+	if ($null -eq $property -or $property.Value -isnot [string] -or
+		[string]::IsNullOrWhiteSpace($property.Value)) { return $false }
+	try {
+		if (![IO.Path]::IsPathFullyQualified($ExpectedScenePath) -or
+			![IO.Path]::IsPathFullyQualified($property.Value)) { return $false }
+		$expected=[IO.Path]::GetFullPath($ExpectedScenePath)
+		$observed=[IO.Path]::GetFullPath($property.Value)
+		if (![string]::Equals($expected,$observed,[StringComparison]::OrdinalIgnoreCase)) { return $false }
+		# Probe only the runner-owned expected file, never a foreign scene path
+		# reported by a mismatching state. Fixture construction already owns it.
+		return Test-Path -LiteralPath $expected -PathType Leaf -ErrorAction Stop
+	} catch { return $false }
 }
 Below $install ([IO.Path]::GetFullPath($ArtifactManifest))
 $manifest=Get-Content -LiteralPath $ArtifactManifest -Raw | ConvertFrom-Json
@@ -267,10 +288,11 @@ try {
 	$compile=Tool 'script.compile' @{profile='RelWithDebInfo';correlationId='texture-ui-managed-build'}
 	Record 'managed-build' (Job $compile.data.jobId 'texture-ui-managed-build')
 	Record 'scripts-ready' (ReadyScripts)
+	$expectedFixtureScenePath=[IO.Path]::GetFullPath((Join-Path $project 'Assets/Scenes/Startup.tescene'))
 	$state=(Tool 'project.state').data
-	if ($state.activeScene -ne 'Startup') { Record 'open-fixture' (Tool 'scene.open' @{path='Assets/Scenes/Startup.tescene'}) }
+	if (!(Test-FixtureSceneIdentity -State $state -ExpectedScenePath $expectedFixtureScenePath)) { Record 'open-fixture' (Tool 'scene.open' @{path='Assets/Scenes/Startup.tescene'}) }
 	$state=(Tool 'project.state').data
-	if ($state.activeScene -ne 'Startup') { throw 'Authored Startup scene is not active.' }
+	if (!(Test-FixtureSceneIdentity -State $state -ExpectedScenePath $expectedFixtureScenePath)) { throw 'Authored Startup scene source is not active.' }
 	Tool 'play.enter' @{expectedState='stopped'} | Out-Null
 	Record 'play-ready' (ReadyScripts)
 	$deadline=[DateTime]::UtcNow.AddSeconds($StageTimeoutSeconds); $observed=$null

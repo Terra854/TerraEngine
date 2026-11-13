@@ -4,10 +4,43 @@
 #include <string>
 #include <string_view>
 #include <filesystem>
+#include <climits>
+#include <iomanip>
 #include "Editor/AssetCompilers/ShaderCompiler.h"
+
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 
 namespace
 {
+#if defined(_WIN32)
+	using CommandCharacter = wchar_t;
+#else
+	using CommandCharacter = char;
+#endif
+
+	// Keep paths in the operating system's native character type. Only option
+	// names and shader text identifiers need UTF-8; narrowing a Windows path
+	// through char** would replace characters outside the active ANSI code page.
+	bool ReadCommandText(const CommandCharacter* value, std::string& text)
+	{
+#if defined(_WIN32)
+		const std::wstring_view wide(value);
+		if(wide.empty()) { text.clear(); return true; }
+		if(wide.size() > static_cast<std::size_t>(INT_MAX)) return false;
+		const int length = static_cast<int>(wide.size());
+		const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+			wide.data(), length, nullptr, 0, nullptr, nullptr);
+		if(bytes <= 0) return false;
+		text.resize(static_cast<std::size_t>(bytes));
+		return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+			wide.data(), length, text.data(), bytes, nullptr, nullptr) == bytes;
+#else
+		text = value;
+		return true;
+#endif
+	}
 
 	struct CommandLine
 	{
@@ -63,40 +96,45 @@ namespace
 	}
 
 
-	bool ParseCommandLine(int argc, char** argv, CommandLine& args)
+	bool ParseCommandLine(int argc, CommandCharacter** argv, CommandLine& args)
 	{
 		for(int i = 1; i < argc; ++i)
 		{
-			const std::string flag{argv[i]};
+			std::string flag;
+			if(!ReadCommandText(argv[i], flag))
+			{
+				std::cerr << "Invalid Unicode option text.\n";
+				return false;
+			}
 
 			if((flag == "-i" || flag == "--input") && i + 1 < argc)
 			{
-				args.input = argv[++i];
+				args.input = std::filesystem::path(argv[++i]);
 			}
 
 			else if((flag == "-o" || flag == "--output") && i + 1 < argc)
 			{
-				args.output = argv[++i];
+				args.output = std::filesystem::path(argv[++i]);
 			}
 
 			else if((flag == "-e" || flag == "--entry") && i + 1 < argc)
 			{
-				args.entryPoint = argv[++i];
+				if(!ReadCommandText(argv[++i], args.entryPoint)) return false;
 			}
 
 			else if((flag == "-s" || flag == "--stage") && i + 1 < argc)
 			{
-				args.stage = argv[++i];
+				if(!ReadCommandText(argv[++i], args.stage)) return false;
 			}
 
 			else if((flag == "-t" || flag == "--target") && i + 1 < argc)
 			{
-				args.targetProfile = argv[++i];
+				if(!ReadCommandText(argv[++i], args.targetProfile)) return false;
 			}
 
 			else if(flag == "--dxc" && i + 1 < argc)
 			{
-				args.dxcPathOverride = argv[++i];
+				args.dxcPathOverride = std::filesystem::path(argv[++i]);
 			}
 			else
 			{
@@ -129,7 +167,13 @@ namespace
 }
 
 
+// One parser and compile body serve both platforms. Windows receives UTF-16
+// directly from its CRT; POSIX retains the existing byte-preserving argv path.
+#if defined(_WIN32)
+int wmain(int argc, wchar_t** argv)
+#else
 int main(int argc, char** argv)
+#endif
 {
 	CommandLine args{};
 
@@ -140,13 +184,22 @@ int main(int argc, char** argv)
 
 	const std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
 	const std::filesystem::path dxcPath = args.dxcPathOverride.empty() ? DefaultDxcPath(exePath) : args.dxcPathOverride;
+	// Prepare the UTF-8 diagnostic before publishing an output file. Streaming a
+	// native Windows path directly would narrow it through the ANSI code page
+	// and could fail even after a Unicode-path compilation had succeeded.
+	std::string outputText;
+	if(!ReadCommandText(args.output.c_str(), outputText))
+	{
+		std::cerr << "Invalid Unicode output path.\n";
+		return 1;
+	}
 
 
 	EmitProgress(0.05f, "Shader Compile", "Compiling shader source with DXC.");
 	if(CompileShader(args.input, args.output, args.stage, args.targetProfile, args.entryPoint, dxcPath))
 	{
 		EmitProgress(0.98f, "Shader Done", "Shader compile output is ready.");
-		std::cout << "Wrote TSPF: " << args.output << "\n";
+		std::cout << "Wrote TSPF: " << std::quoted(outputText) << "\n";
 		return 0;
 	}
 	else

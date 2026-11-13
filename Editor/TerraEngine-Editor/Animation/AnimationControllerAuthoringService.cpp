@@ -462,10 +462,15 @@ namespace TerraEngine::Editor::Animation {
 			diagnostic_ = publicationDiagnostic.empty() ? product.authoring.diagnostic : publicationDiagnostic;
 			return status;
 		}
-		const AnimationAuthoringStatus historyStatus = history_.Commit(before, published);
-		if(historyStatus != AnimationAuthoringStatus::Ok) {
-			diagnostic_ = "The bytes were published but the grouped history entry was rejected.";
-			return historyStatus;
+		// The transaction still validates and publishes an unchanged candidate, so
+		// adopt its resulting revision and finish editing. Identical bytes represent
+		// no durable change and must not create (or reject) a phantom history entry.
+		if(before.bytes != published.bytes) {
+			const AnimationAuthoringStatus historyStatus = history_.Commit(before, published);
+			if(historyStatus != AnimationAuthoringStatus::Ok) {
+				diagnostic_ = "The bytes were published but the grouped history entry was rejected.";
+				return historyStatus;
+			}
 		}
 		editing_ = false;
 		const AnimationAuthoringStatus adopted = AdoptPublishedRevision(std::move(published));

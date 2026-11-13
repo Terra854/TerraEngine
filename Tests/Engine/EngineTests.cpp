@@ -5,6 +5,55 @@
 #include <iostream>
 
 namespace TerraEngine::Tests {
+	void RegisterFrameWorkloadProfilingPublicationTests(TestRegistry& registry);
+	void RegisterWindowTitleEncodingTests(TestRegistry& registry);
+	void RegisterJournalEvidenceRoundTripTests(TestRegistry& registry);
+	// Production-path review regressions are explicitly registered so a missing
+	// source cannot silently turn the acceptance filter into an empty selection.
+	void RegisterManagedTransactionRejectionTests(TestRegistry& registry);
+	void RegisterHostInitializationContractTests(TestRegistry& registry);
+	void RegisterMutationSubmissionOrderTests(TestRegistry& registry);
+	void RegisterMarkupReferenceRoundTripTests(TestRegistry& registry);
+	// These independently selected cases expose current simulation defects before
+	// their repair wave; their passing controls preserve existing valid behavior.
+	void RegisterNavigationSnapshotIdentityTests(TestRegistry& registry);
+	void RegisterPortalResidencyLifecycleTests(TestRegistry& registry);
+	void RegisterFrameQueryAuthoringTests(TestRegistry& registry);
+	void RegisterTerrainSeamOwnershipTests(TestRegistry& registry);
+	void RegisterSurfaceAllocationCanonicalityTests(TestRegistry& registry);
+	void RegisterLazyHeightLifecycleTests(TestRegistry& registry);
+	void RegisterSpatialStreamingProgressTests(TestRegistry& registry);
+	void RegisterDiagnosticStableOrderTests(TestRegistry& registry);
+	void RegisterSpatialDecoderChannelTests(TestRegistry& registry);
+	void RegisterScrollFramePublicationTests(TestRegistry& registry);
+	void RegisterPackagedNavigationCompanionTests(TestRegistry& registry);
+	void RegisterViewPublicationIdentityTests(TestRegistry& registry);
+	void RegisterAnimationUploadIdentityTests(TestRegistry& registry);
+	void RegisterShaderViewContractTests(TestRegistry& registry);
+	void RegisterAnimationRefreshIdentityTests(TestRegistry& registry);
+	void RegisterAnimationAssetRollbackParityTests(TestRegistry& registry);
+	void RegisterProceduralGpuPoseParityTests(TestRegistry& registry);
+	void RegisterHotReloadRetainInterleaveTests(TestRegistry& registry);
+	void RegisterTerrainSurfaceCoordinateTests(TestRegistry& registry);
+	// Safety fixtures observe real owner operations before their repair wave.
+	void RegisterMalformedProductionShapeTests(TestRegistry& registry);
+	void RegisterMalformedProductionShapeDirectObserverTests(TestRegistry& registry);
+	void RegisterProductionHierarchyCycleQualificationTests(TestRegistry& registry);
+	void RegisterOptionalFallbackPlanningTests(TestRegistry& registry);
+	void RegisterProcessCaptureLifecycleTests(TestRegistry& registry);
+	void RegisterRagdollMalformedStateTests(TestRegistry& registry);
+	void RegisterRetirementSignalTests(TestRegistry& registry);
+	void RegisterDeformationTraversalFailureTests(TestRegistry& registry);
+	void RegisterNavigationOwnershipBoundsTests(TestRegistry& registry);
+	void RegisterTerrainShapeRetirementTests(TestRegistry& registry);
+	void RegisterPlanningNumericBoundsTests(TestRegistry& registry);
+	void RegisterCandidateRetentionRollbackTests(TestRegistry& registry);
+	void RegisterLoggerLifecycleTests(TestRegistry& registry);
+	void RegisterJournalAllocationBoundsTests(TestRegistry& registry);
+	void RegisterSettingsPersistenceFailureTests(TestRegistry& registry);
+	void RegisterCompositePipelineRetirementTests(TestRegistry& registry);
+	void RegisterTextureUploadFailureOwnershipTests(TestRegistry& registry);
+	void RegisterDiscardedPrimaryRecoveryTests(TestRegistry& registry);
 #ifdef TERRAENGINE_HAS_CONTENT_ARCHIVE_SAFETY_TESTS
 	// The archive corpus is linked only after its implementation exists. This
 	// avoids advertising an empty acceptance slice during staged integration.
@@ -954,6 +1003,50 @@ int main() {
 	TerraEngine::Tests::RegisterTerrainExportRuntimeTests(registry);
 #endif
 
+	TerraEngine::Tests::RegisterManagedTransactionRejectionTests(registry);
+	TerraEngine::Tests::RegisterHostInitializationContractTests(registry);
+	TerraEngine::Tests::RegisterMutationSubmissionOrderTests(registry);
+	TerraEngine::Tests::RegisterMarkupReferenceRoundTripTests(registry);
+	TerraEngine::Tests::RegisterNavigationSnapshotIdentityTests(registry);
+	TerraEngine::Tests::RegisterPortalResidencyLifecycleTests(registry);
+	TerraEngine::Tests::RegisterFrameQueryAuthoringTests(registry);
+	TerraEngine::Tests::RegisterTerrainSeamOwnershipTests(registry);
+	TerraEngine::Tests::RegisterSurfaceAllocationCanonicalityTests(registry);
+	TerraEngine::Tests::RegisterLazyHeightLifecycleTests(registry);
+	TerraEngine::Tests::RegisterSpatialStreamingProgressTests(registry);
+	TerraEngine::Tests::RegisterDiagnosticStableOrderTests(registry);
+	TerraEngine::Tests::RegisterSpatialDecoderChannelTests(registry);
+	TerraEngine::Tests::RegisterScrollFramePublicationTests(registry);
+	TerraEngine::Tests::RegisterPackagedNavigationCompanionTests(registry);
+	TerraEngine::Tests::RegisterViewPublicationIdentityTests(registry);
+	TerraEngine::Tests::RegisterAnimationUploadIdentityTests(registry);
+	TerraEngine::Tests::RegisterShaderViewContractTests(registry);
+	TerraEngine::Tests::RegisterAnimationRefreshIdentityTests(registry);
+	TerraEngine::Tests::RegisterAnimationAssetRollbackParityTests(registry);
+	TerraEngine::Tests::RegisterProceduralGpuPoseParityTests(registry);
+	TerraEngine::Tests::RegisterHotReloadRetainInterleaveTests(registry);
+	TerraEngine::Tests::RegisterTerrainSurfaceCoordinateTests(registry);
+	TerraEngine::Tests::RegisterMalformedProductionShapeTests(registry);
+	TerraEngine::Tests::RegisterMalformedProductionShapeDirectObserverTests(registry);
+	TerraEngine::Tests::RegisterProductionHierarchyCycleQualificationTests(registry);
+	TerraEngine::Tests::RegisterOptionalFallbackPlanningTests(registry);
+	TerraEngine::Tests::RegisterProcessCaptureLifecycleTests(registry);
+	TerraEngine::Tests::RegisterRagdollMalformedStateTests(registry);
+	TerraEngine::Tests::RegisterRetirementSignalTests(registry);
+	TerraEngine::Tests::RegisterDeformationTraversalFailureTests(registry);
+	TerraEngine::Tests::RegisterNavigationOwnershipBoundsTests(registry);
+	TerraEngine::Tests::RegisterTerrainShapeRetirementTests(registry);
+	TerraEngine::Tests::RegisterPlanningNumericBoundsTests(registry);
+	TerraEngine::Tests::RegisterCandidateRetentionRollbackTests(registry);
+	TerraEngine::Tests::RegisterLoggerLifecycleTests(registry);
+	TerraEngine::Tests::RegisterJournalAllocationBoundsTests(registry);
+	TerraEngine::Tests::RegisterSettingsPersistenceFailureTests(registry);
+	TerraEngine::Tests::RegisterCompositePipelineRetirementTests(registry);
+	TerraEngine::Tests::RegisterTextureUploadFailureOwnershipTests(registry);
+	TerraEngine::Tests::RegisterDiscardedPrimaryRecoveryTests(registry);
+	TerraEngine::Tests::RegisterJournalEvidenceRoundTripTests(registry);
+	TerraEngine::Tests::RegisterFrameWorkloadProfilingPublicationTests(registry);
+	TerraEngine::Tests::RegisterWindowTitleEncodingTests(registry);
 	const int result = registry.RunAll(std::cout);
 	// Complete asynchronous log writes before flushing the final harness record.
 	// Explicitly flushing here also preserves the summary on very short native

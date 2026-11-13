@@ -70,8 +70,14 @@ namespace {
 					const auto error = queried ? ERROR_MORE_DATA : GetLastError();
 					if (error != ERROR_MORE_DATA) return error;
 					const auto required = static_cast<std::size_t>(list->NumberOfAssignedProcesses) + 2U;
-					if (required <= storage.size() || required > MAXDWORD / sizeof(ULONG_PTR)) return ERROR_MORE_DATA;
-					storage.resize(required);
+					const auto maximum = static_cast<std::size_t>(MAXDWORD / sizeof(ULONG_PTR));
+					if (required > maximum || storage.size() >= maximum) return ERROR_MORE_DATA;
+					// Membership can change while Windows assembles the snapshot. Even
+					// an incomplete list whose reported count fits the old buffer needs
+					// another query, not immediate failure. Grow with checked headroom;
+					// the existing eight attempts and shared deadline still bound capture.
+					const auto grown = storage.size() <= maximum / 2U ? storage.size() * 2U : maximum;
+					storage.resize(std::max(required, grown));
 				}
 				return ERROR_MORE_DATA; // Continuous spawning cannot extend capture without bound.
 			} catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
@@ -302,15 +308,20 @@ bool RunProcessCapture(const TerraEngine::Utilities::OwnedProcessRequest& reques
 				output += DescribeWindowsProcessError("Owned process membership capture", captureError);
 				return false; // The scope guard still terminates and waits for retained owners.
 			}
-			DWORD available = 0u;
-			if (PeekNamedPipe(readHandle, nullptr, 0u, nullptr, &available, nullptr) && available > 0u)
-			{
-				DWORD bytesRead = 0u;
-				const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
-				if (ReadFile(readHandle, buffer.data(), requested, &bytesRead, nullptr) && bytesRead > 0u)
-				{
-					output.append(buffer.data(), bytesRead);
-				}
+			// Drain a bounded batch before waiting. The old single4KiB read plus
+			//50ms wait throttled a blocked writer to about80KiB/s. Batch bounds
+			// preserve cancellation/deadline and process-owner checks under noise.
+			constexpr DWORD kCaptureBatchBytes=256U*1024U;
+			DWORD drainedBytes=0U;
+			while(drainedBytes<kCaptureBatchBytes
+				&& !cancellationRequested.load(std::memory_order_relaxed)
+				&& std::chrono::steady_clock::now()<deadline) {
+				DWORD available=0U;
+				if(!PeekNamedPipe(readHandle,nullptr,0U,nullptr,&available,nullptr) || available==0U) break;
+				DWORD bytesRead=0U;
+				const DWORD requested=std::min<DWORD>(std::min<DWORD>(available,static_cast<DWORD>(buffer.size())),kCaptureBatchBytes-drainedBytes);
+				if(!ReadFile(readHandle,buffer.data(),requested,&bytesRead,nullptr) || bytesRead==0U) break;
+				output.append(buffer.data(),bytesRead);drainedBytes+=bytesRead;
 			}
 
 			if (!terminationRequested && (cancellationRequested.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() >= deadline))
@@ -327,7 +338,7 @@ bool RunProcessCapture(const TerraEngine::Utilities::OwnedProcessRequest& reques
 				terminationRequested = true;
 				terminationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 			}
-			const auto waited = WaitForSingleObject(processInfo.hProcess, 50u);
+			const auto waited = WaitForSingleObject(processInfo.hProcess, drainedBytes>0U ? 0U : 50U);
 			if (waited == WAIT_FAILED) { output += DescribeWindowsProcessError("WaitForSingleObject", GetLastError()); return false; }
 			processExited = waited == WAIT_OBJECT_0;
 			if (!processExited && terminationRequested && std::chrono::steady_clock::now() >= terminationDeadline) {

@@ -13,11 +13,18 @@ namespace TerraEngine::EditorTests
 {
 	namespace
 	{
-		std::filesystem::path FixtureRoot()
+		std::filesystem::path FixtureRoot(TestContext& context)
 		{
-			if (const char* overrideRoot = std::getenv("TERRAENGINE_DENSE_ANIMATED_VG_ROOT"))
-				return overrideRoot;
-			return "C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project/Assets/ValidationModels/DenseAnimatedVG";
+			// Optional external data is opt-in. Once configured, missing or invalid
+			// data is a failed prerequisite, never a successful skip or personal path.
+			const char* configured = std::getenv("TERRAENGINE_DENSE_ANIMATED_VG_ROOT");
+			if (configured == nullptr)
+				context.Skip("Optional fixture not configured: set TERRAENGINE_DENSE_ANIMATED_VG_ROOT to its root.");
+			context.Expect(*configured != '\0', "Configured TERRAENGINE_DENSE_ANIMATED_VG_ROOT must not be empty.");
+			const std::filesystem::path root(configured);
+			context.Expect(root.is_absolute() && std::filesystem::is_directory(root),
+				"Configured TERRAENGINE_DENSE_ANIMATED_VG_ROOT must name an existing absolute fixture directory: " + root.string());
+			return root;
 		}
 
 		std::string ReadText(const std::filesystem::path& path)
@@ -66,12 +73,10 @@ namespace TerraEngine::EditorTests
 	{
 		registry.Add("VirtualGeometry.Editor.DenseAnimatedFixture.ProvenanceAndSource", [](TestContext& context)
 		{
-			const auto root = FixtureRoot();
-			if (!std::filesystem::exists(root / "CesiumMan.glb") ||
-				!std::filesystem::exists(root / "source-provenance.json"))
-			{
-				context.Skip("External dense animated validation project is absent.");
-			}
+			const auto root = FixtureRoot(context);
+			context.Expect(std::filesystem::is_regular_file(root / "CesiumMan.glb")
+				&& std::filesystem::is_regular_file(root / "source-provenance.json"),
+				"Configured dense fixture must contain CesiumMan.glb and source-provenance.json.");
 			const auto provenance = ReadText(root / "source-provenance.json");
 			const auto glb = ReadText(root / "CesiumMan.glb");
 			context.Expect(!provenance.empty(), "Dense animated fixture provenance must be present.");
@@ -86,11 +91,8 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("VirtualGeometry.Editor.DenseAnimatedFixture.CookedOutput", [](TestContext& context)
 		{
-			const auto root = FixtureRoot();
-			if (!std::filesystem::exists(root))
-			{
-				context.Skip("External dense animated validation project is absent.");
-			}
+			const auto root = FixtureRoot(context);
+
 			std::size_t usefulLevels = 0u;
 			bool deformablePages = false;
 			bool cookedOutput = false;

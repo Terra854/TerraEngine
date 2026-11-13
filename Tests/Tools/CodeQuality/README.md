@@ -9,6 +9,11 @@ preserve the reviewed source inventory, stage boundaries and cleanup ownership.
 Use the repository's bundled dependencies and an x64 Visual Studio developer
 shell on Windows. From the repository root, configure, compile and install:
 
+Validation tools require Python 3.9 or newer with its standard library. CMake
+checks the interpreter at configure time. Set
+`-DTERRAENGINE_REVIEW_PYTHON=<absolute-python-executable>` to select an existing
+toolchain interpreter explicitly; no Python packages are downloaded.
+
 ```powershell
 cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
@@ -278,3 +283,127 @@ synthetic provenance, exact extents and preflight lengths, no backend target or
 overlays, and complete correlation metadata. This cost characterization has no
 historical 1x1 ratio or performance threshold and is separate from preparation
 parity and sealed total-frame timing.
+
+
+## Continuing the historical source review after functional changes
+
+The default `VerifySourceReviewQuality.ps1` invocation retains its original
+Portable/PrivateProof behavior. Its 181 after-pins describe the completed
+historical comment cleanup, not a perpetual claim about later functional code.
+Do not update those pins or dispositions to make a current functional edit pass.
+
+Opt-in continuation requires an explicit Python 3.9+ executable, Git, the actual
+native `TerraEngine-SourceReviewAudit` executable and the existing stage validator.
+Use the same absolute legacy input arguments, adding:
+
+```powershell
+-ContinuationManifest <absolute-tools-root>/Baseline/Continuation/continuation.json `
+-HistoricalManifest <absolute-tools-root>/Baseline/Continuation/historical-source-manifest.json `
+-ContinuationValidator <absolute-tools-root>/VerifySourceReviewContinuation.py `
+-PythonExecutable <absolute-bundled-review-python>
+```
+
+The repository must contain exact commit
+`87d3fd037c1e881ff6630a4918c91be707673c1b`, tree
+`47cf2ac37d0bee74c9da1b21e6516c3f9074a2f4`, and all blobs named by the committed
+historical manifest. A shallow clone missing those objects fails with no fetch or
+HEAD fallback. Alternatively pass `-HistoricalInputRoot` to a self-contained
+archive directory containing raw `blobs/<git-object-id>` files for every manifest
+entry. Git is still required for isolated attribute-aware checkout. Every supplied
+blob must match its committed size, SHA256 and Git object ID; arbitrary source
+copies are insufficient. Historical attributes are taken from those historical
+blobs, independently of the current checkout policy. No private before archive is
+newly required for historical comment accounting; `tokenProofExecuted` remains false.
+
+The verifier creates a fresh private Git object store/index under its output work
+root. It removes inherited Git routing/config-injection variables, disables user
+filters/configuration and runs bounded children. It never mutates the main Git
+index, object store or production files. Output receipts use exclusive creation;
+choose a fresh absolute output path with an existing parent directory.
+
+Continuation performs three separate checks: historical frozen comment
+accounting on the exact historical checkout; all current native strict scanner
+and stage-ownership checks; and exhaustive modified/added/deleted current source
+reviews. The committed continuation records raw before/after hashes, exact diff
+artifacts, reviewer decisions, every hunk, comment intent and ownership limits.
+`Baseline/Continuation/continuation.json` is the current index. It references
+one flat `current-review.json` provenance report and one exact `diffs/*.diff.gz`
+artifact per current source delta. Superseded round reports and nested copies of
+previous reviewed rows are archived locally, outside the portable verification
+inputs. Consolidation preserves the existing decisions; it is not another
+independent review. The verifier still checks every source/diff hash,
+reviewed hunk, provenance reference and current stage candidate.
+Diff artifacts may use `compression: "gzip"`: their reference hashes and sizes
+pin the compressed file, while `diffSha256` pins its exact decompressed diff.
+The verifier limits expansion to the independently computed diff size and rejects
+corruption, truncation, extra content and unsupported formats. Uncompressed
+artifacts remain supported. To inspect a stored diff, use Python's standard
+library: `python -m gzip --decompress <artifact.diff.gz>` on a disposable copy;
+the ordinary Git source diff remains available directly.
+A `comment-only` decision additionally requires the actual native comparator to
+prove equal executable tokens and physical token locations. Comment edits that
+move executable locations must explicitly describe that limitation as a mixed
+source/physical change; this classification does not assert changed GPU behavior.
+Functional/mixed reviews do not claim token equivalence. A newly discovered issue
+must be resolved and reviewed rather than merely setting an approval field.
+
+Current unchanged historical content may use LF, CRLF or mixed newline working
+bytes. Uniform materializations are compared directly. Other non-delta membership
+uses Git's actual declared per-path clean conversion in the private object store,
+with explicit `core.autocrlf=true`, custom filters and working-tree encodings
+rejected. The cleaned bytes must equal the complete historical stable blob,
+including SHA256 and size; object-ID equality alone is insufficient. Actual raw
+hashes and newline counts remain in the receipt. This is content-identity
+qualification, not proof of raw-byte, token-location, raw-string/newline semantics
+or runtime equivalence. Code-byte changes and bare-CR changes remain unreviewed
+deltas; `-text` files cannot use newline conversion. Reviewed deltas retain exact
+raw-byte pins and narrow `-text` overrides; this workflow does not impose durable
+raw-byte pins on all unchanged sources. It pins the current attribute policy and
+re-inventories the complete current selection after verification, detecting source
+addition, removal and mutation. `Baseline/Continuation/**` has stable committed
+bytes so checkout conversion cannot change review artifacts.
+
+For a later functional change, first regenerate the complete historical-to-current
+delta index using the exact native selection, review each new/stale file and hunk,
+and update only continuation review artifacts and mutable stage candidates.
+Preserve frozen inventories, dispositions, budgets and historical comment pins.
+Recompute native symbol spans and ownership classification when a stage candidate
+changes. The JSON schema documents the records; the maintained Python verifier is
+the executable cross-file, hunk-coverage and comparator contract.
+
+Run the bounded negative contracts with fresh report output:
+
+```powershell
+& <review-python> <tools-root>/TestSourceReviewContinuation.py `
+  --validator <tools-root>/VerifySourceReviewContinuation.py `
+  --audit-executable <tools-root>/TerraEngine-SourceReviewAudit.exe `
+  --minimum-cases 55 `
+  --report <absolute-existing-evidence-directory>/continuation-contracts.json
+```
+
+These artificial contract sources test checker mechanics, not production review
+acceptance. Both real and contract receipts preserve `structuralOnly=true`,
+`semanticCompletenessProven=false` and `lifetimeAcceptance=false`. Runtime/GPU,
+threading, installed closure and final remediation acceptance require their
+separate actual evidence; historical Portable success cannot substitute for them.
+
+
+The joined workflow invokes the explicit `HistoricalAccounting` mode. It retains
+all 181 after-pins, 2,345 dispositions, six batches, complete historical strict
+native scanning and source-stability checks, but emits the distinct
+`historical-source-comment-accounting-v1` schema with `stagePerformed=false` and
+`currentSourceAcceptance=false`. It cannot be substituted for joined current
+acceptance. Default Portable and PrivateProof modes retain their stage checks.
+
+The reason is preserved in `Baseline/Continuation/historical-stage-mismatch.json`
+and its actual failed stage receipt: the frozen historical mutable-stage candidate
+pins mixed newline bytes for `Engine/Animation/AnimationSystem.h`, while exact
+historical Git contains LF bytes. The other 46 historical stage source pins match.
+Neither the historical source nor its stage manifest is overlaid or repinned.
+The reviewed current header raw hash remains in the continuation index, and its
+comment-only classification still requires the actual native comparator to pass.
+All current 47 stage candidates,
+current budgets, ownership, native strict scanning, exhaustive delta reviews and
+end-of-run source closure checks remain mandatory. The old full Portable replay
+is not claimed to have passed. Structural historical accounting and complete
+current stage validation are separately named in the joined receipt.

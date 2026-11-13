@@ -131,7 +131,8 @@ namespace TerraEngine::EditorTests
 				/ "Editor" / "TerraEngine-Editor" / "Core" / "EditorSystem.cpp";
 			const std::string source = ReadFileBytes(sourcePath);
 			context.Expect(source.find("layout[\"sceneViewCamera\"] = sceneView->SerializeWorkspaceState()") != std::string::npos
-				&& source.find("sceneView->RestoreWorkspaceState(layout[\"sceneViewCamera\"], cameraError)") != std::string::npos,
+				&& source.find("TerraEngine::Editor::ApplyWorkspaceLayoutSections(layout,") != std::string::npos
+				&& source.find("sceneView->RestoreWorkspaceState(camera, cameraError)") != std::string::npos,
 				"Project close and reopen must save and restore Scene View camera state through EditorLayout.terra.");
 		});
 

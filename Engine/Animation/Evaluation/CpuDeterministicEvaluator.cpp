@@ -12,6 +12,32 @@ namespace TerraEngine::Animation {
 		constexpr double kFixedScale = 65536.0;
 		constexpr double kFixedMaximum = static_cast<double>(std::numeric_limits<std::int32_t>::max());
 
+		// Retarget graph layers publish parent-local joints, whereas procedural
+		// solvers operate on model poses. Convert the copied packet at the boundary,
+		// and return local output before ragdoll/recording sees the stage result.
+		bool ConvertRetargetProceduralSpace(GraphPoseContribution& pose, const SkeletonAsset& skeleton, bool toModel) {
+			if(pose.joints.size() != skeleton.joints.size() || pose.jointStableIds.size() != skeleton.joints.size()) return false;
+			for(std::size_t i = 0; i < skeleton.joints.size(); ++i) {
+				const auto parent = skeleton.joints[i].parentIndex;
+				if(pose.jointStableIds[i] != skeleton.joints[i].stableId || parent < -1
+					|| parent >= static_cast<std::int32_t>(i)) return false;
+			}
+			// Parents precede children when composing; descending inversion keeps
+			// each parent in model space until its last child's conversion finishes.
+			for(std::size_t ordinal = 0; ordinal < skeleton.joints.size(); ++ordinal) {
+				const auto i = toModel ? ordinal : skeleton.joints.size() - 1u - ordinal;
+				const auto parent = skeleton.joints[i].parentIndex;
+				if(parent < 0) continue;
+				if(toModel) pose.joints[i] = ProceduralMath::Combine(pose.joints[parent], pose.joints[i]);
+				else {
+					AnimationTransform local;
+					if(!ProceduralMath::TryRelativeTransform(pose.joints[parent], pose.joints[i], local)) return false;
+					pose.joints[i] = local;
+				}
+			}
+			return true;
+		}
+
 		bool IsRecoverableAdvancedFailure(AnimationStatus status) noexcept {
 			switch(status) {
 			case AnimationStatus::NotReady:
@@ -182,6 +208,20 @@ namespace TerraEngine::Animation {
 
 			if(request.procedural != nullptr) {
 				ProceduralGraphEvaluationRequest stage = *request.procedural;
+				const auto* retargetSkeleton = request.retarget ? request.retarget->evaluation.targetSkeleton.get() : nullptr;
+				std::vector<ProceduralGraphNodeInput> modelNodes;
+				std::vector<GraphPoseContribution> modelReferences;
+				if(retargetSkeleton) {
+					if(!ConvertRetargetProceduralSpace(candidate.pose, *retargetSkeleton, true)) return AnimationStatus::InvalidArgument;
+					modelNodes.assign(stage.nodes.begin(), stage.nodes.end());
+					modelReferences.reserve(modelNodes.size());
+					for(auto& node : modelNodes) if(node.additiveReference) {
+						modelReferences.push_back(*node.additiveReference);
+						if(!ConvertRetargetProceduralSpace(modelReferences.back(), *retargetSkeleton, true)) return AnimationStatus::InvalidArgument;
+						node.additiveReference = &modelReferences.back();
+					}
+					stage.nodes = modelNodes;
+				}
 				stage.inputPose = &candidate.pose;
 				stage.authority = ProceduralGraphAuthority::CpuAuthoritative;
 				stage.authoritativeConsumer = true;
@@ -194,6 +234,7 @@ namespace TerraEngine::Animation {
 				}
 				candidate.pose = std::move(result.pose);
 				candidate.evaluatedStages.push_back(CpuDeterministicAdvancedStage::Procedural);
+				if(retargetSkeleton && !ConvertRetargetProceduralSpace(candidate.pose, *retargetSkeleton, false)) return AnimationStatus::InvalidArgument;
 				if(const AnimationStatus quantizeStatus = QuantizePose(candidate.pose); quantizeStatus != AnimationStatus::Ok) return quantizeStatus;
 			}
 

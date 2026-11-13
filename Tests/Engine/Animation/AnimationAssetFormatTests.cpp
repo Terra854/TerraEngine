@@ -195,8 +195,10 @@ namespace TerraEngine::Tests {
 				? std::vector<AnimationClipEvent>{rightFoot, leftFoot}
 				: std::vector<AnimationClipEvent>{leftFoot, rightFoot};
 			asset.rootMotion.enabled = true;
-			asset.rootMotion.translationTrackIndex = 0U;
-			asset.rootMotion.yawTrackIndex = 1U;
+			// These references name authored tracks, so reverse the indices with
+			// the table. Keeping 0/1 would describe a different logical clip.
+			asset.rootMotion.translationTrackIndex = reverseTables ? 3U : 0U;
+			asset.rootMotion.yawTrackIndex = reverseTables ? 2U : 1U;
 			asset.rootMotion.accumulatedCycleTranslation = {1.0F, 0.0F, 0.0F};
 			asset.rootMotion.accumulatedCycleYawRadians = 0.25F;
 			return asset;
@@ -350,10 +352,27 @@ namespace TerraEngine::Tests {
 
 			std::vector<std::uint8_t> clipForward;
 			std::vector<std::uint8_t> clipReverse;
-			SerializeAnimationClipAsset(MakeClipAsset(false), clipForward);
-			SerializeAnimationClipAsset(MakeClipAsset(true), clipReverse);
+			const AnimationClipAsset forward = MakeClipAsset(false);
+			const AnimationClipAsset reverse = MakeClipAsset(true);
+			const auto& authoredTranslation = forward.tracks[forward.rootMotion.translationTrackIndex];
+			const auto& authoredYaw = forward.tracks[forward.rootMotion.yawTrackIndex];
+			context.Expect(reverse.tracks[reverse.rootMotion.translationTrackIndex] == authoredTranslation
+				&& reverse.tracks[reverse.rootMotion.yawTrackIndex] == authoredYaw,
+				"Permuted inputs must preserve the full authored root-track identities before comparing canonical bytes.");
+			context.Expect(SerializeAnimationClipAsset(forward, clipForward) == AnimationStatus::Ok
+				&& SerializeAnimationClipAsset(reverse, clipReverse) == AnimationStatus::Ok,
+				"Both logically equivalent inputs must serialize successfully.");
 			context.Expect(clipForward == clipReverse,
 				"Track and event insertion order must not change canonical cooked clip bytes.");
+			AnimationClipAsset decodedForward, decodedReverse;
+			context.Expect(DeserializeAnimationClipAsset(clipForward, forward.compatibilityFingerprint, decodedForward) == AnimationStatus::Ok
+				&& DeserializeAnimationClipAsset(clipReverse, reverse.compatibilityFingerprint, decodedReverse) == AnimationStatus::Ok,
+				"Both canonical outputs must decode through the production reader before root meaning is checked.");
+			context.Expect(decodedForward.tracks[decodedForward.rootMotion.translationTrackIndex] == authoredTranslation
+				&& decodedForward.tracks[decodedForward.rootMotion.yawTrackIndex] == authoredYaw
+				&& decodedReverse.tracks[decodedReverse.rootMotion.translationTrackIndex] == authoredTranslation
+				&& decodedReverse.tracks[decodedReverse.rootMotion.yawTrackIndex] == authoredYaw,
+				"Canonical sorting must preserve the complete root translation/yaw track records in both decoded permutations.");
 		});
 
 		registry.Add("Animation.AssetFormat.UpgradeMalformedRangesAndAtomicOutput", [](TestContext& context) {

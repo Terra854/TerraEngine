@@ -87,6 +87,10 @@ namespace TerraEngine::Physics::Terrain
 		double ageMilliseconds = 0.0;
 		double buildLatencyMilliseconds = 0.0;
 		std::string message;
+		// Exact retained serialization and bounded worker geometry estimate for the
+		// current compatibility recipe, not a claim about all native world memory.
+		std::size_t currentRecipeCookedPayloadBytes = 0u;
+		std::size_t currentRecipeWorkerGeometryBytes = 0u;
 	};
 	TERRAENGINE_API TerrainCollisionCandidate PrepareTerrainCollisionCandidate(
 		TerrainHeightFieldRecipe recipe, TerraEngine::Terrain::ContentHash sourceRootHash,

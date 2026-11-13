@@ -2,9 +2,10 @@
 
 This page describes the provider-neutral gameplay contract for the readiness physics
 slice. Include `Engine/Physics/PhysicsTypes.h`, `PhysicsCommands.h`, and
-`PhysicsWorld.h`; do not include Jolt headers. Jolt Physics 5.6.0 (the pinned
-revision documented in `Docs/Dependencies/JoltPhysics.md`) is an implementation
-detail of the backend.
+`PhysicsWorld.h`; do not include Jolt headers. The Jolt Physics provider uses 5.6.1 development headers (`v5.6.0-18-g2e28006e`,
+commit `2e28006e4a367624bb512bf2c37ca99a93d9d1ea`, pinned in
+[the dependency authority](Dependencies/JoltPhysics.md)). The provider is an
+implementation detail of the backend.
 
 ## Constraints
 

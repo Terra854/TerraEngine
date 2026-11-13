@@ -17,7 +17,6 @@
 #include <limits>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace
@@ -185,7 +184,7 @@ namespace
 
 	Json Scenario(std::string_view name, std::string_view locationClass, int runs)
 	{
-		const std::string seed = std::string(name) + "|unbounded-scenes-v1|fixed-residency-8";
+		const std::string seed = std::string(name) + "|cpu-contract|" + std::string(locationClass);
 		Json checks = Json::object();
 		Json samples = Json::array();
 		for(int run = 0; run < runs; ++run)
@@ -194,16 +193,17 @@ namespace
 			const bool passed = RunContract(name, locationClass, checks);
 			const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count();
 			if(!passed) return {{"status", "failed"}, {"checks", checks}, {"artifactFinalized", true}};
-			samples.push_back({{"frameTimeNanoseconds", std::max<std::int64_t>(elapsed, 1LL)},
-				{"memoryBytes", 104857600}, {"run", run + 1}});
+			// Elapsed CPU contract work is not frame timing or process memory.
+			samples.push_back({{"contractCpuNanoseconds", elapsed}, {"frameTimeNanoseconds", nullptr},
+				{"memoryBytes", nullptr}, {"run", run + 1}});
 		}
 		Json result = {
 			{ "status", "passed" }, { "locationClass", std::string(locationClass) },
 			{ "identity", { { "workloadId", std::string(name) }, { "contentHash", std::to_string(Hash(seed)) },
-				{ "cameraPathHash", std::to_string(Hash("camera-path-v1")) }, { "hardwareIdentity", "cpu-deterministic" },
-				{ "runtimeRevision", "unbounded-scenes-v1" } } },
+				{ "cameraPathHash", std::to_string(Hash("camera-path-v1")) }, { "hardwareIdentity", nullptr },
+				{ "runtimeRevision", nullptr } } },
 			{ "deterministicHash", std::to_string(Hash(seed + "|deterministic")) },
-			{ "boundedHighWater", { { "residentRegions", 8 }, { "queueDepth", 32 }, { "residentBytes", 104857600 } } },
+			{ "boundedHighWater", nullptr },
 			{ "rawSamples", samples }, { "checks", checks }, { "artifactFinalized", true }
 		};
 		return result;
@@ -219,32 +219,35 @@ int main(int argc, char** argv)
 	Json scenarios = Json::object();
 	for(const std::string& name : names)
 		if(options.scenario == "all" || options.scenario == name) scenarios[name] = Scenario(name, options.locationClass, options.runs);
+	// Explicit validation-only failure control exercises the real failed-scenario rollup.
+	if(options.scenario == "failure-control") scenarios["failure-control"] = Scenario("failure-control", options.locationClass, options.runs);
 	if(scenarios.empty()) return 2;
-	// A soak is a wall-clock contract. Re-run every production check at one-second
-	// intervals and finalize only after the requested duration has elapsed.
-	std::uint64_t soakIterations = 0U;
-	if(options.durationSeconds > 0)
-	{
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(options.durationSeconds);
-		while(std::chrono::steady_clock::now() < deadline)
-		{
-			for(const std::string& name : names)
-			{
-				Json checks;
-				if(!RunContract(name, "default", checks)) return 4;
-			}
-			++soakIterations;
-			const auto remaining = deadline - std::chrono::steady_clock::now();
-			if(remaining > std::chrono::milliseconds(0))
-				std::this_thread::sleep_for(std::min(remaining, std::chrono::steady_clock::duration(std::chrono::seconds(1))));
-		}
-	}
-	Json result = { { "schemaVersion", 2 }, { "status", "measured" }, { "scenario", options.scenario },
-		{ "runs", options.runs }, { "durationSeconds", options.durationSeconds }, { "buildIdentity", "unbounded-scenes-v1" },
-		{ "scenarios", scenarios }, { "soakIterations", soakIterations }, { "artifactFinalized", true }, { "unavailableIsNotZero", true } };
+	const bool failed = std::any_of(scenarios.begin(), scenarios.end(), [](const Json& row) { return row.value("status", "failed") != "passed"; });
+	// This executable has no live renderer or resident-memory collector. Never
+	// spend a requested soak interval repeating CPU checks that cannot qualify
+	// native stability. Finalize an explicit unavailable artifact immediately.
+	const std::uint64_t soakIterations = 0U;
+	Json result = { { "schemaVersion", 2 }, { "status", failed ? "failed" : "unavailable" }, { "scenario", options.scenario },
+		{ "runs", options.runs }, { "durationSeconds", options.durationSeconds }, { "buildIdentity", nullptr },
+		{ "scenarios", scenarios }, { "soakIterations", soakIterations }, { "artifactFinalized", true }, { "unavailableIsNotZero", true },
+		{ "qualification", "Production CPU contract checks only; no native frame/memory performance acceptance" },
+		{ "measurementProvenance", {{"contractCpuNanoseconds", {{"status", "measured"}, {"sourceOperation", "steady_clock around the actual RunContract call"}}}} },
+		{ "unavailable", {{"memoryBytes", "No process/resident-memory observation was collected"},
+			{"frameTimeNanoseconds", "CPU contract duration is not a native rendered frame"},
+			{"hardwareIdentity", "No hardware identity observation was collected"},
+			{"runtimeRevision", "No build/revision pin was supplied by the actual installed producer"},
+			{"buildIdentity", "No build/revision pin was supplied by the actual installed producer"},
+			{"boundedHighWater", "No resident-region, queue-depth or byte high-water observation was collected"}}} };
 	std::filesystem::create_directories(options.output.parent_path());
 	std::ofstream stream(options.output);
 	if(!stream) return 3;
 	stream << result.dump(2) << '\n';
+	stream.flush();
+	if(!stream) return 3;
+	if(failed) return 4;
+	if(options.durationSeconds > 0) {
+		std::cerr << "Native soak unavailable: no rendered-frame or resident-memory collector is implemented.\n";
+		return 5;
+	}
 	return 0;
 }

@@ -984,8 +984,17 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path,
 		}
 		// Cache JSON and text already own all required allocations. After disk
 		// commit publication uses swaps and cannot turn success into false.
-		auto sourceKey = std::filesystem::absolute(ticket.sourcePath).lexically_normal().wstring();
-		auto targetKey = transaction.Target().wstring();
+		// A configured project root may be a junction/symlink. Match the same
+		// filename through its resolved parents, without conflating distinct hard
+		// links that atomic replacement intentionally separates. Resolve before
+		// disk commit so an identity error cannot turn a committed save into failure.
+		std::error_code sourceIdentityError, targetIdentityError;
+		auto sourceKey = (std::filesystem::weakly_canonical(ticket.sourcePath.parent_path(), sourceIdentityError) / ticket.sourcePath.filename()).wstring();
+		auto targetKey = (std::filesystem::weakly_canonical(transaction.Target().parent_path(), targetIdentityError) / transaction.Target().filename()).wstring();
+		if(sourceIdentityError || targetIdentityError) {
+			lastSaveResult.reason = "Cannot resolve scene source/target identity before save publication.";
+			return false;
+		}
 #if defined(_WIN32)
 		// Windows source paths are case-insensitive even when a Save As caller
 		// uses a different spelling of the original path.

@@ -33,6 +33,10 @@ namespace {
 			if (!completion) return;
 			if (checkpoint && checkpoint->holdBeforeRetirement && checkpoint->entered.load(std::memory_order_acquire)) {
 				checkpoint->retirementEntered.store(true, std::memory_order_release);
+				// A release store publishes entry but cannot wake a parked atomic
+				// waiter by itself. Notify after the value changes, before parking
+				// this owner on the separate retirement-release checkpoint.
+				checkpoint->retirementEntered.notify_all();
 				while (!checkpoint->retirementReleased.load(std::memory_order_acquire)) checkpoint->retirementReleased.wait(false, std::memory_order_acquire);
 			}
 			if (checkpoint) { checkpoint->retired.store(true, std::memory_order_release); checkpoint->retired.notify_all(); }

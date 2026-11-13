@@ -95,6 +95,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <new>
 #include <fstream>
 #include <initializer_list>
@@ -124,6 +125,45 @@ namespace TerraEngine::Editor::Automation
 	namespace
 	{
 		using AutomationOperationId = std::uint64_t;
+
+		bool ResolveContainedAutomationPath(const std::filesystem::path& root,
+			const std::filesystem::path& candidate, std::filesystem::path& resolved)
+		{
+			// Resolve existing parents and directory redirects before any content I/O.
+			// Compare whole components: a sibling named AssetsElse is not under Assets.
+			resolved.clear();
+			if(root.empty() || candidate.empty()) return false;
+			std::error_code error;
+			const auto canonicalRoot = std::filesystem::weakly_canonical(root, error);
+			if(error || canonicalRoot.empty()) return false;
+			const auto canonicalCandidate = std::filesystem::weakly_canonical(candidate, error);
+			if(error || canonicalCandidate.empty()) return false;
+			auto child = canonicalCandidate.begin();
+			for(const auto& part : canonicalRoot) {
+				if(child == canonicalCandidate.end() || part != *child) return false;
+				++child;
+			}
+			resolved = canonicalCandidate;
+			return true;
+		}
+
+		bool ResolveContainedAutomationAssetPath(const std::filesystem::path& assetRoot,
+			const std::filesystem::path& candidate, std::filesystem::path& resolved)
+		{
+			// Reject raw parent components before the platform canonicalizer can
+			// collapse junction/.. into a different, apparently contained spelling.
+			if(std::find(candidate.begin(), candidate.end(), std::filesystem::path("..")) != candidate.end()) return false;
+			std::filesystem::path canonical;
+			if(!AssetDatabase::ResolveContainedAssetIoPath(assetRoot, candidate, canonical)) return false;
+			std::error_code error;
+			const auto canonicalRoot = std::filesystem::canonical(assetRoot, error);
+			if(error) return false;
+			// Canonical paths decide containment, but the catalog is keyed by its
+			// configured Assets-root spelling. Reattach the verified relative target
+			// so a symlinked project root (or an in-root alias) still finds metadata.
+			resolved = (assetRoot / canonical.lexically_relative(canonicalRoot)).lexically_normal();
+			return true;
+		}
 
 		constexpr AutomationOperationId AutomationOperation(std::string_view name)
 		{
@@ -1970,7 +2010,9 @@ namespace TerraEngine::Editor::Automation
 				{"resultCount", plan.results.size()},
 				{"diagnostics", diagnostics},
 				{"droppedExecutionRecordCount", plan.droppedExecutionRecordCount},
-				{"executionTelemetry", nlohmann::json{{"detailIncluded", includeDetails}, {"executionRecords", executionRecords}, {"dependencyEdges", dependencyEdges}, {"workerTelemetryGeneration", telemetry->generation}, {"workerTelemetrySamplingIntervalDispatches", telemetry->samplingIntervalDispatches}, {"workerHistoryCapacityPerWorker", telemetry->historyCapacityPerWorker}, {"droppedWorkerHistorySampleCount", telemetry->droppedHistorySampleCount}, {"workers", workers}, {"conditionalFlush", nlohmann::json{{"afterPhysicsActive", schedule.afterPhysicsFlushActive}, {"consumer", schedule.afterPhysicsConsumer}, {"reason", schedule.afterPhysicsReason}}}}},
+				// Report this editor process's hardware hint alongside its actual
+				// workers; zero means unknown, so callers cannot infer max scaling.
+				{"executionTelemetry", nlohmann::json{{"hardwareConcurrency", std::thread::hardware_concurrency()}, {"hardwareConcurrencySource", "child-std-thread-hardware-concurrency"}, {"detailIncluded", includeDetails}, {"executionRecords", executionRecords}, {"dependencyEdges", dependencyEdges}, {"workerTelemetryGeneration", telemetry->generation}, {"workerTelemetrySamplingIntervalDispatches", telemetry->samplingIntervalDispatches}, {"workerHistoryCapacityPerWorker", telemetry->historyCapacityPerWorker}, {"droppedWorkerHistorySampleCount", telemetry->droppedHistorySampleCount}, {"workers", workers}, {"conditionalFlush", nlohmann::json{{"afterPhysicsActive", schedule.afterPhysicsFlushActive}, {"consumer", schedule.afterPhysicsConsumer}, {"reason", schedule.afterPhysicsReason}}}}},
 				{"migrationSummary", SerializeArchitectureMigrationSummary(engine->GetArchitectureMigrationSummary())},
 				{"workerCoverage", SerializeWorkerCoverage(engine->GetWorkerCoverageReport())},
 				{"runtimeLayout", nlohmann::json{
@@ -2619,6 +2661,10 @@ namespace TerraEngine::Editor::Automation
 		// AnimationAutomationJobs loads only sealed published snapshots here; no UI,
 		// MCP connection, or job.get request participates in capture ownership.
 		AnimationAutomationJobs(jobService).PumpActiveRecordingsFromPublishedSnapshots();
+		// Cooking and file staging already run on workers. This existing protected
+		// boundary validates/renames ready outputs and retires durable job receipts;
+		// disconnected clients therefore cannot leave completed builds queued.
+		AnimationAutomationJobs(jobService).PumpActiveMotionDatabaseBuilds();
 	}
 
 	bool EditorAutomationService::RestoreRendererEfficiencySourcesAtProtectedFrame(std::string& error)
@@ -3266,7 +3312,9 @@ namespace TerraEngine::Editor::Automation
 						rendererEfficiencyValidation.CancelPendingFixtureWorkAtProtectedFrame(TerraEngine::Scene::SceneMutationQueue::Instance());
 						renderer->ClearRendererEfficiencyFixtureIntent(rendererEfficiencyValidation.Status().value("operationId", std::string{}));
 						ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame();
-			std::string sourceRestoreError; (void)RestoreRendererEfficiencySourcesAtProtectedFrame(sourceRestoreError);
+			std::string sourceRestoreError;
+						if(!RestoreRendererEfficiencySourcesAtProtectedFrame(sourceRestoreError))
+							rendererEfficiencyValidation.ReportRestorationFailure("Owned source restoration failed: " + sourceRestoreError);
 					}
 					if(!rendererEfficiencyValidation.Active() && rendererEfficiencyValidation.PriorToken().valid)
 						(void)renderer->QueueRendererEfficiencyRestore(rendererEfficiencyValidation.PriorToken());
@@ -3971,6 +4019,9 @@ namespace TerraEngine::Editor::Automation
 			response = dispatched.ok
 				? BuildSuccess(requestId, dispatched.message, dispatched.data)
 				: BuildError(requestId, dispatched.error, dispatched.message);
+			// Unavailable metrics remain explicit nulls on failed capabilities too.
+			// Keep payload data under its envelope; it cannot replace ok/error fields.
+			if(!dispatched.ok && !dispatched.data.is_null()) response["data"] = dispatched.data;
 			response["correlationId"] = request.correlationId;
 		}
 
@@ -4434,6 +4485,8 @@ namespace TerraEngine::Editor::Automation
 			// Excluding it lets a retry that omitted an explicit correlation ID replay
 			// the original receipt instead of conflicting with the bridge-generated ID.
 			semanticArguments.erase("correlationId");
+			// Import generation is synthesized by the server, not part of client intent.
+			if(isImport) semanticArguments.erase("expectedGeneration");
 			const IdempotencyDecision decision = idempotencyStore.Begin({
 				idempotencyClientScope,
 				std::string(operationName),
@@ -6427,6 +6480,11 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("scene.list_objects")) return HandleSceneListObjects(arguments, requestId);
 		if (operation == AutomationOperation("scene.open"))
 		{
+			// Automation cannot answer the editor's save/discard dialog. Require a
+			// save before even reloading the disk cache, preserving edits and undo.
+			if (SceneManager::Instance().IsActiveSceneDirty())
+				return BuildError(requestId, ErrorCategory::Validation,
+					"Save the active scene before opening another scene; unsaved edits would be lost.");
 			nlohmann::json validation = ValidateProjectRelativePath(arguments, "path", requestId);
 			if (!validation.value("ok", false)) return validation;
 			const std::filesystem::path projectRelativePath = validation["path"].get<std::string>();
@@ -6530,10 +6588,13 @@ namespace TerraEngine::Editor::Automation
 			state["sceneGeneration"] = snapshot.sceneGeneration;
 			return BuildSuccess(requestId, "Read project state.", std::move(state));
 		}
-		const auto playStateData = []() {
+		const auto playStateData = [this]() {
 			const ScriptingSystem& scripting = ScriptingSystem::Instance();
 			const std::string currentState = !scripting.IsRunning() ? "stopped" : (scripting.IsPaused() ? "paused" : "playing");
-			return nlohmann::json{{"currentState", currentState}, {"pendingTransition", nullptr}};
+			// Keep stopped authority until preparation is complete, while exposing
+			// the admitted target through the existing nullable transition field.
+			return nlohmann::json{{"currentState", currentState}, {"pendingTransition",
+				mainEditor && mainEditor->IsPlayModeEntryPending() ? nlohmann::json("playing") : nlohmann::json(nullptr)}};
 		};
 		if (operation == AutomationOperation("play.state"))
 			return BuildSuccess(requestId, "Read Play Mode state.", playStateData());
@@ -6565,7 +6626,9 @@ namespace TerraEngine::Editor::Automation
 					{"editorMetadataDeferred", readiness.editorMetadataDeferred},
 					{"sceneSource", readiness.sceneReadinessSource}
 				};
-				return BuildSuccess(requestId, "Entered Play Mode with a complete authored scene.", std::move(state));
+				return BuildSuccess(requestId, mainEditor->IsPlayModeEntryPending()
+					? "Play Mode is preparing terrain collision; poll play.state for completion."
+					: "Entered Play Mode with a complete authored scene.", std::move(state));
 			}
 			else if (operation == AutomationOperation("play.pause"))
 			{
@@ -6587,7 +6650,13 @@ namespace TerraEngine::Editor::Automation
 			}
 			else if (operation == AutomationOperation("play.exit"))
 			{
-				if (current == "stopped") return playError(ErrorCategory::Conflict, "Play Mode is not running.");
+				if (current == "stopped") {
+					if(mainEditor && mainEditor->IsPlayModeEntryPending()) {
+						mainEditor->StopPlayMode();
+						return BuildSuccess(requestId, "Cancelled pending Play Mode entry.", playStateData());
+					}
+					return playError(ErrorCategory::Conflict, "Play Mode is not running.");
+				}
 				if(mainEditor == nullptr) return playError(ErrorCategory::Unavailable, "The native editor lifecycle coordinator is unavailable.");
 				mainEditor->StopPlayMode();
 				state = playStateData();
@@ -8093,7 +8162,10 @@ namespace TerraEngine::Editor::Automation
 			{
 				return std::nullopt;
 			}
-			return (editorContext->projectManager->GetProjectRoot() / relative).lexically_normal();
+			std::filesystem::path resolved;
+			const auto root = editorContext->projectManager->GetProjectRoot();
+			if(!ResolveContainedAutomationPath(root, root / relative, resolved)) return std::nullopt;
+			return resolved;
 		};
 		if (operation == AutomationOperation("scene.list"))
 		{
@@ -8992,9 +9064,23 @@ namespace TerraEngine::Editor::Automation
 
 	nlohmann::json EditorAutomationService::HandleSceneSave(const nlohmann::json& arguments, const std::string& requestId)
 	{
-		const bool saved = arguments.contains("path") && arguments["path"].is_string()
-			? SceneManager::Instance().SaveScene(arguments["path"].get<std::string>())
-			: SceneManager::Instance().SaveScene();
+		if(editorContext == nullptr || editorContext->projectManager == nullptr || !editorContext->projectManager->HasActiveProject())
+			return BuildError(requestId, ErrorCategory::MissingTarget, "An active project is required to save a scene.");
+		std::filesystem::path destination;
+		if(arguments.contains("path")) {
+			const auto validation = ValidateProjectRelativePath(arguments, "path", requestId);
+			if(!validation.value("ok", false)) return validation;
+			const std::filesystem::path relative = validation["path"].get<std::string>();
+			if(relative.empty() || relative.extension() != ".tescene") return BuildError(requestId, ErrorCategory::Validation, "Scene save requires a contained .tescene destination.");
+			// Clients use Assets/...; retain older scene-root-relative spellings too.
+			destination = relative.begin()->string() == "Assets"
+				? editorContext->projectManager->GetProjectRoot() / relative
+				: SceneManager::Instance().GetSceneRoot() / relative;
+		} else if(const auto* active = SceneManager::Instance().GetActiveScene()) destination = active->sourcePath;
+		std::filesystem::path resolved;
+		if(!ResolveContainedAutomationPath(editorContext->projectManager->GetProjectRoot(), destination, resolved))
+			return BuildError(requestId, ErrorCategory::Validation, "Scene save destination must stay inside the active project.");
+		const bool saved = SceneManager::Instance().SaveScene(resolved);
 		if (!saved)
 		{
 			return BuildError(requestId, ErrorCategory::Internal,
@@ -9318,9 +9404,15 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::Validation, "Expected a project-relative path string.");
 		}
 		const std::filesystem::path relative = arguments[std::string(key)].get<std::string>();
-		if (relative.is_absolute() || relative.string().find("..") != std::string::npos)
+		if (relative.empty() || relative.has_root_name() || relative.has_root_directory() || relative.string().find("..") != std::string::npos)
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Path must stay inside the active project.");
+		}
+		if(editorContext != nullptr && editorContext->projectManager != nullptr && editorContext->projectManager->HasActiveProject()) {
+			std::filesystem::path resolved;
+			const auto root = editorContext->projectManager->GetProjectRoot();
+			if(!ResolveContainedAutomationPath(root, root / relative, resolved))
+				return BuildError(requestId, ErrorCategory::Validation, "Path must stay inside the active project.");
 		}
 		return nlohmann::json{{"ok", true}, {"path", relative.generic_string()}};
 	}
@@ -9335,11 +9427,23 @@ namespace TerraEngine::Editor::Automation
 		std::filesystem::path relative = validation["path"].get<std::string>();
 		if (!relative.empty() && relative.begin()->string() == "Assets")
 		{
-			relative = std::filesystem::relative(relative, "Assets");
+			relative = relative.lexically_relative("Assets");
 		}
 		if (relative.empty())
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Asset path must name a file under Assets.");
+		}
+		if(editorContext != nullptr && editorContext->assetDatabase != nullptr) {
+			std::filesystem::path resolved;
+			const auto root = editorContext->assetDatabase->GetAssetRoot();
+			if(!ResolveContainedAutomationAssetPath(root, root / relative, resolved))
+				return BuildError(requestId, ErrorCategory::Validation, "Asset path must stay inside the active project's Assets folder.");
+			if(editorContext->projectManager != nullptr && editorContext->projectManager->HasActiveProject()) {
+				std::filesystem::path projectResolved;
+				if(!ResolveContainedAutomationPath(editorContext->projectManager->GetProjectRoot(), resolved, projectResolved))
+					return BuildError(requestId, ErrorCategory::Validation, "Asset path must stay inside the active project.");
+			}
+			return nlohmann::json{{"ok", true}, {"path", resolved.lexically_relative(root).generic_string()}, {"absolutePath", resolved.generic_string()}};
 		}
 		return nlohmann::json{{"ok", true}, {"path", relative.generic_string()}};
 	}
@@ -9410,7 +9514,7 @@ namespace TerraEngine::Editor::Automation
 		}
 
 		const std::filesystem::path relative = validation["path"].get<std::string>();
-		const std::filesystem::path absolutePath = editorContext->assetDatabase->GetAssetRoot() / relative;
+		const std::filesystem::path absolutePath = validation["absolutePath"].get<std::string>();
 		if (!std::filesystem::exists(absolutePath) || std::filesystem::is_directory(absolutePath))
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset content file was not found.", relative.generic_string());
@@ -9484,20 +9588,10 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset database is not available.");
 		}
 		const std::filesystem::path relative = validation["path"].get<std::string>();
-		const std::filesystem::path absolutePath = editorContext->assetDatabase->GetAssetRoot() / relative;
+		const std::filesystem::path absolutePath = validation["absolutePath"].get<std::string>();
 		if (!std::filesystem::exists(absolutePath) || std::filesystem::is_directory(absolutePath))
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset file was not found.", relative.generic_string());
-		}
-		const std::filesystem::path canonicalAssetRoot = std::filesystem::weakly_canonical(editorContext->assetDatabase->GetAssetRoot());
-		const std::filesystem::path canonicalAssetPath = std::filesystem::weakly_canonical(absolutePath);
-		const std::string rootText = canonicalAssetRoot.generic_string();
-		const std::string assetText = canonicalAssetPath.generic_string();
-		if (assetText.size() < rootText.size()
-			|| assetText.compare(0, rootText.size(), rootText) != 0
-			|| (assetText.size() > rootText.size() && assetText[rootText.size()] != '/'))
-		{
-			return BuildError(requestId, ErrorCategory::Validation, "Asset import path must stay inside the active project's Assets folder.", relative.generic_string());
 		}
 		if (arguments.value("dryRun", false))
 		{
@@ -9759,6 +9853,15 @@ namespace TerraEngine::Editor::Automation
 		const std::string diagnosticsLevel = arguments.value("diagnosticsLevel", "summary");
 		const auto started = std::chrono::steady_clock::now();
 
+		const auto assetRoot = editorContext->assetDatabase->GetAssetRoot();
+		const auto resolveRebuildPath = [&](const std::filesystem::path& candidate, std::filesystem::path& resolved) {
+			if(!ResolveContainedAutomationAssetPath(assetRoot, candidate, resolved)) return false;
+			if(editorContext->projectManager != nullptr && editorContext->projectManager->HasActiveProject()) {
+				std::filesystem::path projectResolved;
+				if(!ResolveContainedAutomationPath(editorContext->projectManager->GetProjectRoot(), resolved, projectResolved)) return false;
+			}
+			return true;
+		};
 		std::vector<std::filesystem::path> rebuildTargets;
 		if (LowerAscii(target) == "all")
 		{
@@ -9772,8 +9875,22 @@ namespace TerraEngine::Editor::Automation
 		}
 		else
 		{
+			// Validate raw spelling before metadata resolution normalizes it. Resolving
+			// junction/../ paths after lexical collapse could validate a different file.
 			std::filesystem::path absolutePath;
-			const AssetMetadata* metadata = ResolveAutomationAssetMetadata(*editorContext->assetDatabase, target, absolutePath);
+			const AssetMetadata* metadata = nullptr;
+			if(!TerraEngine::ParseUUID(target)) {
+				std::filesystem::path relative(target);
+				if(std::find(relative.begin(), relative.end(), std::filesystem::path("..")) != relative.end())
+					return BuildError(requestId, ErrorCategory::Validation, "Rebuild target must stay inside the active project's Assets folder.");
+				if(!relative.is_absolute() && (relative.has_root_name() || relative.has_root_directory()))
+					return BuildError(requestId, ErrorCategory::Validation, "Rebuild target must stay inside the active project's Assets folder.");
+				if(!relative.is_absolute() && !relative.empty() && LowerAscii(relative.begin()->string()) == "assets") relative = relative.lexically_relative(*relative.begin());
+				if(!resolveRebuildPath(relative.is_absolute() ? relative : assetRoot / relative, absolutePath))
+					return BuildError(requestId, ErrorCategory::Validation, "Rebuild target must stay inside the active project's Assets folder.");
+			} else {
+				metadata = ResolveAutomationAssetMetadata(*editorContext->assetDatabase, target, absolutePath);
+			}
 			if (metadata == nullptr && std::filesystem::exists(absolutePath))
 			{
 				rebuildTargets.push_back(absolutePath);
@@ -9787,12 +9904,19 @@ namespace TerraEngine::Editor::Automation
 				return BuildError(requestId, ErrorCategory::MissingTarget, "Virtual geometry rebuild target was not found.", target);
 			}
 		}
+		// Validate the complete batch, including UUID/catalog paths, before the
+		// first importer can create metadata or generated output for any target.
+		for(auto& path : rebuildTargets) {
+			std::filesystem::path resolved;
+			if(!resolveRebuildPath(path, resolved))
+				return BuildError(requestId, ErrorCategory::Validation, "Rebuild target must stay inside the active project's Assets folder.");
+			path = std::move(resolved);
+		}
 
 		nlohmann::json rebuiltAssets = nlohmann::json::array();
 		nlohmann::json skippedAssets = nlohmann::json::array();
 		nlohmann::json failedAssets = nlohmann::json::array();
 		nlohmann::json warnings = nlohmann::json::array();
-		const std::filesystem::path assetRoot = editorContext->assetDatabase->GetAssetRoot();
 
 		for (const std::filesystem::path& absolutePath : rebuildTargets)
 		{
@@ -10641,6 +10765,9 @@ namespace TerraEngine::Editor::Automation
 				}
 				rendererEfficiencyShaderWork.reset();
 			}
+			// Retry the previous operation before Start can replace its identity or saved bytes.
+			if(!RestoreRendererEfficiencySourcesAtProtectedFrame(error))
+				return BuildError(requestId, ErrorCategory::Conflict, "Prior owned source restoration is unresolved: " + error);
 			if(!rendererEfficiencyValidation.Start(editorContext->projectManager->GetProjectRoot(), BuildAutomationStateSnapshot().projectGeneration,
 				arguments, renderer->GetRendererEfficiencyOptionsSnapshot(), error)) return BuildError(requestId, ErrorCategory::Validation, error);
 			if(!rendererEfficiencyValidation.InstalledSteps().is_null() && editorContext->assetDatabase)

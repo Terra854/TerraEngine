@@ -1,3 +1,4 @@
+#include "RuntimeMemorySafetyFrameCandidates.h"
 // Matching-ABI normal-renderer validation host. See README for prerequisites.
 // Usage: --runtime-root <installed Build> --project-root <isolated fixture>
 // --output-root <fresh directory> --archive-receipt <immutable reference.json>.
@@ -634,6 +635,7 @@ int main(int argc, char** argv)
 			{"settingsGeneration", options.settingsGeneration}, {"rendererSessionGeneration", options.rendererSessionGeneration}};
 		std::uint64_t cursor = renderer.GetRendererEfficiencyEvidenceBatch(0).batchSequence;
 		Json rows = Json::array();
+		TerraEngine::Validation::RuntimeMemorySafety::ParityFrameArtifactRows ownedArtifactRows(outputRoot);
 		std::map<std::uint64_t, std::set<std::uint64_t>> completeCommands;
 		std::map<std::uint64_t, std::set<std::pair<std::uint64_t, bool>>> seenPurposes;
 		const auto expectedAdmittedCommands = inputs["cameras"].size();
@@ -653,8 +655,20 @@ int main(int argc, char** argv)
 #endif
 			// Capture the completed final shared Game View for the same frame before
 			// advancing. Lighting staging receipts can arrive several frames later.
-			// Sixteen pinned candidates bound memory/disk while preserving exact joins.
-			if(normalOutputs.size() < 16U) {
+			// The latest sixteen pinned candidates bound memory/disk while preserving exact joins.
+			if(TerraEngine::Validation::RuntimeMemorySafety::CanCaptureParityFrameCandidate(normalOutputs,
+				[&](std::uint64_t retiredFrame, const Json&) {
+					// Only remove the typed filename this host created under its owned
+					// output root; never follow a path supplied by evidence JSON.
+					const auto retiredPath = outputRoot / ("normal-frame-" + std::to_string(retiredFrame) + ".png");
+					Require(std::filesystem::remove(retiredPath), "Owned rolling parity PNG could not be retired");
+					// Retire the same frame's exact three-file row owners and receipt
+					// entries too, keeping the bounded comparator input self-consistent.
+					ownedArtifactRows.Retire(retiredFrame, rows);
+					commandMetadata.erase(retiredFrame);
+					completeCommands.erase(retiredFrame);
+					seenPurposes.erase(retiredFrame);
+				})) {
 				RenderCaptureRequest request; request.sourceKind = RenderCaptureSourceKind::GameView;
 				request.viewType = RenderViewType::Game; request.sourceName = "runtime-memory-safety-normal-final";
 				request.targetSize = {1280U, 720U}; request.freshness = "latestCompleted";
@@ -700,6 +714,7 @@ int main(int argc, char** argv)
 				if(row.kind != RendererEfficiencyEvidenceKind::Lighting || row.fixtureCorrelation.operationId != intent.correlation.operationId) continue;
 				Require(row.preparationSettled && row.commandSerial && row.frameSerial && row.fixtureControlGeneration == admitted.controlGeneration,
 					"Native command metadata lacks prepared control/frame identity");
+				if (!normalOutputs.empty() && row.frameSerial < normalOutputs.begin()->first) continue;
 				const auto metadataKey = std::make_pair(row.commandSerial, row.analysisPurpose);
 				Json metadata{{"frameSerial", row.frameSerial}, {"commandSerial", row.commandSerial}, {"analysisPurpose", row.analysisPurpose},
 					{"status", static_cast<unsigned>(row.status)}, {"reason", row.unavailableReason}, {"submitSerial", row.submitSerial},
@@ -719,9 +734,10 @@ int main(int argc, char** argv)
 				Require(upload.available && upload.succeeded && upload.payloadLightIds.size() == upload.activeRecordCount,
 					"Actual selected light IDs missing");
 				Require(seenPurposes[row.frameSerial].emplace(row.commandSerial, row.analysisPurpose).second, "Repeated actual command/purpose");
-				const auto prefix = "row-" + std::to_string(rows.size());
-				const auto payload = outputRoot / (prefix + ".lighting.bin"), color = outputRoot / (prefix + ".color.bin");
-				const auto rgbaPath = outputRoot / (prefix + ".rgba8.bin");
+				// File identity is independent of the shrinking receipt row count.
+				const auto paths = ownedArtifactRows.Allocate(row.frameSerial);
+				const auto& payload = paths[0]; const auto& color = paths[1];
+				const auto& rgbaPath = paths[2];
 				// Use this executable's matching runtime conversion, including its HDR
 				// gamma/rounding behavior. The comparator never approximates native
 				// normalization and retains source format/raw hashes for every image.
@@ -745,11 +761,7 @@ int main(int argc, char** argv)
 					completeCommands[row.frameSerial].insert(row.commandSerial);
 
 			}
-			for(const auto& [nativeFrame, metadata] : commandMetadata) {
-				if(metadata.size() == 2U * expectedAdmittedCommands && !completeCommands[nativeFrame].empty() && completeCommands[nativeFrame].size() <= expectedAdmittedCommands && normalOutputs.contains(nativeFrame)) {
-					selectedFrame = nativeFrame; break;
-				}
-			}
+			selectedFrame = TerraEngine::Validation::RuntimeMemorySafety::SelectCompleteParityFrameCandidate(commandMetadata, completeCommands, normalOutputs, expectedAdmittedCommands);
 		}
 		// Retain the accepted artifacts and last actual view even on an incomplete
 		// cohort, so a failed lane explains missing purposes/commands precisely.

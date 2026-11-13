@@ -1,27 +1,74 @@
 #include "TestHarness.h"
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include <fstream>
 #include <iterator>
 #include <string>
 namespace TerraEngine::Tests
 {
+	namespace
+	{
+		// This reader validates the evidence document contract only. It cannot
+		// establish that the native runner actually measured the supplied facts.
+		// Installed soak execution and its raw receipts remain separate acceptance.
+		bool IsCompleteSoakDocument(const nlohmann::json& value)
+		{
+			if(!value.is_object()) return false;
+			const auto isTrue = [&value](const char* key) {
+				const auto found = value.find(key);
+				return found != value.end() && found->is_boolean() && found->get<bool>();
+			};
+			const auto status = value.find("status");
+			const auto testRun = value.find("testRun");
+			const auto exitCode = value.find("runnerExitCode");
+			const auto samples = value.find("measuredSampleCount");
+			return status != value.end() && status->is_string()
+				&& status->get<std::string>() == "measured-result-published"
+				&& isTrue("boundedCounters") && isTrue("gateDurationSatisfied")
+				&& isTrue("runtimeDurationSatisfied")
+				&& testRun != value.end() && testRun->is_boolean() && !testRun->get<bool>()
+				&& exitCode != value.end() && exitCode->is_number_integer() && *exitCode == 0
+				&& samples != value.end() && samples->is_number_integer() && *samples > 0;
+		}
+	}
+
 	void RegisterVirtualGeometryProductionSoakTests(TestRegistry &registry)
 	{
-		registry.Add("VirtualGeometry.Engine.ProductionSoak.BoundedGrowthEvidenceIsRequired",
+		registry.Add("VirtualGeometry.Evidence.ProductionSoakDocumentContractRejectsMissingOrIncomplete",
 			[](TestContext &c)
 			{
-				const auto root = std::filesystem::path(TERRAENGINE_SOURCE_DIR);
-				const auto p = root / "out/evidence/virtual-geometry-production/production-soak.json";
-				if(!std::filesystem::exists(p))
+				// These are deliberately synthetic protocol inputs, never a saved
+				// production result or proof of Vulkan/30-minute soak completion.
+				const nlohmann::json synthetic = {
+					{"status", "measured-result-published"}, {"boundedCounters", true},
+					{"gateDurationSatisfied", true}, {"runtimeDurationSatisfied", true},
+					{"testRun", false}, {"runnerExitCode", 0}, {"measuredSampleCount", 1}};
+				c.Expect(IsCompleteSoakDocument(synthetic), "A synthetic complete document must satisfy the parser contract only.");
+				c.Expect(!IsCompleteSoakDocument(nullptr), "Missing evidence must be rejected.");
+				c.Expect(!IsCompleteSoakDocument(nlohmann::json::parse("{", nullptr, false)), "Malformed evidence must be rejected.");
+				for(const auto& item : synthetic.items())
 				{
-					c.Expect(!std::filesystem::exists(root / "out/evidence/045/production-soak.json"),
-						"Retired evidence paths must not satisfy the production soak gate.");
-					return;
+					auto missing = synthetic;
+					missing.erase(item.key());
+					c.Expect(!IsCompleteSoakDocument(missing), "Every required evidence field must be present.");
 				}
-				std::ifstream input(p);
-				const std::string text{ std::istreambuf_iterator<char>(input), {} };
-				c.Expect(text.find("boundedGrowth") != std::string::npos && text.find("status") != std::string::npos,
-					"A recorded production soak must include bounded-growth and status fields.");
+				for(const char* field : {"boundedCounters", "gateDurationSatisfied", "runtimeDurationSatisfied"})
+				{
+					auto invalid = synthetic;
+					invalid[field] = false;
+					c.Expect(!IsCompleteSoakDocument(invalid), "False bounds or duration must not satisfy the contract.");
+					invalid[field] = "true";
+					c.Expect(!IsCompleteSoakDocument(invalid), "Text cannot substitute for a measured boolean.");
+				}
+				for(const auto& change : nlohmann::json::array({
+					nlohmann::json{{"status", "incomplete"}}, nlohmann::json{{"testRun", true}},
+					nlohmann::json{{"runnerExitCode", 2}}, nlohmann::json{{"measuredSampleCount", 0}},
+					nlohmann::json{{"measuredSampleCount", -1}}}))
+				{
+					auto invalid = synthetic;
+					invalid.update(change);
+					c.Expect(!IsCompleteSoakDocument(invalid), "Incomplete, test-only, failed or empty runs must be rejected.");
+				}
 			});
 		registry.Add("VirtualGeometry.Engine.ProductionSoak.RequiredDurationIsThirtyMinutes",
 			[](TestContext &c)

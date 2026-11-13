@@ -697,6 +697,8 @@ namespace TerraEngine::Editor::Automation
 
 	nlohmann::json EditorMcpBridge::CallToolLocked(std::string_view name, const nlohmann::json& arguments)
 	{
+		const std::string requestId = NextRequestId();
+		try {
 		bool enabled = false;
 		WriteMode capturedWriteMode = WriteMode::ReadOnly;
 		{
@@ -711,10 +713,9 @@ namespace TerraEngine::Editor::Automation
 		}
 		if (!enabled || !accepting)
 		{
-			return service.BuildError(NextRequestId(), ErrorCategory::Permission, "The MCP bridge is disabled.");
+			return service.BuildError(requestId, ErrorCategory::Permission, "The MCP bridge is disabled.");
 		}
 
-		const std::string requestId = NextRequestId();
 		// Policy follows the same provider-owned descriptor used by discovery and
 		// dispatch. This also covers component/subsystem declarations registered
 		// after startup without adding them to a legacy bridge capability list.
@@ -749,6 +750,23 @@ namespace TerraEngine::Editor::Automation
 			RecordActivity(result.value("ok", false) ? ActivityEventType::Request : ActivityEventType::Rejection, requestId, std::string(name), result.value("message", ""), result.value("status", "completed"));
 		}
 		return result;
+		}
+		catch (...) {
+			// Preserve this admitted request's identity for direct and queued callers.
+			ErrorCategory category = ErrorCategory::Internal;
+			std::string message = "Automation handler failed with an unknown exception.";
+			try { throw; }
+			catch(const nlohmann::json::exception& error) { category = ErrorCategory::Validation; message = "Malformed automation request: " + std::string(error.what()); }
+			catch(const std::exception& error) { message = "Automation handler failed: " + std::string(error.what()); }
+			catch(...) {}
+			auto result = service.BuildError(requestId, category, message);
+			if(arguments.is_object()) {
+				const auto correlation = arguments.find("correlationId");
+				if(correlation != arguments.end() && correlation->is_string()) result["correlationId"] = *correlation;
+			}
+			RecordActivity(ActivityEventType::Rejection, requestId, std::string(name), message, "rejected");
+			return result;
+		}
 	}
 
 	nlohmann::json EditorMcpBridge::SubmitToolCall(

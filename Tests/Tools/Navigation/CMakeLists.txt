@@ -28,6 +28,15 @@ set_target_properties(TerraEngineNavigationValidation PROPERTIES
 	OUTPUT_NAME TerraEngineNavigationAcceptance
 	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Build/Tests/Tools/Navigation"
 )
+if(UNIX AND NOT APPLE)
+	# Keep the ELF build artifact outside its install destination. Installing a
+	# file over itself lets CMake's RPATH check remove the only source copy.
+	# The installed tool then resolves the bundled Engine library from Build.
+	set_target_properties(TerraEngineNavigationValidation PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+		BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../../../Engine")
+endif()
 
 # The installed acceptance wrapper invokes the real engine runner by this
 # stable name; keep it out of the normal SDK and package it beside the tool.

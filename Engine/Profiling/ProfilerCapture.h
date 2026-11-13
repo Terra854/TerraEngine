@@ -494,6 +494,8 @@ struct ProfilerFrameRecord
 	std::vector<ProtectedBoundaryRecord> protectedBoundaries;
 	std::vector<WorkerTelemetryRecord> workerTelemetry;
 	std::vector<WorkloadExecutionRecord> workloadExecutions;
+	// False means omitted/legacy/pressure-discarded detail, not measured zero.
+	bool workloadExecutionsAvailable = false;
 	std::vector<PresentationWaitRecord> presentationWaits;
 	std::optional<FrameResponsivenessRecord> responsiveness;
 	std::optional<PhysicsWorkVolumeRecord> physicsWorkVolume;
@@ -528,7 +530,9 @@ enum class ProfilerCaptureLossReason : std::uint8_t
 	None,
 	QueuePressure,
 	DestinationUnavailable,
-	CoreBudgetExceeded
+	CoreBudgetExceeded,
+	// Optional scheduler evidence was malformed; core frame recording continues.
+	InvalidEvidence
 };
 
 // ProfilerCaptureLossRange coalesces adjacent frames that lost the same class
@@ -573,6 +577,11 @@ struct ProfilerSealedFrame
 	// consuming the bytes reserved for a later compact frame core.
 	bool compactCoreOnly = false;
 };
+
+// Validate the optional workload family before persistence. One bad row makes
+// that family's evidence unavailable, with an explicit loss receipt; timing,
+// samples and later frames remain recordable. The strict wire codec is unchanged.
+void PrepareProfilerJournalWorkloadEvidence(ProfilerSealedFrame& sealed);
 
 // ProfilerCaptureHealth is a bounded live snapshot.  Every field is a scalar
 // so an open Profiler window can report recording health without copying the

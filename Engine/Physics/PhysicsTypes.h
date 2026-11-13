@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <string>
 #include <mutex>
 #include <new>
 #include <string_view>
@@ -311,6 +313,14 @@ namespace TerraEngine::Physics {
 
 	// Immutable terrain samples stay provider-neutral until a backend creates a
 	// replacement static shape. Holes are one bit per 256 by 256 terrain cell.
+	struct TerrainCollisionCookedData
+	{
+		std::shared_ptr<const std::vector<std::byte>> payload;
+		std::string formatFamily, provider, providerVersion, providerRevision;
+		std::uint32_t formatVersion = 0u;
+		std::uint64_t checksum = 0u, recipeHash = 0u;
+		std::size_t derivedGeometryBytes = 0u; // Conservative worker geometry-buffer bound, not actual native bytes.
+	};
 	struct TerrainHeightFieldRecipe
 	{
 		static constexpr std::uint32_t kGridExtent = 257u;
@@ -326,6 +336,15 @@ namespace TerraEngine::Physics {
 		std::vector<std::int32_t> heightMillimetres;
 		std::vector<std::uint8_t> holeBits;
 		std::vector<std::uint16_t> materialIndices;
+		// The whole immutable root identifies neighbor samples as well as this area.
+		// Frozen owners keep captured edges alive through worker preparation/adoption.
+		std::uint64_t collisionDependencyHash = 0u;
+		std::uint64_t collisionSourceRootLow = 0u, collisionSourceRootHigh = 0u;
+		std::uint64_t collisionSourceGeneration = 0u;
+		std::vector<std::shared_ptr<const void>> collisionSourceOwners;
+		// Opaque provider serialization contains its worker-built BVH. Protected
+		// publication validates metadata/restores it; it does not rebuild the mesh.
+		std::shared_ptr<const TerrainCollisionCookedData> cookedCollision;
 		[[nodiscard]] bool IsComplete() const noexcept
 		{
 			return terrainAssetId != TerraEngine::EMPTY_UUID && authoredGeneration != 0u && authoredHash != 0u
@@ -334,6 +353,10 @@ namespace TerraEngine::Physics {
 				&& (materialIndices.empty() || materialIndices.size() == 256u * 256u);
 		}
 	};
+
+	// Includes immutable samples, cell masks and representation settings, never
+	// transient provider pointers. Used again before protected cooked adoption.
+	[[nodiscard]] TERRAENGINE_API std::uint64_t TerrainCollisionRecipeHash(const TerrainHeightFieldRecipe& recipe);
 
 	struct PhysicsQuaternion {
 		float x = 0.0F;

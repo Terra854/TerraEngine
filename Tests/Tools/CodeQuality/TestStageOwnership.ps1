@@ -87,7 +87,7 @@ try {
 		$symbols += @{path=$definition.path;qualifiedSymbol=$definition.name;sourceSha256=$hash;signatureLine=1;
 			openingBraceOffset=$body.openingBraceOffset;closingBraceOffset=$body.spanEndOffsetExclusive-1;
 			spanEndOffsetExclusive=$body.spanEndOffsetExclusive;firstLine=$body.firstLine;lastLine=$body.lastLine;
-			codeLines=$body.codeLines;maxCodeLines=$definition.limit;symbolId=$definition.path+':'+$body.openingBraceOffset;ownershipContractIds=@('synchronous')}
+			codeLines=$body.codeLines;maxCodeLines=$definition.limit;symbolId=$definition.path+':'+$body.firstLine+':'+($body.openingBraceOffset+1);ownershipContractIds=@('synchronous')}
 		foreach($span in $spans | Select-Object -SkipLast 1) {
 			$nonCallables += @{path=$definition.path;openingBraceOffset=$span.openingBraceOffset;
 				spanEndOffsetExclusive=$span.spanEndOffsetExclusive;classification='Fixture namespace or class scope'}
@@ -99,7 +99,7 @@ try {
 	$basePath = Join-Path $script:work 'baseline-manifest.json'; WriteJson $basePath $script:baseline
 	$cases = @('valid','stale-hash','wrong-opening-offset','missing-source','duplicate-callable','missing-noncallable',
 		'duplicate-noncallable','unknown-contract','unused-contract','empty-description','wrong-helper-limit','wrong-native-count',
-		'unresolved-name','escaping-path','missing-candidate','duplicate-json-field')
+		'unresolved-name','stale-lambda-coordinate','stale-lambda-parent','stale-named-overload-location','stale-named-enclosing-function','stale-nearest-callable-parent','wrong-file-nearest-parent','non-enclosing-nearest-parent','stale-symbol-coordinate-pair','escaping-path','missing-candidate','duplicate-json-field')
 	$names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 	foreach($name in $cases) {
 		$null = $names.Add($name)
@@ -116,6 +116,16 @@ try {
 			'empty-description' { $document.candidate.ownershipContracts[0].owner=@() }
 			'wrong-helper-limit' { $document.candidate.symbols[1].maxCodeLines=500 }
 			'wrong-native-count' { $document.candidate.symbols[0].codeLines++ }
+			'stale-symbol-coordinate-pair' { $s=$document.candidate.symbols[0];$s.symbolId=$s.path+':999:1';$s.overloadDisambiguator='Named callable @ '+$s.symbolId }
+			'stale-named-enclosing-function' { $document.candidate.symbols[0].enclosingFunction='absent:1:1' }
+			'stale-nearest-callable-parent' { $document.candidate.nonCallableBraces[0].nearestCallableParent='absent:1:1' }
+			'wrong-file-nearest-parent' { $document.candidate.nonCallableBraces[0].nearestCallableParent=$document.candidate.symbols[1].symbolId }
+			'non-enclosing-nearest-parent' { $document.candidate.nonCallableBraces[0].nearestCallableParent=$document.candidate.symbols[0].symbolId }
+			'stale-named-overload-location' { $document.candidate.symbols[0].overloadDisambiguator='Named callable @ stale:999:1' }
+			# A helper already has the 400-line lambda budget; corrupt only the
+			# intended coordinate/parent field so earlier budget guards cannot mask it.
+			'stale-lambda-coordinate' { $document.candidate.symbols[1].qualifiedSymbol='Fixture::<lambda@999:1>' }
+			'stale-lambda-parent' { $s=$document.candidate.symbols[1];$coord=$s.symbolId.Substring($s.path.Length+1);$s.qualifiedSymbol="Fixture::<lambda@$coord>";$s.enclosingFunction=$s.symbolId }
 			'unresolved-name' { $document.candidate.symbols[0].qualifiedSymbol='Unknown::?' }
 			'escaping-path' { $document.candidate.sources[0].path='../escape.cpp' }
 			'missing-candidate' { $document.Remove('candidate') }
@@ -129,6 +139,10 @@ try {
 		$receipt = [IO.File]::ReadAllText($output) | ConvertFrom-Json -AsHashtable -Depth 40
 		$expectedExit=if($name -eq 'valid'){0}else{1}; $expectedStatus=if($name -eq 'valid'){'Passed'}else{'Failed'}
 		$passed=$code -eq $expectedExit -and $receipt.status -ceq $expectedStatus -and $receipt.structuralOnly -eq $true -and $receipt.semanticCompletenessProven -eq $false
+		# Negative cases qualify their named guard, rather than any failure.
+		if($name -eq 'stale-lambda-coordinate') { $passed = $passed -and $receipt.error.StartsWith('Stale lambda qualified coordinates:') }
+		if($name -eq 'stale-lambda-parent') { $passed = $passed -and $receipt.error.StartsWith('Invalid enclosing function span:') }
+		if($name -in @('wrong-file-nearest-parent','non-enclosing-nearest-parent')) { $passed = $passed -and $receipt.error.StartsWith('Invalid nearest callable parent span:') }
 		$summary.cases.Add(@{name=$name;passed=$passed;expectedExit=$expectedExit;actualExit=$code;expectedStatus=$expectedStatus;observedStatus=$receipt.status;receipt=Pin $output})
 	}
 	$source=Join-Path $script:repo 'Engine/Renderer/Frame/Helper.h'; $original=[IO.File]::ReadAllBytes($source)

@@ -21,12 +21,69 @@
 #include <exception>
 #include <mutex>
 #include <sstream>
+#include <set>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace TerraEngine::Scene {
 	namespace {
 		constexpr std::size_t kMaximumPendingNavigationSourceMutationIntents = 16384U;
+
+		struct CoalescedRequests {
+			std::vector<SceneMutationRequest> selected;
+			std::vector<SceneMutationRequest> superseded;
+			std::string error;
+		};
+
+		// Admission order stays a strict total order across every ingress. Only
+		// competing values in the highest frame of one key use logical producer
+		// identity; physical worker scheduling must never choose an authored value.
+		CoalescedRequests SelectCoalescedRequests(const std::vector<SceneMutationRequest>& raw)
+		{
+			struct Group { std::vector<std::size_t> contenders; std::size_t winner = 0; bool emitted = false; };
+			std::unordered_map<std::string, Group> groups;
+			for(std::size_t index = 0; index < raw.size(); ++index) {
+				if(raw[index].coalescingKey.empty()) continue;
+				auto& group = groups[raw[index].coalescingKey];
+				if(!group.contenders.empty() && raw[group.contenders.back()].sourceFrameOrder != raw[index].sourceFrameOrder)
+					group.contenders.clear();
+				group.contenders.push_back(index);
+				group.winner = index;
+			}
+			CoalescedRequests result;
+			for(auto& [key, group] : groups) {
+				if(group.contenders.size() < 2U) continue;
+				bool requiresLogicalOrder = false;
+				for(const auto index : group.contenders)
+					requiresLogicalOrder = requiresLogicalOrder || raw[index].ingressWorker || raw[index].logicalCoalescingOrder.has_value();
+				if(!requiresLogicalOrder) continue; // Preserve legacy main-only admission-last policy.
+				std::set<std::pair<std::uint64_t, std::uint64_t>> identities;
+				std::pair<std::uint64_t, std::uint64_t> greatest{};
+				for(const auto index : group.contenders) {
+					const auto& order = raw[index].logicalCoalescingOrder;
+					if(!order || !identities.emplace(order->producerOrdinal, order->requestOrdinal).second) {
+						// Preserve all identities on rejection, including older frames. This
+						// same decision feeds inspection, validation, and protected Apply.
+						result.error = "Competing coalesced mutations require complete unique logical producer/request ordinals.";
+						result.selected = raw;
+						return result;
+					}
+					const auto identity = std::pair{order->producerOrdinal, order->requestOrdinal};
+					if(identities.size() == 1U || identity > greatest) { greatest = identity; group.winner = index; }
+				}
+			}
+			result.selected.reserve(raw.size());
+			for(std::size_t index = 0; index < raw.size(); ++index) {
+				if(raw[index].coalescingKey.empty()) { result.selected.push_back(raw[index]); continue; }
+				auto& group = groups.at(raw[index].coalescingKey);
+				// Keep the original first-key slot, preserving existing cross-key order.
+				if(!group.emitted) { result.selected.push_back(raw[group.winner]); group.emitted = true; }
+				if(index != group.winner) result.superseded.push_back(raw[index]);
+			}
+			return result;
+		}
+
 
 		TransactionResult CanceledExecutionResult(const Transaction& transaction) {
 			TransactionResult result;
@@ -249,9 +306,15 @@ namespace TerraEngine::Scene {
 	void SceneMutationQueue::Enqueue(SceneMutationRequest request)
 	{
 		std::scoped_lock lock(requestsMutex);
+		// One admission lock establishes order for every producer. Exhaustion
+		// rejects before queue mutation rather than wrapping into an old identity.
+		if (nextSubmissionOrder == std::numeric_limits<std::uint64_t>::max())
+			throw std::overflow_error("Scene mutation submission identity is exhausted.");
+		request.ingressWorker = false;
+		request.submissionOrder = nextSubmissionOrder++;
 		if (request.requestId.empty())
 		{
-			request.requestId = "mutation-" + std::to_string(requests.size());
+			request.requestId = "mutation-" + std::to_string(request.submissionOrder);
 		}
 		requests.push_back(std::move(request));
 	}
@@ -259,9 +322,13 @@ namespace TerraEngine::Scene {
 	void SceneMutationQueue::EnqueueFromWorker(std::uint32_t workerIndex, SceneMutationRequest request)
 	{
 		std::scoped_lock lock(requestsMutex);
+		if (nextSubmissionOrder == std::numeric_limits<std::uint64_t>::max())
+			throw std::overflow_error("Scene mutation submission identity is exhausted.");
+		request.ingressWorker = true;
+		request.submissionOrder = nextSubmissionOrder++;
 		if (request.requestId.empty())
 		{
-			request.requestId = "worker-" + std::to_string(workerIndex) + "-mutation-" + std::to_string(workerBuffers.size());
+			request.requestId = "worker-" + std::to_string(workerIndex) + "-mutation-" + std::to_string(request.submissionOrder);
 		}
 		auto buffer = std::find_if(workerBuffers.begin(), workerBuffers.end(), [workerIndex](const SceneMutationWorkerBuffer& candidate) {
 			return candidate.workerIndex == workerIndex;
@@ -422,7 +489,7 @@ namespace TerraEngine::Scene {
 				{
 					return left.sourceFrameOrder < right.sourceFrameOrder;
 				}
-				return left.requestId < right.requestId;
+				return left.submissionOrder < right.submissionOrder;
 			});
 			snapshot.insert(snapshot.end(), buffer.requests.begin(), buffer.requests.end());
 		}
@@ -431,31 +498,11 @@ namespace TerraEngine::Scene {
 			{
 				return left.sourceFrameOrder < right.sourceFrameOrder;
 			}
-			return left.requestId < right.requestId;
+			return left.submissionOrder < right.submissionOrder;
 		});
 
 		if (!coalesce) return snapshot;
-		std::vector<SceneMutationRequest> coalesced;
-		coalesced.reserve(snapshot.size());
-		std::unordered_map<std::string, std::size_t> coalescedIndex;
-		for (SceneMutationRequest& request : snapshot)
-		{
-			if (request.coalescingKey.empty())
-			{
-				coalesced.push_back(std::move(request));
-				continue;
-			}
-
-			if (auto existing = coalescedIndex.find(request.coalescingKey); existing != coalescedIndex.end())
-			{
-				coalesced[existing->second] = std::move(request);
-				continue;
-			}
-
-			coalescedIndex.emplace(request.coalescingKey, coalesced.size());
-			coalesced.push_back(std::move(request));
-		}
-		return coalesced;
+		return SelectCoalescedRequests(snapshot).selected;
 	}
 
 	std::vector<Transaction> SceneMutationQueue::PendingTransactions() const
@@ -615,7 +662,8 @@ namespace TerraEngine::Scene {
 		batch.applied = false;
 		std::unordered_set<TerraEngine::UUID> deletedTargets;
 		const std::size_t rawRequestCount = Size();
-		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
+		const auto selection = SelectCoalescedRequests(SnapshotRequests(false));
+		const auto& requestSnapshot = selection.selected;
 		batch.inputMutationCount = requestSnapshot.size();
 		batch.coalescedMutationCount = rawRequestCount > requestSnapshot.size() ? rawRequestCount - requestSnapshot.size() : 0;
 
@@ -623,7 +671,9 @@ namespace TerraEngine::Scene {
 		{
 			SceneMutationResult result;
 			result.requestId = request.requestId;
-			result.accepted = true;
+			result.accepted = selection.error.empty();
+			if(!selection.error.empty()) result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request,
+				selection.error, "Assign stable logical ordinals to every competing contributor before retrying."));
 			result.sourceObjectId = request.sourceObjectId;
 			result.sourceObjectUuid = request.sourceObjectUuid;
 			result.sourceBindingId = request.sourceBindingId;
@@ -741,17 +791,9 @@ namespace TerraEngine::Scene {
 				completedNavigationSourceMutationReceipts.reserve(completedNavigationSourceMutationReceipts.size() + capturedIntents.size());
 			}
 			const auto rawSnapshot = requestCohort.SnapshotRequests(false);
-			std::vector<SceneMutationRequest> requestSnapshot;
-			std::vector<SceneMutationRequest> superseded;
-			std::unordered_map<std::string, std::size_t> selectedKeys;
-			for (const auto& request : rawSnapshot) {
-				if (!request.coalescingKey.empty()) {
-					const auto found = selectedKeys.find(request.coalescingKey);
-					if (found != selectedKeys.end()) { superseded.push_back(std::move(requestSnapshot[found->second])); requestSnapshot[found->second] = request; continue; }
-					selectedKeys.emplace(request.coalescingKey, requestSnapshot.size());
-				}
-				requestSnapshot.push_back(request);
-			}
+			auto selection = SelectCoalescedRequests(rawSnapshot);
+			auto& requestSnapshot = selection.selected;
+			auto& superseded = selection.superseded;
 			batch.commitName = commitName.empty() ? "SceneMutationQueue.Apply" : std::move(commitName);
 			batch.inputMutationCount = rawSnapshot.size();
 			const auto rawRequests = rawSnapshot.size();
@@ -770,7 +812,7 @@ namespace TerraEngine::Scene {
 				const auto local = reservedCreates.find(id);
 				return local == reservedCreates.end() ? ExistingObject(id) : LocalObject(local->second);
 			};
-			bool lowered = true;
+			bool lowered = selection.error.empty();
 			for (std::size_t index = 0; index < requestSnapshot.size(); ++index) {
 				const auto& request = requestSnapshot[index];
 				SceneMutationResult receipt;
@@ -783,7 +825,8 @@ namespace TerraEngine::Scene {
 				op.componentName = request.componentName; op.stringValue = request.metadataValue; op.boolValue = request.metadataBooleanValue;
 				std::string reason;
 				try {
-					if (request.expectedGraphRevision != 0U && request.expectedGraphRevision != generic.readSet.sceneRevision)
+					if (!selection.error.empty()) reason = selection.error;
+					else if (request.expectedGraphRevision != 0U && request.expectedGraphRevision != generic.readSet.sceneRevision)
 						reason = "Mutation was captured against a stale scene graph revision.";
 					else if (IsSpatialMutation(request.operation)) {
 						if (!request.typedSpatialTransaction) reason = "Spatial ingress requires a lowered native transaction.";

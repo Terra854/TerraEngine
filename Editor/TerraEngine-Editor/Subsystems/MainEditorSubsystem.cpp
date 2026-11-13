@@ -3,6 +3,7 @@
 // Implements the primary editor workspace logic, including the main menu bar, toolbars, and global hotkey handling. It manages the lifecycle of all native editor windows and provides the necessary hooks for scene state capture and restoration during play mode.
 
 #include "MainEditorSubsystem.h"
+#include "EditorClosePolicy.h"
 #include "../Terrain/TerrainCopySourceMetadata.h"
 #include "Editor/Export/EditorExportOperationController.h"
 #include "Editor/TerraEngine-Editor/Automation/EditorMcpBridge.h"
@@ -2436,84 +2437,6 @@ bool MainEditorSubsystem::OpenPrefabFromObject(entt::entity object)
 	return OpenPrefabAssetInternal(prefabPath, true);
 }
 
-bool MainEditorSubsystem::ResetPrefabInstanceToDefaults(entt::entity object)
-{
-	ObjectManager& objManager = ObjectManager::instance();
-	std::optional<Object> objectHandle = objManager.getObject(object);
-	PrefabLinkComponent* link = objectHandle ? objManager.GetComponent<PrefabLinkComponent>(*objectHandle) : nullptr;
-	if (link == nullptr || link->prefabPath.empty())
-	{
-		return false;
-	}
-
-	std::filesystem::path prefabPath = link->prefabPath;
-	if (!prefabPath.is_absolute())
-	{
-		prefabPath = SceneManager::Instance().GetSceneRoot() / prefabPath;
-	}
-
-	std::ifstream prefabInput(prefabPath, std::ios::binary);
-	if (!prefabInput)
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Cannot reset prefab instance because the source file could not be opened: " << prefabPath);
-		return false;
-	}
-
-	nlohmann::json prefabJson;
-	try
-	{
-		prefabInput >> prefabJson;
-	}
-	catch (const nlohmann::json::parse_error& parseError)
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Cannot reset prefab instance because the source file failed JSON parse at byte " << parseError.byte << ": " << parseError.what());
-		return false;
-	}
-
-	if (!prefabJson.contains("objects") || !prefabJson["objects"].is_array() || prefabJson["objects"].empty())
-	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reset prefab instance because the prefab has no root object: " << prefabPath);
-		return false;
-	}
-
-	const TerraEngine::UUID prefabSourceId = link->prefabSourceId;
-	const std::string prefabName = link->prefabName;
-	std::optional<Object> parentHandle = objectHandle ? objManager.getParent(*objectHandle) : std::nullopt;
-	std::optional<entt::entity> parentObject;
-	if (parentHandle)
-	{
-		parentObject = parentHandle->EntityId();
-	}
-
-	objManager.removeObject(*objectHandle);
-	entt::entity restoredObject = Serializer::DeserializeObjectEntity(prefabJson["objects"].front(), parentObject);
-	std::optional<Object> restoredHandle = objManager.getObject(restoredObject);
-	if (!restoredHandle)
-	{
-		return false;
-	}
-	PrefabLinkComponent* existingRestoredLink = objManager.GetComponent<PrefabLinkComponent>(*restoredHandle);
-	PrefabLinkComponent* addedRestoredLink = existingRestoredLink != nullptr ? existingRestoredLink : objManager.AddComponent<PrefabLinkComponent>(*restoredHandle);
-	if (addedRestoredLink == nullptr)
-	{
-		return false;
-	}
-	PrefabLinkComponent& restoredLink = *addedRestoredLink;
-	restoredLink.prefabSourceId = prefabSourceId;
-	restoredLink.sourceObjectId = objManager.getUUID(*restoredHandle);
-	restoredLink.prefabName = prefabName.empty() ? prefabPath.stem().string() : prefabName;
-
-	std::error_code relativeError;
-	const std::filesystem::path relativePrefabPath = std::filesystem::relative(prefabPath, SceneManager::Instance().GetSceneRoot(), relativeError);
-	restoredLink.prefabPath = relativeError ? prefabPath.generic_string() : relativePrefabPath.generic_string();
-	restoredLink.overriddenProperties.clear();
-
-	SetSelectedEntity(restoredObject);
-	SceneManager::Instance().ForceMarkActiveSceneDirty();
-	TERRAENGINE_LOG(LogLevel::Info, "Reset prefab instance to defaults from " << prefabPath);
-	return true;
-}
-
 bool MainEditorSubsystem::SaveOpenPrefab()
 {
 	if (!m_IsPrefabEditingMode || m_PrefabEditingPath.empty())
@@ -2636,6 +2559,30 @@ void MainEditorSubsystem::Shutdown() {
 
 bool MainEditorSubsystem::StartPlayMode()
 {
+	if(ScriptingSystem::Instance().IsRunning()) return false;
+	// Prepare collision before creating any runtime owner. A slow cook leaves the
+	// edit frame responsive and Play pending; no simulation step can run early.
+	if(m_PlayModeEntryPending && (m_PlayModeEntrySceneRoot != SceneManager::Instance().GetSceneRoot()
+		|| m_PlayModeEntrySceneGeneration != ObjectManager::instance().GetSceneGeneration())) {
+		m_PlayModeEntryPending = false;
+		return false;
+	}
+	if(auto terrainTools = GetWindow<TerrainWindow>()) {
+		bool pending = false;
+		std::string error;
+		if(!terrainTools->QueueAutomaticTerrainCollision(error, &pending, true)) {
+			m_PlayModeEntryPending = false;
+			TERRAENGINE_LOG(LogLevel::Error, "Play Mode terrain preparation rejected: " << error);
+			return false;
+		}
+		if(pending) {
+			m_PlayModeEntryPending = true;
+			m_PlayModeEntrySceneRoot = SceneManager::Instance().GetSceneRoot();
+			m_PlayModeEntrySceneGeneration = ObjectManager::instance().GetSceneGeneration();
+			return true;
+		}
+	}
+	m_PlayModeEntryPending = false;
 	if(!RetireTerrainCopies()) return false;
 	++m_TerrainCopyProjectEpoch;
 	if(ScriptingSystem::Instance().IsRunning())
@@ -2789,6 +2736,8 @@ bool MainEditorSubsystem::StepPlayMode()
 
 void MainEditorSubsystem::StopPlayMode()
 {
+	// Stop also cancels a requested Play that has not created runtime owners yet.
+	m_PlayModeEntryPending = false;
 	if(!RetireTerrainCopies()) return;
 	++m_TerrainCopyProjectEpoch;
 	if (!ScriptingSystem::Instance().IsRunning()
@@ -3124,6 +3073,12 @@ void MainEditorSubsystem::OnBackendReady() {
 
 
 void MainEditorSubsystem::Update(float deltaTime) {
+	// Worker results are adopted only here on the protected editor owner. No
+	// window/ECS pointer is captured by detached prefab or collision preparation.
+	PollPrefabInstanceReset();
+	if(m_PlayModeEntryPending) {
+		if(!StartPlayMode()) m_PlayModeEntryPending = false;
+	}
 	// Future adoption and launch eligibility belong to this protected editor
 	// boundary, never to a worker callback or a hidden panel's lifetime.
 	if (ctx && ctx->exportController) ctx->exportController->Poll();
@@ -3812,11 +3767,11 @@ void MainEditorSubsystem::DrawUI() {
 
 		if (DrawPlayModeToolbarIconButton(
 			"play_mode_play_stop",
-			isRunning ? PlayModeToolbarIcon::Stop : PlayModeToolbarIcon::Play,
-			isRunning,
-			isRunning ? "Stop" : "Play",
+			(isRunning || m_PlayModeEntryPending) ? PlayModeToolbarIcon::Stop : PlayModeToolbarIcon::Play,
+			isRunning || m_PlayModeEntryPending,
+			m_PlayModeEntryPending ? "Cancel Play preparation" : (isRunning ? "Stop" : "Play"),
 			buttonSize)) {
-			if (!isRunning) {
+			if (!isRunning && !m_PlayModeEntryPending) {
 				if (!StartPlayMode()) {
 					TERRAENGINE_LOG(LogLevel::Error, "Play Mode did not start because the Jolt 5.6 physics world could not be created.");
 				}
@@ -4164,7 +4119,11 @@ void MainEditorSubsystem::DrawImportCloseConfirmationModal() {
 		if (ImGui::Button("Continue Closing", ImVec2(150, 0))) {
 			AssetDatabase::Instance().RequestCancelAllImports(true);
 			ImGui::CloseCurrentPopup();
-			if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
+			// Capture every owner here; the shared production policy decides which
+			// existing branch runs before any pending close or exit is executed.
+			const bool terrainDirty = [&]() { if(auto terrainTools = GetWindow<TerrainWindow>()) return terrainTools->IsTerrainDirty(); return false; }();
+			if (TerraEngine::Editor::EvaluateImportClosePolicy(SceneManager::Instance().IsActiveSceneDirty(),
+				terrainDirty, m_IsPrefabEditingMode, m_PrefabEditingDirty) == TerraEngine::Editor::EditorCloseDecision::SaveConfirmation) {
 				m_ShowSaveConfirmation = true;
 			} else {
 				ExecutePendingAction();
@@ -4217,6 +4176,8 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 
 
 bool MainEditorSubsystem::CloseCurrentProject() {
+	m_PlayModeEntryPending = false;
+	m_PrefabResetRequest.reset();
 	if(!RetireTerrainCopies()) return false;
 	++m_TerrainCopyProjectEpoch;
 	m_TerrainCopyAdmissionCount = m_TerrainCopyAdmissionNext = 0U;

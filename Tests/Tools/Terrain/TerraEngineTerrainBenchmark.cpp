@@ -81,9 +81,8 @@ int main(int argc, char** argv)
 			for(std::size_t sample = 0u; sample < kSampleCount; ++sample)
 				preview[sample] = authored[sample] + static_cast<std::int32_t>(step);
 		}));
-		// A physical mapping edit republishes only material constants. The explicit
-		// zero is measured workload state, not an omitted/unavailable metric.
-		geometryRebuildCounts.push_back(0u);
+		// No production geometry builder runs here. Leave its sample array empty
+		// instead of advertising zero rebuilds as a measured authoring fact.
 		cookNanoseconds.push_back(Measure([&] {
 			for(std::size_t sample = 0u; sample < kSampleCount; ++sample)
 			{
@@ -112,19 +111,13 @@ int main(int argc, char** argv)
 	const std::uint64_t allocationBytes = authored.capacity() * sizeof(std::int32_t)
 		+ preview.capacity() * sizeof(std::int32_t)
 		+ cooked.capacity() + uploaded.capacity();
-	constexpr std::uint32_t kVisibleAreaCount = 9u;
-	constexpr std::uint32_t kFineNodesPerArea = 64u;
-	constexpr std::uint32_t kSelectedDistantNodesPerArea = 1u;
-	constexpr double kGeometryReductionPercent = 100.0
-		* (1.0 - static_cast<double>(kSelectedDistantNodesPerArea)
-			/ static_cast<double>(kFineNodesPerArea));
 
 	if(!outputPath.parent_path().empty()) std::filesystem::create_directories(outputPath.parent_path());
 	std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
 	if(!output) return 1;
-	output << "{\"schemaVersion\":2,\"status\":\"available\",\"fixture\":\""
+	output << "{\"schemaVersion\":2,\"status\":\"unavailable\",\"fixture\":\""
 		<< fixture.generic_string() << "\",\"route\":\"" << route
-		<< "\",\"distanceKilometres\":1000,\"durationMinutes\":" << durationMinutes
+		<< "\",\"distanceKilometres\":null,\"requestedDurationMinutes\":" << durationMinutes
 		<< ",\"rawMetrics\":{\"previewNanoseconds\":";
 	WriteSamples(output, mappingEditNanoseconds);
 	output << ",\"mappingEditNanoseconds\":";
@@ -141,18 +134,18 @@ int main(int argc, char** argv)
 	WriteSamples(output, publicationNanoseconds);
 	output << ",\"collisionNanoseconds\":";
 	WriteSamples(output, collisionNanoseconds);
+	// These CPU vector timings are real local observations, but this tool does
+	// not run production culling, residency, route traversal or a Vulkan upload.
+	// Keep unsupported metrics null so downstream release gates cannot consume
+	// constants as if they were measured renderer evidence.
 	output << ",\"collisionChecksum\":" << collisionChecksum
-		<< ",\"samplerCount\":4,\"sampledAliasCount\":16,\"visibleTextureTouchCount\":64"
-		<< ",\"visibleAreaCount\":" << kVisibleAreaCount
-		<< ",\"selectedNodeCount\":" << kVisibleAreaCount * kSelectedDistantNodesPerArea
-		<< ",\"residentPageCount\":" << kVisibleAreaCount
-		<< ",\"fallbackPageCount\":0,\"seamRepairCount\":0"
+		<< ",\"samplerCount\":null,\"sampledAliasCount\":null,\"visibleTextureTouchCount\":null"
+		<< ",\"visibleAreaCount\":null,\"selectedNodeCount\":null,\"residentPageCount\":null"
+		<< ",\"fallbackPageCount\":null,\"seamRepairCount\":null"
 		<< ",\"allocationBytes\":" << allocationBytes
-		<< ",\"distantBaselineNodeCount\":" << kVisibleAreaCount * kFineNodesPerArea
-		<< ",\"distantSelectedNodeCount\":" << kVisibleAreaCount * kSelectedDistantNodesPerArea
-		<< ",\"geometryReductionPercent\":" << kGeometryReductionPercent
-		<< "},\"unavailable\":{\"gpuFrameNanoseconds\":\"requires live installed Vulkan capture\","
-		<< "\"streamingDecodeIo\":\"requires installed ContentMount runtime capture\","
-		<< "\"saveRecovery\":\"requires installed persistence workflow capture\"}}\n";
+		<< ",\"distantBaselineNodeCount\":null,\"distantSelectedNodeCount\":null,\"geometryReductionPercent\":null}"
+		<< R"json(,"qualification":"CPU-owned-vector microbenchmark only; production terrain/render lanes unavailable","measurementProvenance":{"previewNanoseconds":{"status":"measured","sourceOperation":"steady_clock around owned CPU preview vector loop"},"cookNanoseconds":{"status":"measured","sourceOperation":"steady_clock around owned CPU byte encoding loop"},"uploadNanoseconds":{"status":"measured","sourceOperation":"steady_clock around CPU std::copy; not a GPU upload"},"publicationNanoseconds":{"status":"measured","sourceOperation":"steady_clock around owned immutable vector allocation"},"allocationBytes":{"status":"measured","sourceOperation":"sum of four owned vector capacities; not process/peak resident memory"}},"unavailable":{)json"
+		<< R"json("samplerCount":"No production material sampling was observed","sampledAliasCount":"No production material aliases were observed","visibleTextureTouchCount":"No renderer texture touches were observed","visibleAreaCount":"No production culling was executed","selectedNodeCount":"No production node selection was executed","residentPageCount":"No production residency was observed","fallbackPageCount":"No production fallback residency was observed","seamRepairCount":"No production seam repair was observed","distantBaselineNodeCount":"No production baseline node set was observed","distantSelectedNodeCount":"No production distant selection was observed","geometryReductionPercent":"No measured baseline/selected node pair exists","geometryRebuildCounts":"No production geometry builder was observed","distanceKilometres":"No live route traversal was executed","durationMinutes":"Requested duration is metadata, not an executed soak","gpuFrameNanoseconds":"Requires live installed Vulkan capture","streamingDecodeIo":"Requires installed ContentMount runtime capture","saveRecovery":"Requires installed persistence workflow capture"}})json"
+		<< '\n';
 	return output.good() ? 0 : 1;
 }

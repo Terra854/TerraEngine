@@ -23,7 +23,7 @@ function Reject-Pattern([string]$relative, [string]$pattern, [string]$message) {
 function Reject-TreePattern([string[]]$roots, [string]$pattern, [string]$message) {
 	# Read complete files so this guard also catches multi-line raw shader strings.
 	# Report every matching path to make a failure immediately actionable.
-	$matches = [System.Collections.Generic.List[string]]::new()
+	$matchedPaths = [System.Collections.Generic.List[string]]::new()
 	foreach ($root in $roots) {
 		$absoluteRoot = Join-Path $SourceRoot $root
 		if (-not (Test-Path -LiteralPath $absoluteRoot -PathType Container)) {
@@ -33,11 +33,11 @@ function Reject-TreePattern([string[]]$roots, [string]$pattern, [string]$message
 		foreach ($file in Get-ChildItem -LiteralPath $absoluteRoot -Recurse -File) {
 			if ($file.Extension -notin @('.cpp', '.cc', '.cxx', '.h', '.hpp')) { continue }
 			if ((Get-Content -Raw -LiteralPath $file.FullName) -match $pattern) {
-				$matches.Add([IO.Path]::GetRelativePath($SourceRoot, $file.FullName).Replace('\', '/'))
+				$matchedPaths.Add([IO.Path]::GetRelativePath($SourceRoot, $file.FullName).Replace('\', '/'))
 			}
 		}
 	}
-	if ($matches.Count -gt 0) { $failures.Add("$message Matches: $($matches -join ', ').") }
+	if ($matchedPaths.Count -gt 0) { $failures.Add("$message Matches: $($matchedPaths -join ', ').") }
 }
 
 Require-Pattern 'Engine/Terrain/TerrainAssetStore.cpp' 'kTerrainRootMagic' 'Terrain persistence must use the shared canonical TERRAROOT1 magic.'
@@ -146,8 +146,8 @@ foreach ($source in @('Engine/Terrain/TerrainStreamingSystem.cpp','Engine/Terrai
 	Require-Pattern $source 'cancel|Cancel|atomic' "$source must expose cancellation handling."
 }
 foreach ($root in @('Engine/Terrain','Engine/Physics/Terrain','Editor/TerraEngine-Editor/Terrain')) {
-	$matches = Get-ChildItem -LiteralPath (Join-Path $SourceRoot $root) -Recurse -Include '*.cpp','*.h' -File | Select-String -Pattern 'ObjectManager|ComponentStorage'
-	if ($matches) { $failures.Add("Worker-facing terrain code references live object/component storage under $root.") }
+	$matchedPaths = Get-ChildItem -LiteralPath (Join-Path $SourceRoot $root) -Recurse -Include '*.cpp','*.h' -File | Select-String -Pattern 'ObjectManager|ComponentStorage'
+	if ($matchedPaths) { $failures.Add("Worker-facing terrain code references live object/component storage under $root.") }
 }
 $result = [ordered]@{ schemaVersion = 1; status = if ($failures.Count -eq 0) { 'passed-static-guardrails' } else { 'failed' }; failures = @($failures); runtimeProof = 'not-provided-by-static-check' }
 $result | ConvertTo-Json -Depth 8

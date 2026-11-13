@@ -140,6 +140,8 @@ namespace TerraEngine::Animation {
 		// publication. Render collection can then resolve thousands of authored
 		// owners in expected O(1) time without rebuilding a frame-local hash table.
 		// Each slot stores an index into the sorted ownerObjectMappings vector.
+		// This is optional acceleration, not evidence of mapping completeness:
+		// publication retains exact sorted mappings even when this cache is absent.
 		std::vector<std::uint32_t> ownerObjectLookupIndices;
 		std::shared_ptr<const std::vector<std::uint32_t>>
 			retainedOwnerObjectLookupIndices;

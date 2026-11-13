@@ -310,8 +310,26 @@ try {
 			}
 			if(-not $reuseCompletedRunSummary)
 			{
-				& $LiveAdapter @adapterArguments
-				if($LASTEXITCODE -ne 0){throw "Live adapter failed for $($scenario.id) run $run."}
+				# A successful .ps1 does not reset stale native LASTEXITCODE.
+				$global:LASTEXITCODE = 0
+				$adapterObservation = [pscustomobject]@{ succeeded = $false; hadError = $false; firstReason = '' }
+				& {
+					& $LiveAdapter @adapterArguments
+					# Capture the SCRIPT's status before downstream streaming can mask it.
+					$adapterObservation.succeeded = $?
+				} 2>&1 | ForEach-Object {
+					if($_ -is [Management.Automation.ErrorRecord]) {
+						$adapterObservation.hadError = $true
+						if($adapterObservation.firstReason.Length -eq 0) {
+							$reason = $_.ToString()
+							$adapterObservation.firstReason = $reason.Substring(0, [Math]::Min(512, $reason.Length))
+						}
+						Write-Error -ErrorRecord $_ -ErrorAction Continue
+					} else { Write-Output -NoEnumerate $_ }
+				}
+				# Observe each error as it streams: retain one bounded reason, never
+				# collect the adapter's entire output or inspect stale/global $Error.
+				if(-not $adapterObservation.succeeded -or $adapterObservation.hadError -or $LASTEXITCODE -ne 0){throw "Live adapter failed for $($scenario.id) run $run. $($adapterObservation.firstReason)"}
 				if($null -eq $editor)
 				{
 					$runningEditors = @(Get-Process -Name $EditorProcessName -ErrorAction SilentlyContinue)
@@ -501,8 +519,10 @@ try {
 					meanMs = if($null -ne $profilerSummary){[double](Get-PropertyValue $profilerSummary 'averageFrameMs')}else{[double](Get-PropertyValue $disabledTiming 'medianMs')}
 					medianMs = if($null -ne $profilerSummary){[double](Get-PropertyValue $profilerSummary 'frameMedianMs')}else{[double](Get-PropertyValue $disabledTiming 'medianMs')}
 					p95Ms = if($null -ne $profilerSummary){[double](Get-PropertyValue $profilerSummary 'frameP95Ms')}else{[double](Get-PropertyValue $disabledTiming 'p95Ms')}
-					p99Ms = if($null -ne $profilerSummary){[double](Get-PropertyValue $profilerSummary 'frameP95Ms')}else{[double](Get-PropertyValue $disabledTiming 'p95Ms')}
-					worstMs = if($null -ne $profilerSummary){[double](Get-PropertyValue $profilerSummary 'frameP95Ms')}else{[double](Get-PropertyValue $disabledTiming 'maximumMs')}
+					# Neither bounded summary records P99. Recording summaries also
+					# lack a full-frame maximum; unavailable must never copy P95.
+					p99Ms = $null
+					worstMs = if($null -ne $profilerSummary){ $null }else{Get-PropertyValue $disabledTiming 'maximumMs'}
 				}
 				timingStreams = $timing
 				overheadTiming = if($null -ne $overheadTiming) { [ordered]@{

@@ -3,13 +3,16 @@
 These scripts validate and capture comparable engine/editor measurements. They
 are intentionally dependency-free PowerShell and preserve raw artifacts.
 
-`CaptureFramePublicationPerformance.ps1 -DryRun` validates the project, fixed
-scene/camera hash, one-editor invariant, manifest, installed build and timing
-configuration without inventing samples.
+`CaptureFramePublicationPerformance.ps1 -DryRun` checks the project and scene
+paths, declared camera identity, one-editor prerequisite, manifest and timing
+configuration. Package validation happens when capture begins; verify the
+installed editor and Engine DLL paths separately before a dry run.
 Comparisons are fail-closed: every identity field must match. Native contracts
 and the five-minute soak can be run independently of the editor.
 
-After `cmake --install`, the native contract runner is installed at
+The maintained install root is `out/build/RelWithDebInfo/Build`; the preset
+`out/install/` prefix is not the engine runtime tree. After building the install
+target, the native contract runner is installed relative to that root at
 `Tests/Tools/FramePublication/TerraEngine-FramePublicationContracts(.exe)`. Invoke it
 through `RunFramePublicationContracts.ps1` so the manifest and output paths are
 validated consistently. Capture requires one editor, an explicit camera hash,
@@ -25,15 +28,15 @@ publication/profiler/renderer tests, and install the exact tree used by tools:
 ```powershell
 cmake --preset RelWithDebInfo
 cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests
-ctest --test-dir out/build/RelWithDebInfo -R "FramePublication|Profiler|Renderer"
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "FramePublication|Profiler|Renderer" --no-tests=error
 cmake --build --preset RelWithDebInfo --target install
 ```
 
 Validate the installed contract runner and capture inputs before live work:
 
 ```powershell
-& .\Tests\Tools\FramePublication\RunFramePublicationContracts.ps1 -InstallRoot .\out\install\RelWithDebInfo -Manifest .\Tests\Tools\FramePublication\workloads.json -OutputDirectory .\out\evidence\frame-publication\contracts
-& .\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 -Project <project> -Scene <scene> -Manifest .\Tests\Tools\FramePublication\workloads.json -InstallRoot .\out\install\RelWithDebInfo -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\frame-publication\candidate -DryRun
+& .\Tests\Tools\FramePublication\RunFramePublicationContracts.ps1 -InstallRoot .\out\build\RelWithDebInfo\Build -Manifest .\Tests\Tools\FramePublication\workloads.json -OutputDirectory .\out\evidence\frame-publication\contracts
+& .\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 -Project <project> -Scene <scene> -Manifest .\Tests\Tools\FramePublication\workloads.json -InstallRoot .\out\build\RelWithDebInfo\Build -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\frame-publication\candidate -DryRun
 ```
 
 Use the installed editor for five comparable 60-second captures, then run the
@@ -47,7 +50,7 @@ timing streams, and exactly five run metrics match the current invocation;
 partial or stale scenarios are rerun in full:
 
 ```powershell
-& .\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 -Project <project> -Scene <scene> -Manifest .\Tests\Tools\FramePublication\workloads.json -InstallRoot .\out\install\RelWithDebInfo -EditorExecutable <installed-editor> -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\frame-publication\candidate -Resume
+& .\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1 -Project <project> -Scene <scene> -Manifest .\Tests\Tools\FramePublication\workloads.json -InstallRoot .\out\build\RelWithDebInfo\Build -EditorExecutable <installed-editor> -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\frame-publication\candidate -Resume
 ```
 
 Profiler rework comparisons use the same runner through a fixed-identity
@@ -57,7 +60,7 @@ count, and capture detail level before any live work. A dry run validates these
 inputs without launching an editor:
 
 ```powershell
-& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 -Project <project> -Scene <scene> -Manifest .\Tests\Tools\FramePublication\workloads.json -InstallRoot .\out\install\RelWithDebInfo -EditorExecutable <installed-editor> -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\profiler-rework -DryRun
+& .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 -Project <project> -Scene <scene> -Manifest .\Tests\Tools\FramePublication\workloads.json -InstallRoot .\out\build\RelWithDebInfo\Build -EditorExecutable <installed-editor> -CameraHash <read-only-camera-hash> -OutputDirectory .\out\evidence\profiler-rework -DryRun
 ```
 
 The profiler rework format is a clean V1 lineage (`TerraEngineProfilerJournalV1`)
@@ -66,7 +69,7 @@ audit after install; it fails closed if legacy payload readers, writers,
 migration branches, fixtures, or documentation tokens remain:
 
 ```powershell
-& .\Tests\Tools\Profiling\CheckProfilerSource.ps1 -RepositoryRoot . -InstallRoot .\out\install\RelWithDebInfo
+& .\Tests\Tools\Profiling\CheckProfilerSource.ps1 -RepositoryRoot . -InstallRoot .\out\build\RelWithDebInfo\Build
 ```
 
 Live summaries label renderer statistics as `renderer-diagnostic-readback` and

@@ -1140,10 +1140,16 @@ void EditorProfilerService::AcceptWorkerCompletion(WorkerCompletion&& completion
 			activeSessionArtifactId.clear();
 		}
 		lastError = std::move(completion.error);
-		statusText = completion.operationKind == EditorProfilerOperationKind::Persisting
-			? "Failed to save capture"
-			: (completion.operationKind == EditorProfilerOperationKind::Opening
-				? "Failed to open capture" : "Failed to refresh capture list");
+		// Preserve the actual failed worker operation in the copied UI status;
+		// index/detail failures must not look like unrelated catalog refreshes.
+		switch (completion.operationKind)
+		{
+		case EditorProfilerOperationKind::Persisting: statusText = "Failed to save capture"; break;
+		case EditorProfilerOperationKind::Opening: statusText = "Failed to open capture"; break;
+		case EditorProfilerOperationKind::LoadingIndex: statusText = "Failed to load capture index"; break;
+		case EditorProfilerOperationKind::LoadingDetail: statusText = "Failed to load selected frame"; break;
+		default: statusText = "Failed to refresh capture list"; break;
+		}
 		break;
 	}
 	PublishPresentationLocked();

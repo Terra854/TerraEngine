@@ -10,6 +10,24 @@ namespace TerraEngine::Terrain
 {
 namespace
 {
+	// Own exactly this candidate's successful prefix, never preexisting pins or
+	// Undo/Redo history. References outlive the guard and Release is noexcept.
+	class RetainedHistoryPrefix final
+	{
+	public:
+		RetainedHistoryPrefix(TerrainBlobResolver& resolver, const std::vector<ContentHash>& hashes) noexcept
+			: resolver(resolver), hashes(hashes) {}
+		~RetainedHistoryPrefix() { while (count != 0u) resolver.Release(hashes[--count]); }
+		RetainedHistoryPrefix(const RetainedHistoryPrefix&) = delete;
+		RetainedHistoryPrefix& operator=(const RetainedHistoryPrefix&) = delete;
+		void Acquired() noexcept { ++count; }
+		void TransferToCommittedHistory() noexcept { count = 0u; }
+	private:
+		TerrainBlobResolver& resolver;
+		const std::vector<ContentHash>& hashes;
+		std::size_t count = 0u;
+	};
+
 	TerrainTransactionReceipt Reject(const TerrainEditTransaction& transaction, TerrainResultCode code, std::string message)
 	{
 		TerrainTransactionReceipt receipt{}; receipt.transactionId = transaction.transactionId; receipt.outcome = code == TerrainResultCode::Cancelled ? TerrainEditOutcome::Cancelled : TerrainEditOutcome::Rejected; receipt.code = code; receipt.message = std::move(message); return receipt;
@@ -96,16 +114,24 @@ namespace
 		std::sort(historyBlobs.begin(), historyBlobs.end(), [](const ContentHash& left, const ContentHash& right) { return left.low64 != right.low64 ? left.low64 < right.low64 : left.high64 < right.high64; });
 		historyBlobs.erase(std::unique(historyBlobs.begin(), historyBlobs.end()), historyBlobs.end());
 		const bool recordsNewHistory = transaction.origin != TerrainEditOrigin::Undo && transaction.origin != TerrainEditOrigin::Redo;
+		RetainedHistoryPrefix retainedPrefix(assetStore.Blobs(), historyBlobs);
 		std::size_t retainedBlobBytes = 0u;
 		for (const ContentHash hash : historyBlobs)
 		{
 			const auto bytes = assetStore.Blobs().Resolve(hash);
 			if (!bytes || (recordsNewHistory && !assetStore.Blobs().Retain(hash))) return Reject(transaction, TerrainResultCode::CorruptData, "Terrain history could not retain an immutable blob before publication.");
-			if (recordsNewHistory) retainedBlobBytes += bytes->size();
+			if (recordsNewHistory)
+			{
+				retainedPrefix.Acquired();
+				if (bytes->size() > (std::numeric_limits<std::size_t>::max)() - retainedBlobBytes)
+					return Reject(transaction, TerrainResultCode::Overflow, "Terrain retained history byte count overflowed.");
+				retainedBlobBytes += bytes->size();
+			}
 		}
+		if (recordsNewHistory && inlineHistoryBytes > (std::numeric_limits<std::size_t>::max)() - retainedBlobBytes)
+			return Reject(transaction, TerrainResultCode::Overflow, "Terrain combined history byte count overflowed.");
 		const std::size_t historyBytes = recordsNewHistory ? inlineHistoryBytes + retainedBlobBytes : 0u;
-		auto releaseRetained = [&]() { if (recordsNewHistory) for (const ContentHash hash : historyBlobs) assetStore.Blobs().Release(hash); };
-		if (injectFailureForTests) { releaseRetained(); return Reject(transaction, TerrainResultCode::Failed, "Terrain publication failure was injected before the root swap."); }
+		if (injectFailureForTests) { return Reject(transaction, TerrainResultCode::Failed, "Terrain publication failure was injected before the root swap."); }
 		std::vector<TerrainAreaDescriptor> replacements; replacements.reserve(transaction.patches.size());
 		for (const TerrainPatch& patch : transaction.patches)
 		{
@@ -113,7 +139,7 @@ namespace
 			const TerrainAreaDescriptor current = assetStore.ResolveDescriptorOrImplicit(*capture.root, applied.coordinate);
 			// Undo/redo restore older content but never older generations. This is the
 			// per-area CAS epoch that keeps stale worker output invalid after replay.
-			if (current.editGeneration == std::numeric_limits<Generation>::max()) { releaseRetained(); return Reject(transaction, TerrainResultCode::Overflow, "Terrain area edit generation overflowed."); }
+			if (current.editGeneration == std::numeric_limits<Generation>::max()) { return Reject(transaction, TerrainResultCode::Overflow, "Terrain area edit generation overflowed."); }
 			applied.editGeneration = current.editGeneration + 1u;
 			replacements.push_back(std::move(applied));
 		}
@@ -135,7 +161,6 @@ namespace
 					const auto current = assetStore.ResolveDescriptorOrImplicit(*capture.root, descriptor.coordinate);
 					if (current.editGeneration == std::numeric_limits<Generation>::max())
 					{
-						releaseRetained();
 						return Reject(transaction, TerrainResultCode::Overflow, "Terrain resize descriptor generation overflowed.");
 					}
 					descriptor.editGeneration = current.editGeneration + 1u;
@@ -153,8 +178,7 @@ namespace
 		}
 		else if (transaction.layerStackPatch.has_value()) built = assetStore.BuildLayerStackCandidate(*capture.root, *transaction.layerStackPatch, {}, candidate);
 		else built = assetStore.BuildCandidateRoot(*capture.root, replacements, {}, candidate);
-		if (!built.Succeeded()) { releaseRetained(); return Reject(transaction, built.code, built.message); }
-		if (auto published = assetStore.PublishCandidate(capture.root, candidate); !published.Succeeded()) { releaseRetained(); return Reject(transaction, published.code, published.message); }
+		if (!built.Succeeded()) { return Reject(transaction, built.code, built.message); }
 		TerrainTransactionReceipt receipt{}; receipt.transactionId = transaction.transactionId; receipt.outcome = TerrainEditOutcome::Committed; receipt.previousRootHash = capture.root->rootContentHash; receipt.publishedRootHash = candidate->rootContentHash; receipt.publicationGeneration = candidate->publicationGeneration; receipt.code = TerrainResultCode::Ok;
 		TerrainDerivedInvalidation invalidation{};
 		invalidation.assetUuid = candidate->assetUuid;
@@ -219,6 +243,15 @@ namespace
 				transaction.layerStackPatch, transaction.inverseLayerStackPatch,
 				transaction.resizeDelta, transaction.inverseResizeDelta};
 		}
+		// Preparation above builds candidate receipt values only: it never calls
+		// live editor history/undo or adopts pins into another owner. The existing
+		// provisional retains remain solely owned by retainedPrefix until commit.
+		// Explicit candidate allocations precede CAS; pin adoption is noexcept.
+		// Failed CAS restores provisional pins. Receipt return uses the existing
+		// value API; its optional resize map is not guaranteed nothrow-movable.
+		if (auto published = assetStore.PublishCandidate(capture.root, candidate); !published.Succeeded())
+			return Reject(transaction, published.code, published.message);
+		retainedPrefix.TransferToCommittedHistory();
 		return receipt;
 	}
 

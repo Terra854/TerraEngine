@@ -475,11 +475,21 @@ namespace RuntimeMemorySafetyDraft {
 			if(scenario != "shutdown") {
 				renderer.SetFrameScratchValidationCallbacks(nullptr);
 				native = dynamic_cast<VulkanContext*>(renderer.GetContext());
+				// Restart may replace the context even when no optional host observes
+				// it. Reject a failed/non-Vulkan replacement before using its receipt;
+				// the initialized-path catch below records Failed and still cleans up.
+				Check(native != nullptr, "Healthy follow-up requires a native Vulkan context after lifecycle handling");
 				const auto beforeHealthy = native->GetEmptyFrameValidationReceipt();
+				Check(beforeHealthy.initialized && beforeHealthy.validationActuallyEnabled,
+					"Healthy follow-up requires initialized Vulkan with validation still enabled");
 				const auto healthy = ProbeRealPreparation(renderer, expected, AuthoredRangeDigest, false);
 				RequirePressure(healthy.captured);
 				if(scenario == "restart" || scenario == "scene-clear") Check(healthy.captured.lifetimeId != captured.lifetimeId, "Lifecycle reused retired scratch identity");
-				native = dynamic_cast<VulkanContext*>(renderer.GetContext()); native->WaitIdle();
+				// Preparation can also change recovery/context state. Revalidate the
+				// freshly acquired pointer instead of relying on the earlier guard.
+				native = dynamic_cast<VulkanContext*>(renderer.GetContext());
+				Check(native != nullptr, "Healthy preparation did not retain a native Vulkan context");
+				native->WaitIdle();
 				const auto receipt = native->GetEmptyFrameValidationReceipt();
 				Check(receipt.acquired && receipt.sequence > beforeHealthy.sequence
 					&& receipt.ordinarySubmissionSerial > beforeHealthy.ordinarySubmissionSerial

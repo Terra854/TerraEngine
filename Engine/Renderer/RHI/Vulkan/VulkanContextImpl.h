@@ -563,6 +563,11 @@ struct VulkanContext::Impl {
 	}
 	static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 	bool initialized = false;
+	bool initializationDeferred = false;
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	// Native tests drive the real swapchain startup cleanup edge.
+	bool forceZeroStartupExtentForValidation = false;
+#endif
 	TerraEngine::Renderer::TextureDescriptorBootstrap textureDescriptorBootstrap;
 	bool editorMode = false;
 

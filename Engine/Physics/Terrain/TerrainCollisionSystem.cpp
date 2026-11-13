@@ -5,16 +5,38 @@
 #include "Physics/PhysicsSystem.h"
 
 #include <algorithm>
+// Accumulation below must not depend on another header incidentally including numeric.
+#include <numeric>
 #include <utility>
 
 namespace TerraEngine::Physics::Terrain
 {
+	namespace
+	{
+		bool MatchesCapturedRoot(const TerrainHeightFieldRecipe& recipe,
+			TerraEngine::Terrain::ContentHash root, std::uint64_t generation)
+		{
+			// Legacy standalone recipes carry no captured-neighbor evidence. Prepared
+			// seam recipes must retain the same complete source identity at adoption.
+			return (recipe.collisionSourceGeneration == 0u
+				|| (recipe.collisionSourceGeneration == generation
+					&& recipe.collisionSourceRootLow == root.low64 && recipe.collisionSourceRootHigh == root.high64))
+				&& (!recipe.cookedCollision || recipe.cookedCollision->recipeHash == TerrainCollisionRecipeHash(recipe));
+		}
+		void ObserveRecipeMemory(TerrainCollisionSnapshot& snapshot)
+		{
+			const auto& cooked = snapshot.currentRecipe.cookedCollision;
+			snapshot.currentRecipeCookedPayloadBytes = cooked && cooked->payload ? cooked->payload->size() : 0u;
+			snapshot.currentRecipeWorkerGeometryBytes = cooked ? cooked->derivedGeometryBytes : 0u;
+		}
+	}
 	TerrainCollisionCandidate PrepareTerrainCollisionCandidate(TerrainHeightFieldRecipe recipe, TerraEngine::Terrain::ContentHash sourceRootHash, TerraEngine::Terrain::Generation sourcePublicationGeneration, const std::atomic_bool* cancellation)
 	{
 		TerrainCollisionCandidate candidate{};
 		candidate.recipe = std::move(recipe); candidate.sourceRootHash = sourceRootHash;
 		candidate.sourcePublicationGeneration = sourcePublicationGeneration; candidate.cancellation = cancellation;
-		candidate.complete = ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted && sourceRootHash.IsValid() && sourcePublicationGeneration != 0u;
+		candidate.complete = ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted && sourceRootHash.IsValid() && sourcePublicationGeneration != 0u
+			&& MatchesCapturedRoot(candidate.recipe, sourceRootHash, sourcePublicationGeneration);
 		return candidate;
 	}
 
@@ -29,7 +51,8 @@ namespace TerraEngine::Physics::Terrain
 		candidate.complete = ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted
 			&& candidate.recipe.terrainAssetId != TerraEngine::EMPTY_UUID
 			&& candidate.sourceRootHash.IsValid()
-			&& candidate.sourcePublicationGeneration != 0u;
+			&& candidate.sourcePublicationGeneration != 0u
+			&& MatchesCapturedRoot(candidate.recipe, sourceRootHash, sourcePublicationGeneration);
 		return candidate;
 	}
 
@@ -48,7 +71,8 @@ namespace TerraEngine::Physics::Terrain
 			inOutSnapshot.message = "Terrain collision worker result observed a stale authored root; last-known-good collision remains active.";
 			return false;
 		}
-		if (!candidate.complete || !ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted)
+		if (!candidate.complete || !ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted
+			|| !MatchesCapturedRoot(candidate.recipe, candidate.sourceRootHash, candidate.sourcePublicationGeneration))
 		{
 			inOutSnapshot.status = TerrainCollisionStatus::Failed;
 			inOutSnapshot.message = "Terrain collision recipe failed provider-neutral validation.";
@@ -65,6 +89,7 @@ namespace TerraEngine::Physics::Terrain
 		inOutSnapshot.ageMilliseconds = 0.0;
 		inOutSnapshot.buildLatencyMilliseconds = candidate.buildLatencyMilliseconds;
 		inOutSnapshot.status = TerrainCollisionStatus::Current;
+		ObserveRecipeMemory(inOutSnapshot);
 		inOutSnapshot.message = "Terrain collision replacement is current at the protected before-physics boundary.";
 		return true;
 	}
@@ -111,7 +136,8 @@ namespace TerraEngine::Physics::Terrain
 	{
 		if(!candidate.complete || !candidate.sourceRootHash.IsValid()
 			|| candidate.sourcePublicationGeneration == 0u
-			|| !ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted) {
+			|| !ValidateTerrainHeightFieldRecipe(candidate.recipe).accepted
+			|| !MatchesCapturedRoot(candidate.recipe, candidate.sourceRootHash, candidate.sourcePublicationGeneration)) {
 			inOutSnapshot.status = TerrainCollisionStatus::Failed;
 			inOutSnapshot.message = "Mounted terrain collision candidate failed immutable recipe validation; last-known-good remains active.";
 			return false;
@@ -151,6 +177,7 @@ namespace TerraEngine::Physics::Terrain
 		committedSnapshot.ageMilliseconds = 0.0;
 		committedSnapshot.buildLatencyMilliseconds = 0.0;
 		committedSnapshot.status = TerrainCollisionStatus::Current;
+		ObserveRecipeMemory(committedSnapshot);
 		committedSnapshot.message = "Mounted terrain collision replacement is current at the protected before-physics boundary.";
 		inOutSnapshot = std::move(committedSnapshot);
 		return true;
@@ -170,8 +197,8 @@ namespace TerraEngine::Physics::Terrain
 		declaration.writes = {kResourceTerrainPreparedCollision, kResourceTerrainPublishedCollision, kResourceTerrainDiagnostics};
 		declaration.mainThread = false; declaration.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
 		declaration.boundaryClassification = HardBoundaryClassification::PartiallyWorkerSafe; declaration.hardBoundary = true;
-		declaration.safeSubwork = "Builds immutable 257-grid terrain heightfield candidates from captured terrain roots.";
-		declaration.protectedCommit = "Publishes only a current complete terrain collision replacement before physics simulation; stale work retains last-known-good.";
+		declaration.safeSubwork = "Prepares immutable derived seam samples, exact cell-hole meshes, and cooked BVHs from retained same-root captures on terrain workers; authored grids remain 256 samples.";
+		declaration.protectedCommit = "Validates source identity, restores prepared provider geometry, and publishes a current complete replacement before physics; stale work retains last-known-good. Existing standalone uncooked recipes retain the legacy provider cooking path.";
 		declaration.protectedReason = declaration.protectedCommit; declaration.profilingLabel = "Terrain Collision"; declaration.usesDefaultMetadata = false;
 		return declaration;
 	}

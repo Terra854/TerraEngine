@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source-review-continuation-v1",
+  "title": "Current source-review continuation (structural scope only)",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "historicalRevision",
+    "historicalTree",
+    "structuralOnly",
+    "semanticCompletenessProven",
+    "lifetimeAcceptance",
+    "currentPolicies",
+    "files",
+    "reviewArtifacts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "source-review-continuation-v1"
+    },
+    "historicalRevision": {
+      "const": "87d3fd037c1e881ff6630a4918c91be707673c1b"
+    },
+    "historicalTree": {
+      "const": "47cf2ac37d0bee74c9da1b21e6516c3f9074a2f4"
+    },
+    "structuralOnly": {
+      "const": true
+    },
+    "semanticCompletenessProven": {
+      "const": false
+    },
+    "lifetimeAcceptance": {
+      "const": false
+    },
+    "currentPolicies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "textSha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "textSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "reviewArtifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "bytes"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "changeType",
+          "nativeScannerEligible",
+          "beforeSha256",
+          "afterSha256",
+          "beforeBytes",
+          "afterBytes",
+          "diffSha256",
+          "diffArtifact",
+          "classification",
+          "review"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "changeType": {
+            "enum": [
+              "modified",
+              "added",
+              "deleted"
+            ]
+          },
+          "nativeScannerEligible": {
+            "type": "boolean"
+          },
+          "beforeSha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "afterSha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "beforeBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "afterBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "diffSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "diffArtifact": {
+            "type": "object",
+            "required": [
+              "path",
+              "sha256",
+              "bytes"
+            ],
+            "properties": {
+              "compression": {
+                "const": "gzip",
+                "description": "Optional storage compression. sha256 and bytes pin the stored file; diffSha256 pins its complete decompressed content."
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "classification": {
+            "enum": [
+              "functional",
+              "mixed",
+              "comment-only"
+            ]
+          },
+          "review": {
+            "type": "object",
+            "required": [
+              "status",
+              "reviewer",
+              "reviewedDiffSha256",
+              "commentIntent",
+              "ownershipDecision",
+              "findings",
+              "artifactReferences"
+            ],
+            "properties": {
+              "status": {
+                "const": "reviewed"
+              },
+              "reviewer": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reviewedDiffSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "commentIntent": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ownershipDecision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "findings": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object"
+                }
+              },
+              "artifactReferences": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "sha256",
+                    "bytes"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

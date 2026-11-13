@@ -1178,8 +1178,6 @@ void RenderSystem::Initialize()
 		vulkanContext->SetVariableRateShadingEnabled(SanitizeRenderSettings(currentSettings).variableRateShading > 0u);
 	rhi = std::move(vulkanContext);
 	rendererRecoveryPolicy = ResourceManager::Instance().GetRendererRecoveryPolicy();
-	rhi->Initialize(WindowSystem::Instance());
-
 	WindowSystem::Instance().SetResizeCallback([](int width, int height) {
 		try {
 			auto& renderSystem = RenderSystem::Instance();
@@ -1194,7 +1192,8 @@ void RenderSystem::Initialize()
 		}
 	});
 
-	initialized = true;
+	rhi->Initialize(WindowSystem::Instance());
+	initialized = static_cast<VulkanContext*>(rhi.get())->IsReady();
 }
 
 
@@ -1268,6 +1267,14 @@ void RenderSystem::UpdateAtExecutionBoundary(float deltaTime)
 
 RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 {
+	if (!initialized) {
+		if (auto* native = dynamic_cast<VulkanContext*>(rhi.get()); native && native->IsInitializationDeferred()) {
+			// Both direct Update and scheduled capture resume under the existing
+			// protected boundary, before any worker borrows presentation owners.
+			native->Initialize(WindowSystem::Instance());
+			initialized = native->IsReady();
+		}
+	}
 	if (!initialized) {
 		co_return;
 	}
@@ -2127,6 +2134,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.hardBoundary = true;
 	snapshot.protectedCommit = "Admits deduplicated async requests for missing mesh/material publications, then captures the already-published scene change packet, exact transforms, resources, immutable shadowcaster lifetime/resource/deformation inputs, animation presentation, page publication, readback, requested views, backend capabilities, and renderer generations without lowering the crowd.";
 	snapshot.protectedCommit += " Retires the previous continuation before allocating/resetting the exclusive renderer-owned camera/light scratch episode.";
+	snapshot.protectedCommit += " Retries zero-extent startup before capture; unready presentation publishes no render work.";
 	snapshot.protectedReason = snapshot.protectedCommit;
 	snapshot.profilingLabel = "RenderSystem.RenderPublicationCapture";
 

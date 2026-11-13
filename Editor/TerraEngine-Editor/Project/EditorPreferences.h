@@ -93,10 +93,13 @@ struct EditorPreferences {
 		}
 		preferences.vulkanValidationLayers = json.value("vulkanValidationLayers", preferences.vulkanValidationLayers);
 		preferences.renderDebugDiagnostics = json.value("renderDebugDiagnostics", preferences.renderDebugDiagnostics);
-		preferences.rendererDiagnosticsPreferencesInitialized =
-			json.value("rendererDiagnosticsPreferencesInitialized", false)
-			|| json.contains("vulkanValidationLayers")
-			|| json.contains("renderDebugDiagnostics");
+		// An explicit false marker means project diagnostic defaults still own
+		// this session. Infer legacy intent from diagnostic fields only when the
+		// marker is absent, including after an unrelated recent-project save.
+		if (const auto initialized = json.find("rendererDiagnosticsPreferencesInitialized"); initialized != json.end())
+			preferences.rendererDiagnosticsPreferencesInitialized = initialized->is_boolean() && initialized->get<bool>();
+		else
+			preferences.rendererDiagnosticsPreferencesInitialized = json.contains("vulkanValidationLayers") || json.contains("renderDebugDiagnostics");
 		if (json.contains("sceneViewOverlay") && json["sceneViewOverlay"].is_object())
 		{
 			preferences.sceneViewOverlay = json["sceneViewOverlay"].get<TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference>();

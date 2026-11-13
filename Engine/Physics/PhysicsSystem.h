@@ -135,6 +135,9 @@ namespace TerraEngine::Physics {
 		std::vector<PhysicsFrameDescriptor> FrameDescriptors() const;
 		// Scheduler-owned Before Physics callers submit the complete closure here;
 		// worker producers prepare only the typed request and callback packet.
+		// Currently accepts pre-admission membership only. Live provider bodies or
+		// characters reject atomically before callbacks until native staged transfer
+		// and rollback are owned by this system; callbacks cannot release its maps.
 		PhysicsFrameMigrationReceipt CommitFrameMigration(
 			const PhysicsFrameMigrationRequest& request,
 			const PhysicsFrameMigrationOperations& operations);
@@ -242,6 +245,7 @@ namespace TerraEngine::Physics {
 			const std::vector<TerraEngine::Scene::TransactionPublicationGroupResult>& publicationGroups = {});
 
 	private:
+		friend struct PhysicsReviewTestAccess;
 		PhysicsSystem();
 		~PhysicsSystem() override;
 

@@ -227,6 +227,21 @@ namespace TerraEngine::Editor::Automation
 			}, {"target"}),
 			MutationMode::AssetMutation,
 			AutomationApprovalPolicy::None));
+		// Repair executes the same protected rebuild handler and containment checks.
+		// Register its existing alias here as well: a legacy service-list entry does
+		// not make a tool reachable through the authoritative provider registry.
+		capabilities.push_back(MakeRegistration(
+			resolveHandler,
+			"asset.virtualGeometry.repair.execute",
+			"Repair virtual geometry by rebuilding one asset or every eligible project asset.",
+			ObjectSchema({
+				{"target", AssetReferenceSchema()},
+				{"force", {{"type", "boolean"}}},
+				{"includePackageOutputs", {{"type", "boolean"}}},
+				{"diagnosticsLevel", {{"type", "string"}, {"enum", {"summary", "detailed", "debug"}}}}
+			}, {"target"}),
+			MutationMode::AssetMutation,
+			AutomationApprovalPolicy::None));
 		capabilities.push_back(MakeRegistration(
 			resolveHandler,
 			"asset.virtualGeometry.inspect",

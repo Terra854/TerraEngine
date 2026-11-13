@@ -1,6 +1,7 @@
 // FrameWorkload.cpp - validation and execution for architecture-hardening work.
 
 #include "FrameWorkload.h"
+#include "FrameWorkloadProfiling.h"
 
 #include "JobGraph.h"
 #include "Profiling/ProfilerScope.h"
@@ -22,6 +23,15 @@ namespace TerraEngine::Scheduling {
 	namespace {
 		std::mutex g_ProfilingExecutionRecordsMutex;
 		std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> g_ProfilingExecutionRecords;
+		// Separate from legacy diagnostic transfers: only an actual active capture
+		// owns this bounded extra copy, identified by existing profiler tokens.
+		FrameWorkloadProfilingIdentity g_ProfilingCaptureIdentity;
+		FrameWorkloadProfilingSnapshot g_ProfilingCaptureSnapshot;
+
+		bool ValidProfilingIdentity(FrameWorkloadProfilingIdentity identity)
+		{
+			return identity.sessionGeneration != 0u && identity.frameToken != 0u;
+		}
 
 		void PublishExecutionRecordsForProfiling(const FrameExecutionPlan& plan)
 		{
@@ -1638,6 +1648,86 @@ namespace TerraEngine::Scheduling {
 			PublishExecutionRecordsForProfiling(plan);
 		}
 		return plan;
+	}
+
+	void BeginFrameWorkloadProfilingCapture(FrameWorkloadProfilingIdentity identity)
+	{
+		std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+		g_ProfilingCaptureSnapshot = {};
+		g_ProfilingCaptureIdentity = ValidProfilingIdentity(identity) ? identity : FrameWorkloadProfilingIdentity{};
+	}
+
+	void InvalidateFrameWorkloadProfilingCapture()
+	{
+		// Release the optional vector too: inactive capture retains no extra row
+		// capacity or diagnostic strings. The legacy vector remains independent.
+		std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+		g_ProfilingCaptureIdentity = {};
+		g_ProfilingCaptureSnapshot = {};
+	}
+
+	FrameWorkloadProfilingIdentity PrepareFrameWorkloadProfilingPublication()
+	{
+		std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+		// Called before schedule validation. A failed/rejected repeat pass cannot
+		// leave an earlier same-frame publication looking like current success.
+		g_ProfilingCaptureSnapshot = {};
+		return g_ProfilingCaptureIdentity;
+	}
+
+	bool PublishFrameWorkloadProfilingSnapshot(
+		FrameWorkloadProfilingIdentity identity,
+		std::span<const TerraEngine::Profiling::WorkloadExecutionRecord> records) noexcept
+	{
+		try
+		{
+			{
+				std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+				if (!ValidProfilingIdentity(identity) || identity != g_ProfilingCaptureIdentity) return false;
+				// A replacement that is oversized or cannot allocate is unavailable,
+				// never a truncated complete observation or an earlier stale success.
+				g_ProfilingCaptureSnapshot = {};
+			}
+			if (records.size() > TerraEngine::Profiling::kMaximumWorkloadExecutionRecordsPerFrame) return false;
+			FrameWorkloadProfilingSnapshot candidate;
+			// The retained scheduler plan still owns its diagnostic rows. This
+			// bounded extra copy exists only for the active profiler consumer.
+			candidate.records.assign(records.begin(), records.end());
+			candidate.identity = identity;
+			candidate.available = true;
+			std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+			if (identity != g_ProfilingCaptureIdentity) return false;
+			// Recheck after allocation: take/stop/new-frame may have retired this
+			// key. The final vector transfer itself cannot allocate or throw.
+			static_assert(noexcept(g_ProfilingCaptureSnapshot = std::move(candidate)));
+			g_ProfilingCaptureSnapshot = std::move(candidate);
+			return true;
+		}
+		catch (...)
+		{
+			// Optional diagnostic allocation/locking cannot fail successful engine
+			// work. A matching scope was made unavailable before any row copy.
+			return false;
+		}
+	}
+
+	FrameWorkloadProfilingSnapshot TakeLatestFrameWorkloadProfilingSnapshot(
+		FrameWorkloadProfilingIdentity expectedIdentity)
+	{
+		std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+		if (!ValidProfilingIdentity(expectedIdentity) || expectedIdentity != g_ProfilingCaptureIdentity)
+		{
+			// A stale reader must not consume a newer frame's actual observation.
+			return {};
+		}
+		FrameWorkloadProfilingSnapshot snapshot;
+		if (g_ProfilingCaptureSnapshot.available && g_ProfilingCaptureSnapshot.identity == expectedIdentity)
+		{
+			snapshot = std::move(g_ProfilingCaptureSnapshot);
+		}
+		g_ProfilingCaptureSnapshot = {};
+		g_ProfilingCaptureIdentity = {}; // Close even an unpublished matching scope.
+		return snapshot;
 	}
 
 	std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> TakeLatestFrameWorkloadExecutionRecordsForProfiling()
