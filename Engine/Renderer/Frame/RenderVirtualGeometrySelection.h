@@ -43,6 +43,10 @@ namespace TerraEngine::Renderer::Frame {
 		const VirtualGeometryAssetRuntime& asset,
 		std::string& outFallbackReason);
 	float EstimateProjectedMeshRadiusPixels(const Mesh& mesh, const glm::mat4& modelMatrix, const glm::vec3& cameraPosition, const glm::uvec2& targetSize);
+	TERRAENGINE_API VirtualGeometryDrawRange SelectCookedDirectLodRange(
+		const Mesh& mesh, const VirtualGeometryQualityProfile& quality,
+		const glm::mat4& modelMatrix, const glm::mat4& viewProjection,
+		const glm::vec3& cameraPosition, const glm::uvec2& targetSize);
 	float EstimateProjectedClusterRadiusPixels(const VirtualGeometryClusterRuntime& cluster, const glm::mat4& modelMatrix, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, float fallbackProjectedRadiusPixels);
 	std::uint64_t BuildVirtualGeometryTransitionKey(
 		RenderOutputKind outputKind,

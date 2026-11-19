@@ -22,6 +22,7 @@
 #include <glm/glm.hpp>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <glm/gtc/quaternion.hpp>
 #include <string>
 #include <unordered_map>
@@ -102,6 +103,8 @@ private:
 	glm::vec3 GetCameraUp() const;
 	TerraEngine::Scene::WorldPosition ResolveSceneViewFocus(float fallbackDistance) const;
 	float ResolveSceneViewFocusDistance(const TerraEngine::Scene::WorldPosition& focus, float fallbackDistance) const;
+	float ResolveShadowFocusDepth(const glm::vec3& forward) const;
+	void CaptureFlyShadowFocus();
 	void RepositionCameraAroundFocus(const TerraEngine::Scene::WorldPosition& focus, float distance);
 	[[nodiscard]] glm::vec3 LocalizeForCamera(const TerraEngine::Scene::WorldPosition& position) const;
 	[[nodiscard]] bool TranslateCamera(const glm::dvec3& deltaMetres);
@@ -138,6 +141,9 @@ private:
 	TerraEngine::Scene::WorldPosition m_CameraFocus{};
 	float m_CameraFocusDistance = 18.0f;
 	bool m_CameraFocusInitialized = false;
+	// A render-only reference for free flight before the user sets a navigation
+	// pivot. It stays available after release so shadows hold while stationary.
+	std::optional<TerraEngine::Scene::WorldPosition> m_FlyShadowFocus;
 	// Orthographic navigation is intentionally independent from perspective
 	// navigation. Preserve every value that defines the perspective composition
 	// so switching back restores the exact position, look direction, and pivot.

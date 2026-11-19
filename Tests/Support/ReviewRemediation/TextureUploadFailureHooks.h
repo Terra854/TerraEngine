@@ -34,6 +34,10 @@ namespace TerraEngine::Tests::Review
 		std::uintptr_t imageHandle = 0, stagingHandle = 0;
 		void* allocator = nullptr;
 		void* imageAllocation = nullptr;
+		// Optional rendezvous after descriptor readers are idle and before
+		// the replacement claims the current CPU owner.
+		void (*beforeTextureCommit)(void*) = nullptr;
+		void* commitContext = nullptr;
 	};
 	TERRAENGINE_API bool SetTextureUploadFailureHook(TextureUploadFailureHook* hook) noexcept;
 }

@@ -37,6 +37,50 @@ namespace TerraEngine::EditorTests {
 	struct SceneViewGenerationTestAccess {
 		static std::uint64_t Generation(const SceneViewWindow& window) { return window.m_MarkerViewGeneration; }
 		static std::optional<Overlay::SceneViewOverlayCacheKey> WidgetKey(const SceneViewWindow& window) { return window.m_OrientationWidgetCache.key; }
+
+		static void ExpectFlyShadowFocusIsolation(TestContext& context)
+		{
+			SceneViewWindow window{nullptr};
+			const auto initial = window.SerializeWorkspaceState();
+			// Exercise the production flight-entry step without a GLFW cursor.
+			window.CaptureFlyShadowFocus();
+			context.Expect(window.SerializeWorkspaceState() == initial && !window.m_CameraFocusInitialized,
+				"Capturing a shadow reference must leave the saved camera and navigation pivot alone.");
+
+			const glm::vec3 originalForward = window.GetCameraForward();
+			context.Expect(window.TranslateCamera(-48.0 * glm::dvec3(originalForward)),
+				"The fly camera must be able to back away from its shadow reference.");
+			window.CaptureFlyShadowFocus();
+			context.Expect(std::abs(window.ResolveShadowFocusDepth(originalForward) - 66.0f) < 0.001f,
+				"Backing away across repeated fly sessions must keep the original shadow reference.");
+
+			window.m_CameraRot.y += glm::radians(180.0f);
+			const glm::vec3 turnedForward = window.GetCameraForward();
+			context.ExpectEqual(0.0f, window.ResolveShadowFocusDepth(turnedForward),
+				"A shadow reference behind the turned camera must be ignored.");
+			const auto beforeSwitch = window.SerializeWorkspaceState();
+			const auto expectedPivot = Scene::ApplyWorldDelta(window.m_CameraPosition,
+				{{}, 18.0 * glm::dvec3(turnedForward)});
+			std::string error;
+			context.Expect(window.SetAutomationOrientation("orthographic", error), error);
+			context.Expect(expectedPivot.Succeeded() && window.m_CameraFocus == expectedPivot.position,
+				"Orthographic mode must center ahead of the turned camera.");
+			context.Expect(window.SetAutomationOrientation("perspective", error), error);
+			const auto afterSwitch = window.SerializeWorkspaceState();
+			for (const char* field : {"position", "rotationRadians", "focus", "focusDistance",
+				"focusInitialized", "fieldOfViewDegrees", "projection"})
+			{
+				context.Expect(afterSwitch.at(field) == beforeSwitch.at(field),
+					std::string("The projection round trip must restore perspective ") + field);
+			}
+
+			window.CaptureFlyShadowFocus();
+			context.Expect(std::abs(window.ResolveShadowFocusDepth(turnedForward) - 18.0f) < 0.001f,
+				"Starting a new flight after turning must establish a visible shadow reference.");
+			context.Expect(window.RestoreWorkspaceState(beforeSwitch, error), error);
+			context.ExpectEqual(0.0f, window.ResolveShadowFocusDepth(turnedForward),
+				"Workspace restoration must clear the transient shadow reference.");
+		}
 	};
 	namespace {
 		struct SceneViewFrames {
@@ -147,6 +191,9 @@ namespace TerraEngine::EditorTests {
 			context.Expect(fixture.window.SetAutomationOrientation("orthographic", error), error); fixture.Draw(); ExpectCurrentFrame(context, fixture, before, true);
 			const auto ortho = SceneViewGenerationTestAccess::Generation(fixture.window);
 			context.Expect(fixture.window.SetAutomationOrientation("perspective", error), error); fixture.Draw(); ExpectCurrentFrame(context, fixture, ortho, true);
+		});
+		registry.Add("Editor.SceneViewGeneration.FlyShadowFocusDoesNotMoveNavigationPivot", [](TestContext& context) {
+			SceneViewGenerationTestAccess::ExpectFlyShadowFocusIsolation(context);
 		});
 		registry.Add("Editor.SceneViewGeneration.HiddenIconsViewportResize", [](TestContext& context) {
 			SceneViewFrames fixture; fixture.HideIconsWithToolbar(context); const auto before = SceneViewGenerationTestAccess::Generation(fixture.window);

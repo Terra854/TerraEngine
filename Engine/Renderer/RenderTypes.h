@@ -574,6 +574,8 @@ namespace TerraEngine::Renderer {
 		glm::mat4 viewMatrix = glm::mat4(1.0f);
 		glm::mat4 projectionMatrix = glm::mat4(1.0f);
 		TerraEngine::Scene::WorldPosition cameraCanonicalPosition{};
+		// A Scene capture can frame a look-at target like the interactive viewport.
+		float sceneShadowFocusDistanceMetres = 0.0f;
 		glm::uvec2 targetSize = glm::uvec2(1280u, 720u);
 		std::string format = "image/png";
 		std::string freshness = "latestCompleted";
@@ -3839,6 +3841,8 @@ struct RenderViewBuildState
 	// This identity qualifies every derived float value submitted for the view.
 	TerraEngine::Renderer::RenderReferenceFrame referenceFrame{};
 	glm::vec3 cameraLocalPosition = glm::vec3(0.0f);
+	// Sealed Scene View anchor in the same reference frame as the camera.
+	std::optional<glm::vec3> directionalShadowAnchor;
 	float deltaTimeSeconds = 0.0f;
 	bool globalTaskShaderCullingEnabled = true;
 	float cullingEpsilon = 0.001f;

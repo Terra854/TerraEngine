@@ -1,6 +1,6 @@
 // GeometryRoutePolicy.cpp - Deterministic route scoring and suppression proof.
 
-#include "GeometryRoutePolicy.h"
+#include "GeometryRouteCosts.h"
 
 #include <algorithm>
 #include <array>
@@ -242,6 +242,30 @@ namespace TerraEngine::Renderer
 			&& viewsCompatible
 			&& capabilitiesAvailable
 			&& residencyUsable;
+	}
+
+	void EstimateGeometryRouteCosts(GeometryRoutePolicyInput& input,
+		const GeometryRouteWorkload& workload) noexcept
+	{
+		// Relative work units, not milliseconds. A direct draw submits one
+		// resident LOD. A virtual draw also visits clusters, prepares packets,
+		// and groups submissions when a view changes. Charge that CPU work
+		// alongside the potential savings from submitting fewer triangles.
+		constexpr float virtualSetup = 4096.0F;
+		constexpr float clusterPreparation = 256.0F;
+		const float triangles = static_cast<float>(workload.sourceTriangles);
+		const float meshlets = static_cast<float>(workload.sourceMeshlets);
+		const float decodedKiB = static_cast<float>(workload.decodedBytes) / 1024.0F;
+		const float virtualWork = virtualSetup
+			+ static_cast<float>(workload.virtualClusters) * clusterPreparation
+			+ static_cast<float>(workload.physicalPages) * 24.0F
+			+ static_cast<float>(workload.physicalBlocks) * 3.0F;
+		input.direct.estimatedCost = triangles + meshlets * 8.0F + decodedKiB * 0.125F;
+		input.virtualGeometryHardware.estimatedCost =
+			triangles * 0.45F + meshlets * 2.0F + decodedKiB * 0.050F + virtualWork;
+		input.virtualGeometryCompute.estimatedCost =
+			triangles * 0.58F + meshlets * 3.0F + decodedKiB * 0.075F + virtualWork;
+		input.policyIdentity = 2u;
 	}
 
 	GeometryRouteDecision SelectGeometryRoute(const GeometryRoutePolicyInput &input)

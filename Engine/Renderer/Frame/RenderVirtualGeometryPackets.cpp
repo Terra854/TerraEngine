@@ -1,6 +1,7 @@
 // Typed virtual-geometry selectors and packet conversion preserve existing public compatibility entry points.
 #include "RenderFrameState.h"
 #include "RenderVirtualGeometrySelection.h"
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
 #include "Renderer/VirtualGeometry/Selection/VirtualGeometrySelection.h"
 #include "Renderer/VirtualGeometry/Visibility/VirtualGeometryRasterBins.h"
@@ -756,6 +757,102 @@ CompactedVisibilitySet RenderSystem::CompactVirtualGeometryClusterPackets(
 	return result;
 }
 
+namespace
+{
+	// Both cooked and runtime detail tables use the same screen-size and error
+	// limits. Reading the cooked table directly keeps direct draws independent
+	// of virtual cluster tables and page residency.
+	template <typename Detail>
+	std::size_t SelectGeometryDetailIndex(std::span<const Detail> details,
+		const VirtualGeometryQualityProfile& sanitized, float projectedRadiusPixels)
+	{
+		std::size_t desiredIndex = 0u;
+		const float finiteProjectedRadiusPixels = std::isfinite(projectedRadiusPixels)
+			? std::max(projectedRadiusPixels, 0.0f)
+			: 512.0f;
+		// Mesh LOD Scale is documented as preserving detail for longer when raised.
+		// Apply it to the whole-mesh screen-size bands as well as cluster error so
+		// fallback and sparse-cluster paths obey the same project quality control.
+		const float scaledProjectedRadiusPixels =
+			finiteProjectedRadiusPixels * sanitized.lodErrorScale;
+		constexpr float kFirstVirtualGeometryLodTransitionPixels = 480.0f;
+		constexpr float kVirtualGeometryLodTransitionScale = 0.5f;
+		// Walk every cooked detail level instead of using two fixed buckets. Each
+		// lower LOD becomes valid when the mesh covers roughly half as much screen
+		// radius as the previous transition, which makes LOD visualizer colors move
+		// at ordinary editor camera distances while still keeping nearby meshes sharp.
+		for (std::size_t detailIndex = 1u; detailIndex < details.size(); ++detailIndex)
+		{
+			const float transitionPixels = kFirstVirtualGeometryLodTransitionPixels
+				* std::pow(kVirtualGeometryLodTransitionScale, static_cast<float>(detailIndex - 1u));
+			if (scaledProjectedRadiusPixels >= transitionPixels)
+			{
+				break;
+			}
+			desiredIndex = detailIndex;
+		}
+
+		if (sanitized.maxLodDrop > 0u)
+		{
+			desiredIndex = std::min<std::size_t>(desiredIndex, sanitized.maxLodDrop);
+		}
+
+		while (desiredIndex > 0u)
+		{
+			const Detail& detail = details[desiredIndex];
+			const float scaledError = detail.geometricError * sanitized.lodErrorScale;
+			if (std::isfinite(scaledError) && scaledError <= 0.1f)
+			{
+				break;
+			}
+			--desiredIndex;
+		}
+		return desiredIndex;
+	}
+
+	// An owner draw needs just the selected range. Virtual flags stay clear
+	// regardless of whether the source also has a page-backed representation.
+	template <typename Detail>
+	TerraEngine::Renderer::VirtualGeometryDrawRange SelectDirectLodRange(
+		std::span<const Detail> details,
+		const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels)
+	{
+		if (details.empty()) return {};
+		const auto& detail = details[SelectGeometryDetailIndex(details,
+			SanitizeVirtualGeometryQualityProfile(quality), projectedRadiusPixels)];
+		return { .selectedLodIndex = detail.lodIndex, .meshletOffset = detail.meshletOffset,
+			.meshletCount = detail.meshletCount };
+	}
+
+	float EstimateOrthographicMeshRadiusPixels(const Mesh& mesh, const glm::mat4& localToClip,
+		const glm::uvec2& targetSize)
+	{
+		// Orthographic clip W is constant for an affine model transform. An
+		// invalid footprint conservatively selects the highest cooked detail.
+		constexpr float highestDetail = std::numeric_limits<float>::max();
+		const float clipW = std::abs(localToClip[3][3]);
+		if (!mesh.hasLocalBounds || targetSize.x == 0u || targetSize.y == 0u
+			|| !std::isfinite(clipW) || clipW == 0.0f)
+		{
+			return highestDetail;
+		}
+
+		const glm::vec3 lower(mesh.localBoundsMin[0], mesh.localBoundsMin[1], mesh.localBoundsMin[2]);
+		const glm::vec3 upper(mesh.localBoundsMax[0], mesh.localBoundsMax[1], mesh.localBoundsMax[2]);
+		const glm::vec3 halfExtent = (upper - lower) * 0.5f;
+		if (glm::any(glm::lessThan(halfExtent, glm::vec3(0.0f)))) return highestDetail;
+
+		// Absolute clip-axis coefficients give the projected half-size of
+		// the entire local box, including rotation and nonuniform scale.
+		// Translation and camera depth do not change this screen footprint.
+		const glm::vec3 clipX(localToClip[0][0], localToClip[1][0], localToClip[2][0]);
+		const glm::vec3 clipY(localToClip[0][1], localToClip[1][1], localToClip[2][1]);
+		const float radiusX = glm::dot(glm::abs(clipX), halfExtent) * (0.5f * targetSize.x / clipW);
+		const float radiusY = glm::dot(glm::abs(clipY), halfExtent) * (0.5f * targetSize.y / clipW);
+		return std::isfinite(radiusX) && std::isfinite(radiusY) ? std::max(radiusX, radiusY) : highestDetail;
+	}
+}
+
 TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeometryLodRange(
 	const VirtualGeometryAssetRuntime& asset,
 	const VirtualGeometryQualityProfile& quality,
@@ -797,49 +894,8 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	range.hiZSelfOcclusionGuardPassed = true;
 	range.hiZNearPlaneGuardPassed = true;
 	range.hiZThinGeometryGuardPassed = true;
-	std::size_t desiredIndex = 0u;
-	const float finiteProjectedRadiusPixels = std::isfinite(projectedRadiusPixels)
-		? std::max(projectedRadiusPixels, 0.0f)
-		: 512.0f;
-	// Mesh LOD Scale is documented as preserving detail for longer when raised.
-	// Apply it to the whole-mesh screen-size bands as well as cluster error so
-	// fallback and sparse-cluster paths obey the same project quality control.
-	const float scaledProjectedRadiusPixels =
-		finiteProjectedRadiusPixels * sanitized.lodErrorScale;
-	constexpr float kFirstVirtualGeometryLodTransitionPixels = 480.0f;
-	constexpr float kVirtualGeometryLodTransitionScale = 0.5f;
-	// Walk every cooked detail level instead of using two fixed buckets. Each
-	// lower LOD becomes valid when the mesh covers roughly half as much screen
-	// radius as the previous transition, which makes LOD visualizer colors move
-	// at ordinary editor camera distances while still keeping nearby meshes sharp.
-	for (std::size_t detailIndex = 1u; detailIndex < asset.detailLevels.size(); ++detailIndex)
-	{
-		const float transitionPixels = kFirstVirtualGeometryLodTransitionPixels
-			* std::pow(kVirtualGeometryLodTransitionScale, static_cast<float>(detailIndex - 1u));
-		if (scaledProjectedRadiusPixels >= transitionPixels)
-		{
-			break;
-		}
-		desiredIndex = detailIndex;
-	}
-
-	if (sanitized.maxLodDrop > 0u)
-	{
-		desiredIndex = std::min<std::size_t>(desiredIndex, sanitized.maxLodDrop);
-	}
-
-	while (desiredIndex > 0u)
-	{
-		const VirtualGeometryDetailRuntime& detail = asset.detailLevels[desiredIndex];
-		const float scaledError = detail.geometricError * sanitized.lodErrorScale;
-		if (std::isfinite(scaledError) && scaledError <= 0.1f)
-		{
-			break;
-		}
-		--desiredIndex;
-	}
-
-	ApplyDetail(desiredIndex);
+	ApplyDetail(SelectGeometryDetailIndex(std::span{asset.detailLevels},
+		sanitized, projectedRadiusPixels));
 	return range;
 }
 
@@ -848,25 +904,22 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectDirectReside
 	const VirtualGeometryQualityProfile& quality,
 	float projectedRadiusPixels)
 {
-	// Reuse the same artist-facing screen-size and error policy as paged VG, then
-	// remove every virtual-only state bit. Direct LODs are ordinary ranges inside
-	// an already-resident owner mesh and must never create hierarchy or streaming
-	// work merely because they share the detail-record structure.
-	TerraEngine::Renderer::VirtualGeometryDrawRange range =
-		SelectVirtualGeometryLodRange(
-			asset,
-			quality,
-			projectedRadiusPixels,
-			true,
-			true);
-	range.virtualGeometryActive = false;
-	range.failOpen = false;
-	range.fallbackReason.clear();
-	range.hiZSelfOcclusionGuardPassed = false;
-	range.hiZNearPlaneGuardPassed = false;
-	range.hiZThinGeometryGuardPassed = false;
-	range.hiZInactiveReason.clear();
-	return range;
+	return SelectDirectLodRange(std::span{asset.detailLevels}, quality, projectedRadiusPixels);
+}
+
+TerraEngine::Renderer::VirtualGeometryDrawRange TerraEngine::Renderer::Frame::SelectCookedDirectLodRange(
+	const Mesh& mesh, const VirtualGeometryQualityProfile& quality,
+	const glm::mat4& modelMatrix, const glm::mat4& viewProjection,
+	const glm::vec3& cameraPosition, const glm::uvec2& targetSize)
+{
+	// An affine view leaves the orthographic projection's clip W independent
+	// of position. Perspective keeps the established distance estimate and LOD bands.
+	const bool orthographic = viewProjection[0][3] == 0.0f
+		&& viewProjection[1][3] == 0.0f && viewProjection[2][3] == 0.0f;
+	const float projectedRadiusPixels = orthographic
+		? EstimateOrthographicMeshRadiusPixels(mesh, viewProjection * modelMatrix, targetSize)
+		: EstimateProjectedMeshRadiusPixels(mesh, modelMatrix, cameraPosition, targetSize);
+	return SelectDirectLodRange(std::span{mesh.virtualGeometryDetailLevels}, quality, projectedRadiusPixels);
 }
 
 TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeometryResidentLodRange(

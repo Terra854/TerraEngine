@@ -10654,6 +10654,10 @@ namespace TerraEngine::Editor::Automation
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
 		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
 		request.cameraCanonicalPosition = position;
+		// The look-at vector still has its distance here. A direction-only
+		// request supplies no editor orbit target and stays camera-centered.
+		if (captureViewType == RenderViewType::Scene && targetValue.is_object())
+			request.sceneShadowFocusDistanceMetres = glm::length(forward);
 		request.viewMatrix = glm::lookAt(glm::vec3(0.0f), normalizedForward, normalizedUp);
 		if (projection == "orthographic")
 		{

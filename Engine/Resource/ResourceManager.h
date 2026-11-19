@@ -784,6 +784,11 @@ public:
 	[[nodiscard]] std::shared_ptr<const Mesh> AcquireMeshSnapshot(const TerraEngine::UUID& id) const;
 	[[nodiscard]] std::shared_ptr<const Material> AcquireMaterialSnapshot(const TerraEngine::UUID& id) const;
 	[[nodiscard]] std::shared_ptr<const Texture> AcquireTextureSnapshot(const TerraEngine::UUID& id) const;
+	// After preparing GPU work, lock the exact accepted CPU owner through
+	// descriptor and residency publication. An empty lock means a writer is
+	// active or the owner was replaced. Release before waiting on the GPU.
+	[[nodiscard]] std::shared_lock<std::shared_mutex> TryLockTexturePublication(
+		const TerraEngine::UUID& id, const Texture& expectedOwner) const;
 	// Observe an already-published mesh without starting a synchronous load or
 	// waiting behind an importer. A contained snapshot with present=false means
 	// the mesh is not currently cached; nullopt means the cache is writer-owned.

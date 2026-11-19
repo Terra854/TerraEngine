@@ -1428,15 +1428,20 @@ void AssetDatabase::Update() {
 	ProcessPendingProjectReconcile();
 
 	// Process Watcher Events
-	auto events = fileWatcher.PopEvents();
-	if (discoveryOpen && !events.empty() && (discovery.scanning || applyingReconcileGeneration != 0U)) {
-		++discovery.requestedGeneration;
-		discovery.pending = true;
-	}
-	for (const auto& e : events) {
+	bool sourceChanged = false;
+	for (const auto& e : fileWatcher.PopEvents()) {
+		// Applying a scan writes metadata and package bookkeeping. Those files
+		// are ignored by OnFileEvent, so they must not schedule another scan.
+		if (!IsTrackedSourceAssetPath(e.path)) continue;
+		sourceChanged = true;
 		// Debounce: update or add entry in pending
 		// Debounce time: 200ms
 		pendingEvents[std::filesystem::absolute(e.path)] = { e.status, 0.2f };
+	}
+	if (discoveryOpen && sourceChanged && (discovery.scanning || applyingReconcileGeneration != 0U)) {
+		// Source changes during this generation may have missed its snapshot.
+		++discovery.requestedGeneration;
+		discovery.pending = true;
 	}
 
 	// Process Pending
@@ -2197,7 +2202,10 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	// the generated TEAF envelope remains the only runtime-facing payload.
 	else if (metadata.importerName == "AudioClipImporter") compiledRelativePath.replace_extension(".teaudio");
 	else if (metadata.importerName == "ScriptImporter") compiledRelativePath.clear();
+	// Prefabs are opened directly from Assets, including package-generated ones.
+	// A fictitious build path would retry compilation on every discovery pass.
 	else if (metadata.importerName == "GenericImporter" || metadata.importerName == "TerrainImporter"
+		|| metadata.importerName == "PrefabImporter"
 		|| metadata.importerName == "NavigationGeometryCompanionImporter") compiledRelativePath.clear();
 	
 	// Store relative path in metadata
@@ -2309,7 +2317,7 @@ bool AssetDatabase::RunAsyncImportWork(const AssetMetadata& metadata, const std:
 }
 
 void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
-	// Always save metadata
+	// Ensure the durable sidecar exists before publishing its live identity.
 	SaveMetadata(metadata);
 	RegisterImportedAsset(metadata, absSourcePath, needsImport);
 	RequestAssetIndexSave();
@@ -3681,9 +3689,6 @@ bool AssetDatabase::LoadMetadata(const std::filesystem::path& metaFilePath, Asse
 
 bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 	std::filesystem::path metaFilePath = (assetRoot / metadata.sourcePath).string() + ".meta";
-	std::ofstream file(metaFilePath);
-
-	if (!file.is_open()) return false;
 	try {
 		json j;
 		j["guid"] = UuidToString(metadata.guid);
@@ -3693,8 +3698,20 @@ bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 		j["sourcePath"] = metadata.sourcePath.string();
 		j["compiledPath"] = metadata.compiledPath.string();
 		j["settings"] = metadata.settings;
-		file << std::setw(4) << j << std::endl;
-		return true;
+		const std::string contents = j.dump(4) + '\n';
+		{
+			// A model package can register hundreds of child sidecars in one
+			// update. Even ignored rewrite events can overflow the native watcher
+			// buffer, so leave the existing file alone when its contents match.
+			std::ifstream existing(metaFilePath);
+			if (existing && std::equal(std::istreambuf_iterator<char>(existing),
+				std::istreambuf_iterator<char>(), contents.begin(), contents.end()))
+			{
+				return true;
+			}
+		}
+		std::ofstream file(metaFilePath);
+		return static_cast<bool>(file << contents << std::flush);
 	} catch (...) { return false; }
 }
 

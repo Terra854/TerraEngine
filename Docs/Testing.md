@@ -1693,6 +1693,27 @@ The CTest labels also expose stable virtual-geometry slices:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
 ```
 
+For changes to automatic geometry routing, configure with tests enabled, build
+the engine test executable, and install the editor used for the camera run:
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests install
+$env:TERRAENGINE_TEST_FILTER = 'VirtualGeometry.RoutePolicy,VirtualGeometry.DirectRoute,VirtualGeometry.Stress'
+& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The route policy cases cover a moderately sized mesh with many clusters and a
+denser mesh whose geometry savings justify virtual selection. The direct-route
+cases check that orthographic LOD tracks zoom and that perspective LOD tracks
+camera distance. To check the installed editor with the Bistro, start a fresh
+session with automatic routing,
+let the textures and meshes finish streaming, and record a repeatable Scene
+View camera sweep. Record median and tail frame times along with the Scene
+View's route source, draw count, and selected cluster count. Compare with the
+same project settings, viewport size, and camera sweep on the previous build.
+
 The adaptive virtual geometry milestone adds focused adaptive slices for
 configurable cook ratios, Inspector-only per-mesh overrides, real page
 streaming, stronger Hi-Z validation, mixed-detail cluster selection, and runtime
@@ -3033,7 +3054,7 @@ The six recovery CTest slices enforce these minimum selected case counts:
 | --- | ---: |
 | Engine.SceneLoadRecovery | 14 |
 | Engine.NestedTaskSettlement | 11 |
-| Editor.AssetDiscoveryRecovery | 8 |
+| Editor.AssetDiscoveryRecovery | 10 |
 | Editor.AssetImportAdmission | 13 |
 | Editor.ExportArtifactValidation | 12 |
 | Editor.ExportRetention | 10 |
@@ -3044,6 +3065,14 @@ Vulkan rendering work; a helper-only run cannot satisfy that slice. Run the
 full single-job CTest suite after these focused gates and compare exact failures
 with the recorded pre-change baseline in
 the retained lifecycle recovery validation record.
+
+The held-discovery regression injects metadata and import-sidecar events
+while the worker owns a source snapshot. It then adds an authored source to
+verify recovery follows real source changes. With the installed Bistro
+project warm, check that `Queued asset database reconcile` stops appearing
+until there are source changes or watcher loss. A detailed Play Mode
+profiler capture with Scene View visible reports `Editor.AssetDatabase` and
+the Vulkan visible draw, shadow caster, and shadow reuse preparation costs.
 
 Imports default to four active physical jobs. `SetMaxActiveImports` accepts a
 positive limit only while the owner is quiescent; failed configuration preserves
@@ -3201,6 +3230,20 @@ read-only, write-mode, approval and cancellation controls.
 
 ## Texture ranges, RGBA rows, fatal task settlement and UI targeting
 
+To verify visible material texture streaming, configure with `BUILD_TESTING=ON`,
+then build and install the `RelWithDebInfo` preset. Run the focused regression
+from the repository root using the test executable in the build directory:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = 'Engine.Resource.Texture.VisibleMaterialRequestsCookedPayload'
+& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The fixture registers a source texture separately from its cooked TETF payload.
+Publishing a visible texture touch must dispatch the cooked load through the
+resource workers and preserve the material's texture UUID.
+
 From the bundled developer environment, configure, compile and install:
 
 ```powershell
@@ -3322,6 +3365,41 @@ permits writes to the fresh descriptor sets without adding an idle wait; runtime
 writes retain their existing synchronization. The CPU regression checks admission
 and revocation. The installed recovery fixture must separately prove actual GPU
 descriptor validity on both the initial and recreated device.
+
+For shadow preparation changes, build and install the same configuration, then
+run `Engine.RendererEfficiency`, `Engine.VirtualGeometryShadow` and
+`Engine.VirtualGeometryRenderer`. The static shadow policy test compares the
+partition built on a worker with separately normalized exact memberships. It
+also checks the source draw order for mixed static and dynamic casters.
+
+For the live Bistro comparison, warm up all visible textures, run the same
+Scene View camera sweep before and after, and compare the median and tail frame
+times against 16.7 ms. Use a detailed Play Mode capture with Scene View visible
+to read the Vulkan shadow preparation timings. Capture the same poses at the
+same resolution with backend readback enabled and compare the decoded pixels.
+For Scene View shadow coverage, frame a fixed subject and pull the camera back
+past 52 metres. Check that directional shadows still reach the subject.
+Compare a Scene custom capture with the same look-at point and a close
+capture within 28 metres. The dolly regression in `Engine.RendererEfficiency`
+also checks that the spatial query and Vulkan agree across reference frames.
+The `Editor.ReviewRemediation` suite checks that backing away in repeated fly
+sessions keeps tracking the same shadow reference. With no navigation pivot,
+turning around and switching to orthographic must center ahead of the camera.
+Restoring the camera workspace clears the transient shadow reference.
+
+For wide-view hitches, repeat the same 60–130 metre Scene View orbit after
+texture warmup. Compare tail frame times and the `Vulkan: Upload Texture Mip Tail`
+scope. Include the first orbit after warmup because the editor initially
+uploads one finer mip within the configured range. A finer resident chain
+can serve a coarser request until idle or budget eviction. The resource
+integration test checks the mip range and byte count as demand changes.
+The native texture ownership test
+injects an image-view failure during promotion and checks that a valid image
+and its material alias survive.
+The `Native.ReviewSimulation.Lifecycle.OrdinaryTexture.` filter also checks a
+loader replacing the CPU owner after Vulkan has waited for descriptor readers.
+The stale upload must keep the previous GPU image and alias, preserve the new
+owner's residency accounting, and release its unpublished allocation.
 
 The frozen delete-then-transform rollback fixture produces the scene queue's
 actual `conflicted` decision. Its host and evidence verifier require zero applied

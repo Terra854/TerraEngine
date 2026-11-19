@@ -218,6 +218,45 @@ namespace TerraEngine::EditorTests {
 			nlohmann::json recoveredIndex; { std::ifstream input(indexPath); input >> recoveredIndex; }
 			context.Expect(recoveredIndex.at("assets").size() == database.GetAssets().size(), "Retried durable index must contain the complete retained catalog.");
 		});
+		registry.Add("Editor.AssetDiscoveryRecovery.BookkeepingDoesNotRestartHeldScan", [](TestContext& context) {
+			RecoveryFixture fixture;
+			fixture.Write("Facade.teprefab", "{}");
+			fixture.Open();
+			auto& database = AssetDatabase::Instance();
+			context.Expect(Converge(database), "Initial prefab discovery must settle.");
+			const auto prefab = database.GetAssets().find(fixture.Source("Facade.teprefab"));
+			context.Expect(prefab != database.GetAssets().end() && prefab->second.compiledPath.empty(),
+				"An editor prefab must be registered without a compiled output.");
+			const auto sidecar = fixture.Source("Facade.teprefab.meta");
+			const auto originalSidecarTime = std::filesystem::last_write_time(sidecar);
+			std::filesystem::last_write_time(sidecar, originalSidecarTime - std::chrono::hours(1));
+			const auto unchangedSidecarTime = std::filesystem::last_write_time(sidecar);
+
+			// Hold the worker's snapshot to exercise notification admission while
+			// a discovery generation is still active.
+			database.SetProjectReconcileHookForTests([gate = fixture.gate](bool after) { if (after) gate->Hold(); });
+			database.InjectWatcherCompletionForTests({}, true);
+			database.Update();
+			context.Expect(fixture.gate->Wait(), "The scan must reach its held snapshot.");
+			const auto generation = database.GetDiscoveryDiagnostics().requestedGeneration;
+			database.InjectWatcherCompletionForTests(Notification(u"Facade.teprefab.meta"), true);
+			database.InjectWatcherCompletionForTests(Notification(u"Model.gltf.import.json"), true);
+			database.Update();
+			context.ExpectEqual(generation, database.GetDiscoveryDiagnostics().requestedGeneration,
+				"Editor bookkeeping must not request another discovery pass.");
+
+			fixture.Write("new-source.txt");
+			database.InjectWatcherCompletionForTests(Notification(u"new-source.txt"), true);
+			database.Update();
+			context.Expect(database.GetDiscoveryDiagnostics().requestedGeneration > generation,
+				"A source added during the held scan must retain follow-up demand.");
+			database.SetProjectReconcileHookForTests({});
+			fixture.gate->Release();
+			context.Expect(Converge(database) && database.GetAssets().contains(fixture.Source("new-source.txt")),
+				"The follow-up must publish the new source.");
+			context.Expect(std::filesystem::last_write_time(sidecar) == unchangedSidecarTime,
+				"Repeated discovery must not rewrite unchanged metadata and overflow the real watcher.");
+		});
 		registry.Add("Editor.AssetDiscoveryRecovery.RetiredProjectScanRejected", [](TestContext& context) {
 			RecoveryFixture fixture; fixture.Write("old.txt"); fixture.Open(); auto& database = AssetDatabase::Instance();
 			context.Expect(Converge(database), "Initial project scan must settle.");

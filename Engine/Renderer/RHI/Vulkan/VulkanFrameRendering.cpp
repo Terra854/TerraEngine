@@ -4,6 +4,7 @@
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
 #include "VulkanContextSource.h"
+#include "Renderer/DirectionalShadowProjection.h"
 #include "Tests/Support/ReviewRemediation/DiscardedPrimaryReviewHooks.h"
 #include "ThreadPool/ScopedTaskSettlement.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
@@ -1454,13 +1455,14 @@ void VulkanContext::RenderFrame(
 			// texture index, otherwise every shadowed light samples slot zero.
 			const uint32_t shadowSlotIndex = static_cast<uint32_t>(std::clamp(assignedShadowSlot, 0.0f, static_cast<float>(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS - 1u)));
 			if (lightType == 0u) {
-				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(light, presentation.cameraLocalPosition);
-				const glm::vec3 snappedShadowCenter = ComputeDirectionalShadowCenter(light, presentation.cameraLocalPosition);
-				light.positionAndType.x = snappedShadowCenter.x;
-				light.positionAndType.y = snappedShadowCenter.y;
-				light.positionAndType.z = snappedShadowCenter.z;
+				// Project the sealed anchor from caster selection. Other view
+				// producers leave it empty and use the camera-centered projection.
+				const auto shadow = TerraEngine::Renderer::BuildDirectionalShadowProjection(
+					glm::vec3(light.directionAndRange),
+					presentation.directionalShadowAnchor.value_or(presentation.cameraLocalPosition));
+				light.positionAndType = glm::vec4(shadow.center, light.positionAndType.w);
 				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndices[shadowSlotIndex]);
-				StoreShadowViewProjection(light, lightViewProjection);
+				StoreShadowViewProjection(light, shadow.viewProjection);
 			}
 			else if (lightType == 1u) {
 				light.shadowAndPadding.y = static_cast<float>(shadowSlotIndex);
@@ -3446,6 +3448,9 @@ void VulkanContext::RenderFrame(
 	}
 
 
+	// Measure caster preparation separately from visible draw work. The CPU may
+	// still need to qualify caster state when an existing shadow map is reused.
+	beginCommandRecordingPhase("Vulkan: Primary Prepare Shadow Caster Draws");
 	for(std::size_t shadowListIndex = 0U;
 		shadowListIndex < presentation.shadowDrawLists.size(); ++shadowListIndex) {
 		const ShadowDrawList& shadowDrawList =
@@ -3817,36 +3822,11 @@ void VulkanContext::RenderFrame(
 		}
 
 	}
-	// Exact row normalization is worker-safe: inputs own copied canonical values
-	// and immutable resource proof, with no Vulkan or live scene lookups in jobs.
-	std::vector<std::future<void>> shadowMembershipFutures;
+	beginCommandRecordingPhase("Vulkan: Primary Prepare Shadow Reuse and Batches");
 	std::uint32_t shadowPreparationWorkerTasks = 0, shadowPreparationInlineTasks = 0;
 	bool shadowPreparationSettled = false;
-	shadowMembershipFutures.reserve(preparedShadowLists.size());
-	TerraEngine::Tasks::ScopedTaskSettlement<void> shadowMembershipSettlement(shadowMembershipFutures);
 	const bool parallelShadowProof = presentation.efficiencyOptions.options.validationPreparation
 		== TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent && preparedShadowLists.size() > 1U;
-	try
-	{
-		for (auto& list : preparedShadowLists)
-		{
-			const auto normalize = [&list]() { list.membership = TerraEngine::Renderer::NormalizeShadowCasterMembership(list.casterInputs); };
-			if (parallelShadowProof) {
-				shadowMembershipSettlement.CreateAndEnqueue(ThreadPool::instance(), normalize);
-				++shadowPreparationWorkerTasks;
-			} else {
-				shadowMembershipSettlement.RunInline(normalize);
-				++shadowPreparationInlineTasks;
-			}
-		}
-		shadowMembershipSettlement.GetAll();
-		shadowPreparationSettled = true;
-	}
-	catch (...)
-	{
-		shadowMembershipSettlement.Wait();
-		for (auto& list : preparedShadowLists) { list.membership = {}; list.recordingReady = false; list.rejection.Capture("MembershipSettlementException", UINT32_MAX); }
-	}
 
 	pendingBudgetDiagnostics.cameraVisibleShadowCasterCount =
 		cameraVisibleShadowCasterCount;
@@ -4090,6 +4070,46 @@ void VulkanContext::RenderFrame(
 			key.lightProjectionStamp.cubeProjectionEvidenceComplete = true;
 		}
 		record.physicalRegionKey = (static_cast<std::uint64_t>(record.type) << 32U) | record.slot;
+	}
+
+	// Qualified lights can build all three memberships in one worker-safe pass.
+	// The protected boundary below uses its exact whole-map membership to
+	// authorize reuse, then admits static storage or records refreshed draws.
+	std::vector<std::future<void>> staticPartitionFutures;
+	TerraEngine::Tasks::ScopedTaskSettlement<void> staticPartitionSettlement(staticPartitionFutures);
+	staticPartitionFutures.reserve(shadowLightRecords.size());
+	try {
+		for (auto& record : shadowLightRecords) {
+			if (!record.preparedList) continue;
+			const auto partition = [&record]() {
+				TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Shadow Memberships", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				auto& list = *record.preparedList;
+				list.staticPartition = TerraEngine::Renderer::BuildStaticShadowPartition(
+					record.qualifiedKey, list.casterInputs);
+				// Whole-map proof remains available when static partition policy
+				// rejects a view that still supports ordinary shadow reuse.
+				list.membership = list.staticPartition.valid
+					? std::move(list.staticPartition.allMembership)
+					: TerraEngine::Renderer::NormalizeShadowCasterMembership(list.casterInputs);
+			};
+			if (parallelShadowProof) { staticPartitionSettlement.CreateAndEnqueue(ThreadPool::instance(), partition); ++shadowPreparationWorkerTasks; }
+			else { staticPartitionSettlement.RunInline(partition); ++shadowPreparationInlineTasks; }
+		}
+		staticPartitionSettlement.GetAll();
+		shadowPreparationSettled = true;
+	} catch (...) {
+		staticPartitionSettlement.Wait();
+		for (auto& record : shadowLightRecords) if (record.preparedList) {
+			// Work has settled. Keep the complete original draw list and reject
+			// reuse for this frame, including any partial worker output.
+			record.preparedList->staticPartition = {};
+			record.preparedList->membership = {};
+		}
+	}
+
+	for (auto& record : shadowLightRecords)
+	{
+		const auto& key = record.qualifiedKey;
 		const auto previous = impl->shadowPublicationLedger.Find(key);
 		if (record.type == 1U && selectIncompletePointFaces) {
 			record.validationIncompletePointFaces = true; selectIncompletePointFaces = false;
@@ -4115,9 +4135,10 @@ void VulkanContext::RenderFrame(
 				record.contentToken = hint->second;
 				try
 				{
+					// A successful alias already proved the full submitted owner
+					// and published its receipt under this view's exact key.
 					record.reusedCachedResult = impl->shadowPublicationLedger.AliasSubmittedContent(
-						key, record.contentToken, record.preparedList->membership)
-						&& impl->shadowPublicationLedger.CanReuse(key, record.contentToken);
+						key, record.contentToken, record.preparedList->membership);
 				}
 				catch (...) { impl->shadowPublicationLedger.Reset(impl->renderSessionGeneration); record.reusedCachedResult = false; }
 			}
@@ -4129,26 +4150,6 @@ void VulkanContext::RenderFrame(
 		// valid flag is published merely because preparation selected a refresh.
 	}
 
-	// Partition jobs consume sealed native proofs and original singleton indices.
-	// Unknown dynamic semantic inputs retain drawable coverage, independently of
-	// fully proven static content. No job allocates or touches live scene storage.
-	std::vector<std::future<void>> staticPartitionFutures;
-	TerraEngine::Tasks::ScopedTaskSettlement<void> staticPartitionSettlement(staticPartitionFutures);
-	staticPartitionFutures.reserve(shadowLightRecords.size());
-	try {
-		for (auto& record : shadowLightRecords) {
-			const auto partition = [&record]() {
-				if (record.preparedList) record.preparedList->staticPartition =
-					TerraEngine::Renderer::BuildStaticShadowPartition(record.qualifiedKey, record.preparedList->casterInputs);
-			};
-			if (parallelShadowProof) { staticPartitionSettlement.CreateAndEnqueue(ThreadPool::instance(), partition); ++shadowPreparationWorkerTasks; }
-			else { staticPartitionSettlement.RunInline(partition); ++shadowPreparationInlineTasks; }
-		}
-		staticPartitionSettlement.GetAll();
-	} catch (...) {
-		staticPartitionSettlement.Wait();
-		for (auto& record : shadowLightRecords) if (record.preparedList) record.preparedList->staticPartition = {};
-	}
 	// Physical charges include all views and retirements. Preserve another view's
 	// qualified owners; only obsolete keys for this current view are replaced.
 	impl->staticShadowRequestedBudget = presentation.efficiencyOptions.options.staticShadowCacheBudgetBytes;
@@ -4173,9 +4174,6 @@ void VulkanContext::RenderFrame(
 			if (!record.preparedList || !record.preparedList->recordingReady) { record.staticFallback = "IncompleteCasterPreparation"; continue; }
 			auto& partition = record.preparedList->staticPartition;
 			if (!partition.valid) { record.staticFallback = "InvalidStaticPartition"; continue; }
-			// Retain one complete all-caster vector for final validity/diagnostics;
-			// partition recording needs only its separate category rows and indices.
-			record.preparedList->membership = std::move(partition.allMembership);
 			if (partition.staticSourceIndices.empty()) { record.staticFallback = "EmptyStaticMembership"; continue; }
 			if (!impl->staticShadowRequestedBudget) { record.staticFallback = "StaticBudgetDisabled"; continue; }
 			if (record.validationIncompletePointFaces) { record.staticFallback = "IncompletePointValidation"; continue; }
@@ -4239,8 +4237,7 @@ void VulkanContext::RenderFrame(
 				record.staticEntry = nullptr; record.staticFallback = "StaticInitializationPendingSubmit"; continue;
 			}
 			record.staticReused = entry.contentToken && impl->staticShadowPublicationLedger.AliasSubmittedContent(
-				entry.staticView, entry.contentToken, partition.staticMembership)
-				&& impl->staticShadowPublicationLedger.CanReuse(entry.staticView, entry.contentToken);
+				entry.staticView, entry.contentToken, partition.staticMembership);
 			if (record.staticReused) {
 				const auto source = impl->staticShadowPublicationLedger.Find(entry.staticView);
 				if (source) { record.staticSourceCommand = source->commandSerial; record.staticSourceSubmit = source->submitSerial; }

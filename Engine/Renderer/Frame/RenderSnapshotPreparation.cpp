@@ -1,6 +1,7 @@
 // Typed snapshot and lane preparation; inputs are immutable frame-owned records.
 #include "RenderFrameState.h"
 #include "RenderSnapshotPreparation.h"
+#include "Renderer/VirtualGeometry/Selection/GeometryRouteCosts.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
 #include "Profiling/ProfilerScope.h"
@@ -335,7 +336,7 @@ namespace TerraEngine::Renderer::Frame {
 			mesh.virtualGeometryDetailLevels.empty()
 				? nullptr
 				: &mesh.virtualGeometryDetailLevels.front();
-		facts.packedMeshletCount = !declaresVirtual && baseDetail != nullptr
+		facts.packedMeshletCount = baseDetail != nullptr
 			? baseDetail->meshletCount
 			: mesh.runtimeLayout.meshletCount;
 		facts.sourceTriangleCount = baseDetail != nullptr
@@ -714,7 +715,7 @@ void RenderSystem::AssembleFrameSnapshotRows(std::span<RenderableEntry> renderab
 			// unordered-map probes while mixed scenes preserve the general cache path.
 			preparedMeshId = entry.mesh->meshId;
 			preparedMesh = entry.runtimeMesh;
-			preparedVirtualRanges = &virtualDrawRangeByMesh[entry.mesh->meshId];
+			preparedVirtualRanges = nullptr;
 			preparedRouteFacts = preparedMesh != nullptr
 				? &geometryInputs.Facts(entry.mesh->meshId, *preparedMesh)
 				: &emptyRouteFacts;
@@ -723,32 +724,13 @@ void RenderSystem::AssembleFrameSnapshotRows(std::span<RenderableEntry> renderab
 			preparedRouteDecision = existingRoute != geometryRouteDecisionByMesh.end()
 				? &existingRoute->second : nullptr;
 		}
-		TerraEngine::Renderer::VirtualGeometryDrawRange virtualRange{};
 		const Mesh* mesh = preparedMesh;
-		if (mesh != nullptr && mesh->hasVirtualGeometry)
-		{
-			const std::size_t cullingIndex = entry.mesh->taskShaderCullingEnabled ? 1U : 0U;
-			auto& cachedRanges = *preparedVirtualRanges;
-			if(cachedRanges[cullingIndex].has_value()) {
-				virtualRange = *cachedRanges[cullingIndex];
-			} else {
-				const VirtualGeometryAssetRuntime& runtime =
-					geometryInputs.Runtime(entry.mesh->meshId, *mesh);
-				virtualRange = SelectVirtualGeometryResidentLodRange(
-					runtime,
-					renderFrameSnapshot.renderSettings.virtualGeometry,
-					512.0f,
-					entry.mesh->taskShaderCullingEnabled,
-					!mesh->meshletBounds.empty());
-				cachedRanges[cullingIndex] = virtualRange;
-			}
-		}
 		renderFrameSnapshot.renderables.push_back({
 			entry.objectId,
 			entry.mesh->meshId,
 			entry.mesh->materialId,
 			glm::mat4(1.0F),
-			virtualRange,
+			{},
 			entry.mesh->taskShaderCullingEnabled,
 			false
 		});
@@ -769,44 +751,29 @@ void RenderSystem::AssembleFrameSnapshotRows(std::span<RenderableEntry> renderab
 			snapshotRendererGeneration);
 		snapshotRenderable.invalidation.residency = std::max<std::uint64_t>(1u,
 			renderFrameSnapshot.resourceRevision);
-		// Copy representation facts into the frame before view-specific work. A
-		// direct route clears its VG span, preventing hierarchy/page/executor work
-		// while leaving conventional mesh-task submission and resource uploads intact.
+		// Choose the representation from captured mesh facts before preparing
+		// virtual ranges. Direct-only work needs no hierarchy or residency mirror.
 		const CanonicalGeometryRouteFacts& routeFacts = *preparedRouteFacts;
 		const std::uint64_t routeObjectIdentity = entry.objectIdentity;
 		if(preparedRouteDecision == nullptr) {
 			TerraEngine::Renderer::GeometryRoutePolicyInput routeInput{};
-			// Route costs are calibrated from canonical topology, physical directory,
-			// and decoded-byte facts. Optional meshlet bounds deliberately contribute
-			// nothing: they are a culling acceleration structure, not geometry truth.
-			// Repeated instances share these immutable facts, so calculate them once
-			// for the mesh instead of once for every object in a crowd.
-			const float sourceTriangleWork =
-				static_cast<float>(routeFacts.sourceTriangleCount);
-			const float meshletWork = static_cast<float>(routeFacts.packedMeshletCount);
-			const float decodedKiB = static_cast<float>(routeFacts.decodedBytes) / 1024.0F;
-			const float directCost = sourceTriangleWork + meshletWork * 8.0F
-				+ decodedKiB * 0.125F;
-			const float virtualDirectoryWork =
-				static_cast<float>(routeFacts.physicalPageCount) * 24.0F
-				+ static_cast<float>(routeFacts.physicalBlockCount) * 3.0F;
 			routeInput.direct.valid = routeFacts.directUsable;
-			routeInput.direct.estimatedCost = routeFacts.directUsable
-				? std::max(1.0F, directCost) : 0.0F;
 			routeInput.virtualGeometryHardware.valid = routeFacts.virtualGeometryUsable;
 			routeInput.virtualGeometryHardware.capabilitiesAvailable =
 				hardwareVirtualGeometryRouteAvailable;
-			routeInput.virtualGeometryHardware.estimatedCost = routeFacts.virtualGeometryUsable
-				? std::max(1.0F, sourceTriangleWork * 0.45F + meshletWork * 2.0F
-					+ decodedKiB * 0.050F + virtualDirectoryWork)
-				: 0.0F;
 			routeInput.virtualGeometryCompute.valid = routeFacts.virtualGeometryUsable;
 			routeInput.virtualGeometryCompute.capabilitiesAvailable =
 				computeVirtualGeometryRouteAvailable;
-			routeInput.virtualGeometryCompute.estimatedCost = routeFacts.virtualGeometryUsable
-				? std::max(1.0F, sourceTriangleWork * 0.58F + meshletWork * 3.0F
-					+ decodedKiB * 0.075F + virtualDirectoryWork)
-				: 0.0F;
+			// The cost model is shared by repeated instances. Meshlet bounds
+			// accelerate culling without changing the cooked work counts.
+			TerraEngine::Renderer::EstimateGeometryRouteCosts(routeInput, {
+				.sourceTriangles = routeFacts.sourceTriangleCount,
+				.sourceMeshlets = routeFacts.packedMeshletCount,
+				.decodedBytes = routeFacts.decodedBytes,
+				.virtualClusters = mesh != nullptr ? mesh->virtualGeometryClusters.size() : 0u,
+				.physicalPages = routeFacts.physicalPageCount,
+				.physicalBlocks = routeFacts.physicalBlockCount
+			});
 			routeInput.calibrationIdentity = routeFacts.calibrationIdentity == 0u
 				? 1u : routeFacts.calibrationIdentity;
 			if(validationRouteOverride.has_value()) {
@@ -910,9 +877,25 @@ void RenderSystem::AssembleFrameSnapshotRows(std::span<RenderableEntry> renderab
 			renderFrameSnapshot.geometryRouteDecisions.push_back(
 				std::move(routeDecision));
 		}
-		if (routeSelection.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
+		if (routeSelection.selected != TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+			&& mesh != nullptr && mesh->hasVirtualGeometry)
 		{
-			snapshotRenderable.virtualGeometry = {};
+			// Only virtual routes need a residency-aware fallback range.
+			// Repeated instances share it when their task-culling options match.
+			if (preparedVirtualRanges == nullptr)
+			{
+				preparedVirtualRanges = &virtualDrawRangeByMesh[entry.mesh->meshId];
+			}
+			const std::size_t cullingIndex = entry.mesh->taskShaderCullingEnabled ? 1U : 0U;
+			auto& range = (*preparedVirtualRanges)[cullingIndex];
+			if (!range.has_value())
+			{
+				const auto& runtime = geometryInputs.Runtime(entry.mesh->meshId, *mesh);
+				range = SelectVirtualGeometryResidentLodRange(runtime,
+					renderFrameSnapshot.renderSettings.virtualGeometry, 512.0f,
+					entry.mesh->taskShaderCullingEnabled, !mesh->meshletBounds.empty());
+			}
+			snapshotRenderable.virtualGeometry = *range;
 		}
 		const TerraEngine::Renderer::AnimationRenderBinding& binding = entry.animationBinding;
 		// Worker selection owns the complete binding once per renderable. Protected

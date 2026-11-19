@@ -24,6 +24,7 @@ TerraEngine::Renderer::RenderViewPresentationInput RenderSystem::MakeFramePresen
 		input.viewMatrix = frame.viewMatrix;
 		input.projectionMatrix = frame.projectionMatrix;
 		input.cameraLocalPosition = frame.cameraLocalPosition;
+		input.directionalShadowAnchor = frame.directionalShadowAnchor;
 		input.deltaTimeSeconds = frame.deltaTimeSeconds;
 		input.globalTaskShaderCullingEnabled = frame.globalTaskShaderCullingEnabled;
 		input.cullingEpsilon = frame.cullingEpsilon;

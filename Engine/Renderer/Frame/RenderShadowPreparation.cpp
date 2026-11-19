@@ -1,4 +1,5 @@
 #include "RenderViewPreparation.h"
+#include "Renderer/DirectionalShadowProjection.h"
 #include "RenderPreparationTasks.h"
 #include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureControls.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -152,9 +153,6 @@ void RenderSystem::CaptureSnapshotShadowEvidence(const RenderableEntry& entry,
 }
 
 namespace {
-	constexpr float kDirectionalShadowNear = 0.1f;
-	constexpr float kDirectionalShadowFar = 180.0f;
-	constexpr float kDirectionalShadowExtent = 40.0f;
 	glm::vec3 SafeNormalizeShadowDirection(const glm::vec3& value, const glm::vec3& fallback)
 	{
 		const float length = glm::length(value);
@@ -165,23 +163,6 @@ namespace {
 		}
 
 		return value / length;
-	}
-	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraLocalPosition)
-	{
-		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
-		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
-			? glm::vec3(1.0f, 0.0f, 0.0f)
-			: glm::vec3(0.0f, 1.0f, 0.0f);
-		const float texelWorldSize = (kDirectionalShadowExtent * 2.0f) / 1024.0f;
-
-		// Matching the Vulkan light-space snap keeps CPU culling aligned with the
-		// exact shadow map coverage that the GPU will render.
-		const glm::vec3 provisionalLightPosition = cameraLocalPosition - lightDirection * 60.0f;
-		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraLocalPosition, worldUp);
-		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraLocalPosition, 1.0f);
-		snappedCenterLightSpace.x = std::floor(snappedCenterLightSpace.x / texelWorldSize) * texelWorldSize;
-		snappedCenterLightSpace.y = std::floor(snappedCenterLightSpace.y / texelWorldSize) * texelWorldSize;
-		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
 	}
 	std::uint64_t BuildLightSetSignature(std::span<const FrameLightCandidate> lights)
 	{
@@ -204,28 +185,15 @@ namespace {
 		std::uint64_t settingsSignature,
 		std::uint64_t renderableWorldSignature,
 		std::uint64_t lightSetSignature,
-		const glm::vec3& cameraLocalPosition)
+		const glm::vec3& directionalShadowAnchor)
 	{
 		std::uint64_t seed = kRenderHashOffset;
 		HashCombine(seed, sceneRevision);
 		HashCombine(seed, settingsSignature);
 		HashCombine(seed, renderableWorldSignature);
 		HashCombine(seed, lightSetSignature);
-		HashVec3(seed, cameraLocalPosition);
+		HashVec3(seed, directionalShadowAnchor);
 		return seed;
-	}
-	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraLocalPosition)
-	{
-		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
-		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
-			? glm::vec3(1.0f, 0.0f, 0.0f)
-			: glm::vec3(0.0f, 1.0f, 0.0f);
-		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraLocalPosition);
-		const glm::vec3 lightPosition = snappedCenterWorld - lightDirection * 60.0f;
-		glm::mat4 view = glm::lookAtRH(lightPosition, snappedCenterWorld, worldUp);
-		glm::mat4 projection = glm::orthoRH_ZO(-kDirectionalShadowExtent, kDirectionalShadowExtent, -kDirectionalShadowExtent, kDirectionalShadowExtent, kDirectionalShadowNear, kDirectionalShadowFar);
-		projection[1][1] *= -1.0f;
-		return projection * view;
 	}
 	glm::mat4 BuildSpotShadowViewProjection(const GPULight& light)
 	{
@@ -267,7 +235,7 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 	std::span<const RenderItemRecord* const> renderableDrawCommandsByOrdinal,
 	std::uint64_t renderPreparationSettingsSignature, std::uint64_t renderableSubmissionSignature,
 	std::size_t renderGraphWorkerCount, std::span<const FrameLightCandidate> ownedViewLights,
-	const glm::vec3& viewCameraLocalPosition, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
+	const glm::vec3& viewDirectionalShadowAnchor, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
 	RenderViewType viewType, std::uint32_t outputId)
 {
 	const auto& renderFrameSnapshot = visibilityInputs.renderFrameSnapshot;
@@ -332,15 +300,16 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 		// Per-view frame storage owns these candidates after the producer vector moves.
 		// Chunk jobs settle before this borrowed span leaves the protected builder.
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Shadow Draw Lists Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		// Spatial queries use the index's own frame, regardless of a view rebase.
+		// Localize the same shadow anchor used by Vulkan into the spatial index's
+		// frame before building the caster query. Cache keys use that anchor too.
 		const auto indexedFrame = spatialIndex.GetReferenceFrame();
-		TerraEngine::Scene::WorldDelta cameraDelta;
-		cameraDelta.offsetMetres = glm::dvec3(viewCameraLocalPosition);
-		const auto canonicalCamera = TerraEngine::Scene::ApplyWorldDelta(viewReferenceFrame.canonicalOrigin, cameraDelta);
-		const auto localizedCamera = canonicalCamera.Succeeded()
-			? TerraEngine::Scene::LocalizeWorldPosition(canonicalCamera.position, indexedFrame.canonicalOrigin, indexedFrame.maximumLocalDistanceMetres)
-			: TerraEngine::Scene::WorldLocalizationResult{{}, canonicalCamera.error};
-		const glm::vec3 cameraLocalPosition = localizedCamera.Succeeded() ? glm::vec3(localizedCamera.offsetMetres) : glm::vec3(0);
+		TerraEngine::Scene::WorldDelta anchorDelta;
+		anchorDelta.offsetMetres = glm::dvec3(viewDirectionalShadowAnchor);
+		const auto canonicalAnchor = TerraEngine::Scene::ApplyWorldDelta(viewReferenceFrame.canonicalOrigin, anchorDelta);
+		const auto localizedAnchor = canonicalAnchor.Succeeded()
+			? TerraEngine::Scene::LocalizeWorldPosition(canonicalAnchor.position, indexedFrame.canonicalOrigin, indexedFrame.maximumLocalDistanceMetres)
+			: TerraEngine::Scene::WorldLocalizationResult{{}, canonicalAnchor.error};
+		const glm::vec3 directionalShadowAnchor = localizedAnchor.Succeeded() ? glm::vec3(localizedAnchor.offsetMetres) : glm::vec3(0);
 		std::vector<FrameLightCandidate> queryLights(ownedViewLights.begin(), ownedViewLights.end());
 		std::vector<bool> queryLightLocalized(queryLights.size(), false);
 		for (std::size_t i = 0; i < queryLights.size(); ++i) {
@@ -355,14 +324,14 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 			renderPreparationSettingsSignature,
 			renderableSubmissionSignature,
 			BuildLightSetSignature(queryLights),
-			cameraLocalPosition);
+			directionalShadowAnchor);
 		// Fixture controls change actual selector bytes, so old compact lists must
 		// not bypass their application. The generation is stable across step frames.
 		HashCombine(signature, renderFrameSnapshot.efficiencyFixtureIntent.controlGeneration);
 		HashCombine(signature, indexedFrame.generation);
 		HashCombine(signature, std::hash<double>{}(indexedFrame.maximumLocalDistanceMetres));
 		HashCombine(signature, TerraEngine::Scene::WorldPositionHash{}(indexedFrame.canonicalOrigin));
-		HashCombine(signature, localizedCamera.Succeeded() ? 1U : 0U);
+		HashCombine(signature, localizedAnchor.Succeeded() ? 1U : 0U);
 		for (const bool known : queryLightLocalized) HashCombine(signature, known ? 1U : 0U);
 		const auto* casterSelection = TerraEngine::Renderer::ResolveRendererEfficiencyFixtureCasterSelection(
 			renderFrameSnapshot.efficiencyFixtureIntent, viewType, outputId);
@@ -456,13 +425,14 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 					TerraEngine::Scene::SpatialQueryResult query{};
 
 					const bool queryReady = lightType == static_cast<std::uint32_t>(LightType::Directional)
-					? localizedCamera.Succeeded() : queryLightLocalized[lightIndex];
+					? localizedAnchor.Succeeded() : queryLightLocalized[lightIndex];
 					if (!queryReady) {
 						// An unrepresentable query must retain complete immutable caster coverage.
 					}
 					else if (lightType == static_cast<std::uint32_t>(LightType::Directional))
 					{
-						const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraLocalPosition);
+						const glm::mat4 lightViewProjection = TerraEngine::Renderer::BuildDirectionalShadowProjection(
+							glm::vec3(candidate.gpuLight.directionAndRange), directionalShadowAnchor).viewProjection;
 						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
 					}
 

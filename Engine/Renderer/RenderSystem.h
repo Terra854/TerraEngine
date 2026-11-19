@@ -394,12 +394,14 @@ public:
 		glm::mat4 proj;
 		TerraEngine::Scene::WorldPosition canonicalPosition{};
 		bool orthographic = false;
+		// Distance along the viewing ray to the editor orbit target.
+		float shadowFocusDistanceMetres = 0.0f;
 	};
 
 	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj,
 		const TerraEngine::Scene::WorldPosition& canonicalPosition,
-		bool orthographic = false) {
-		sceneViewCamera = OverrideCameraData{view, proj, canonicalPosition, orthographic};
+		bool orthographic = false, float shadowFocusDistanceMetres = 0.0f) {
+		sceneViewCamera = OverrideCameraData{view, proj, canonicalPosition, orthographic, shadowFocusDistanceMetres};
 		hasSceneViewCamera = true;
 	}
 	// Record the editor panel dimensions before rendering so Vulkan allocates
@@ -1043,7 +1045,7 @@ TerraEngine::Renderer::Frame::VisibleCommandBuildResult PrepareFrameVisibleComma
 	std::span<const RenderItemRecord* const> renderableDrawCommandsByOrdinal,
 	std::uint64_t renderPreparationSettingsSignature, std::uint64_t renderableSubmissionSignature,
 	std::size_t renderGraphWorkerCount, std::span<const FrameLightCandidate> ownedViewLights,
-	const glm::vec3& viewCameraLocalPosition, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
+	const glm::vec3& viewDirectionalShadowAnchor, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
 	RenderViewType viewType, std::uint32_t outputId);
 
 	struct PreparedRenderSubmission;

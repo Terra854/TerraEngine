@@ -625,6 +625,13 @@ namespace TerraEngine::Renderer::Frame {
 void RenderSystem::CollectFrameVirtualGeometryDiagnostics(const FrameVirtualGeometryInputs& inputs,
 	FrameVirtualGeometryPreparation& preparation, const std::vector<RenderItemRecord>& commands, RenderViewType viewType)
 {
+	// Compact frame stats come from submitted commands. Build the cooked-asset
+	// inventory only for detailed inspection, including assets routed direct.
+	if (!TerraEngine::Renderer::RenderDiagnosticsRequested())
+	{
+		return;
+	}
+
 	auto& frameMeshResources = inputs.frameMeshResources;
 	auto& geometryInputs = inputs.geometryInputs;
 	auto& gameVirtualGeometryDiagnosticsAssets = preparation.gameVirtualGeometryDiagnosticsAssets;
@@ -918,25 +925,16 @@ TerraEngine::Renderer::Frame::VirtualGeometryViewSelectionPacket RenderSystem::A
 		const Mesh* mesh = capturedMesh != frameMeshResources.end()
 			? capturedMesh->second : nullptr;
 		if (mesh != nullptr
-			&& !mesh->hasVirtualGeometry
 			&& command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
 			&& !mesh->virtualGeometryDetailLevels.empty())
 		{
-			// Low-poly assets select one compact owner-mesh range per camera. This is
-			// conventional resident work: no virtual flags, packets, feedback, or
-			// page requests are manufactured for the direct path.
-			const VirtualGeometryAssetRuntime& runtime =
-				geometryInputs.Runtime(command.meshId, *mesh);
-			const float projectedRadiusPixels = EstimateProjectedMeshRadiusPixels(
-				*mesh,
-				command.modelMatrix,
-				cameraPosition,
-				targetSize);
+			// A cooked owner mesh stores multiple LODs, even if it also contains
+			// virtual pages. Select one resident range when the route is direct.
+			// An empty range would draw the entire allocation and overlap the LODs.
 			const TerraEngine::Renderer::VirtualGeometryDrawRange range =
-				RenderSystem::SelectDirectResidentLodRange(
-					runtime,
-					viewVirtualGeometryQuality,
-					projectedRadiusPixels);
+				TerraEngine::Renderer::Frame::SelectCookedDirectLodRange(
+					*mesh, viewVirtualGeometryQuality, command.modelMatrix,
+					viewProjection, cameraPosition, targetSize);
 			command.virtualMeshletOffset = range.meshletOffset;
 			command.virtualMeshletCount = range.meshletCount;
 			command.selectedVirtualLod = range.selectedLodIndex;
@@ -1262,12 +1260,11 @@ void RenderSystem::ApplyFrameShadowVirtualGeometrySelection(const FrameVirtualGe
 		const Mesh* mesh = capturedMesh != frameMeshResources.end()
 			? capturedMesh->second : nullptr;
 		if (mesh != nullptr
-			&& !mesh->hasVirtualGeometry
 			&& command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
 			&& !mesh->virtualGeometryDetailLevels.empty())
 		{
-			// Shadow silhouettes use direct LOD0 conservatively while camera views
-			// remain free to choose a cheaper resident range.
+			// Use the single source-detail range for direct shadow silhouettes,
+			// including meshes that also have a virtual representation.
 			const VirtualGeometryDetailLevelRecord& baseDetail =
 				mesh->virtualGeometryDetailLevels.front();
 			command.virtualMeshletOffset = baseDetail.meshletOffset;

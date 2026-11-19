@@ -5,6 +5,8 @@
 
 #include "VulkanResourceSource.h"
 
+#include <span>
+
 TerraEngine::Renderer::Vulkan::PreparedShadowPageSet VulkanContext::Impl::EnsureShadowAuthoredPagePayload(
 	const TerraEngine::Renderer::Vulkan::ShadowPageCutRequest& request, bool allowUpload)
 {
@@ -12,29 +14,43 @@ TerraEngine::Renderer::Vulkan::PreparedShadowPageSet VulkanContext::Impl::Ensure
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	const auto reject = [](const char* reason) { return PreparedShadowPageSet{false, {}, reason}; };
 	try {
-		const auto cut = BuildShadowAuthoredPageCut(request);
-		if (!cut.complete) return {false, {}, cut.fallbackReason};
-		if (deviceLost || !initialized || allocator == VK_NULL_HANDLE
-			|| std::any_of(globalDescriptorSets.begin(), globalDescriptorSets.end(), [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; })
-			|| request.mesh->publicationGeneration != request.cpuPublicationGeneration
-			|| ResourceManager::Instance().AcquireMeshSnapshot(request.meshId) != request.mesh)
-			return reject("Current native authored payload or device is unavailable.");
-
-		PreparedShadowPageSet result;
-		result.bindings.reserve(cut.segments.size());
-		for (std::size_t index = 0U; index < cut.segments.size(); ++index) {
-			PreparedShadowPageBinding binding;
-			binding.segment = cut.segments[index]; binding.descriptorIndex = static_cast<std::uint32_t>(index);
-			binding.cpuPublicationGeneration = request.cpuPublicationGeneration;
-			result.bindings.push_back(binding);
-		}
+		// Recheck the live publication even on a cache hit. The resource retains
+		// the immutable mesh, but only the current owner can authorize recording.
+		const auto hasCurrentPublication = [&] {
+			return !deviceLost && initialized && allocator != VK_NULL_HANDLE
+				&& std::none_of(globalDescriptorSets.begin(), globalDescriptorSets.end(), [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; })
+				&& request.mesh && request.mesh->publicationGeneration == request.cpuPublicationGeneration
+				&& ResourceManager::Instance().AcquireMeshSnapshot(request.meshId) == request.mesh;
+		};
+		const auto prepareBindings = [&](std::span<const ShadowAuthoredPageSegment> segments) {
+			PreparedShadowPageSet result;
+			result.bindings.reserve(segments.size());
+			for (std::size_t index = 0U; index < segments.size(); ++index) {
+				PreparedShadowPageBinding binding;
+				binding.segment = segments[index]; binding.descriptorIndex = static_cast<std::uint32_t>(index);
+				binding.cpuPublicationGeneration = request.cpuPublicationGeneration;
+				result.bindings.push_back(binding);
+			}
+			return result;
+		};
+		// Published cuts already proved contiguous coverage of exactly one span
+		// and LOD. Matching both endpoints and that LOD on the same immutable
+		// mesh publication lets prewarm and recording reuse the validated cut.
+		const std::uint64_t requestedEnd = static_cast<std::uint64_t>(request.ownerMeshletOffset) + request.ownerMeshletCount;
 		const auto cached = std::find_if(shadowAuthoredPageResources.begin(), shadowAuthoredPageResources.end(), [&](const auto& resource) {
-			return resource.meshId == request.meshId && resource.retainedMesh == request.mesh
-				&& resource.cpuPublicationGeneration == request.cpuPublicationGeneration && resource.segments == cut.segments;
+			if (request.deformationUnsupported || request.materialUnsupported || resource.meshId != request.meshId
+				|| resource.retainedMesh != request.mesh || resource.cpuPublicationGeneration != request.cpuPublicationGeneration
+				|| resource.segments.empty()) return false;
+			const auto& first = resource.segments.front();
+			const auto& last = resource.segments.back();
+			return first.selectedLod == request.selectedLod && first.ownerMeshletOffset == request.ownerMeshletOffset
+				&& static_cast<std::uint64_t>(last.ownerMeshletOffset) + last.ownerMeshletCount == requestedEnd;
 		});
 		if (cached != shadowAuthoredPageResources.end()) {
+			if (!hasCurrentPublication()) return reject("Current native authored payload or device is unavailable.");
 			if (cached->payload.buffer == VK_NULL_HANDLE || cached->payload.size == 0U || cached->allocationGeneration == 0U
 				|| cached->bindlessIndex == INVALID_BINDLESS_BUFFER_INDEX) return reject("Cached authored shadow payload is unavailable.");
+			auto result = prepareBindings(cached->segments);
 			for (auto& binding : result.bindings) {
 				binding.payloadBufferIndex = cached->bindlessIndex;
 				binding.payloadAllocationGeneration = cached->allocationGeneration;
@@ -46,11 +62,15 @@ TerraEngine::Renderer::Vulkan::PreparedShadowPageSet VulkanContext::Impl::Ensure
 			result.complete = true;
 			return result;
 		}
+		const auto cut = BuildShadowAuthoredPageCut(request);
+		if (!cut.complete) return {false, {}, cut.fallbackReason};
+		if (!hasCurrentPublication()) return reject("Current native authored payload or device is unavailable.");
 		// Recording consumes only bindings published before its primary began.
 		// A changed cut or loader publication keeps the complete owner fallback;
 		// the next frame can prepare its missing page descriptors safely.
 		if (!allowUpload) return reject("Authored shadow page cut was not prepared before command recording.");
 
+		auto result = prepareBindings(cut.segments);
 		// Each light-selected cut gets independent packet descriptors. Camera
 		// visibility cannot remove an off-camera caster from this complete stream.
 		std::vector<GpuVirtualGeometryPacketRecord> packets;

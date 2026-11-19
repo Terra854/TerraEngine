@@ -1,6 +1,6 @@
 #include "TestHarness.h"
 
-#include "Renderer/VirtualGeometry/Selection/GeometryRoutePolicy.h"
+#include "Renderer/VirtualGeometry/Selection/GeometryRouteCosts.h"
 
 #include <cstdint>
 
@@ -8,6 +8,41 @@ namespace TerraEngine::Tests
 {
 	void RegisterVirtualGeometryRoutePolicyTests(TestRegistry &registry)
 	{
+		registry.Add("VirtualGeometry.RoutePolicy.ChargesChangingViewClusterWork",
+			[](TestContext& context)
+			{
+				using namespace TerraEngine::Renderer;
+				GeometryRoutePolicyInput input{};
+				input.direct.valid = true;
+				input.virtualGeometryHardware.valid = true;
+				input.virtualGeometryCompute.valid = true;
+
+				// A facade-sized mesh with a fragmented hierarchy can need many
+				// packets per view despite fitting in one direct meshlet draw.
+				EstimateGeometryRouteCosts(input, { .sourceTriangles = 39000u,
+					.sourceMeshlets = 650u, .decodedBytes = 3u * 1024u * 1024u,
+					.virtualClusters = 90u, .physicalPages = 22u, .physicalBlocks = 42u });
+				const auto facade = SelectGeometryRouteCompact(input);
+				context.Expect(facade.selected == GeometryRoute::DirectMeshlet
+					&& facade.source == GeometryRouteSelectionSource::Automatic,
+					"A fragmented medium mesh should automatically avoid virtual packet overhead.");
+
+				// A much denser mesh can amortize the same sort of submission
+				// overhead when its hierarchy can cover more geometry per cluster.
+				EstimateGeometryRouteCosts(input, { .sourceTriangles = 500000u,
+					.sourceMeshlets = 8000u, .decodedBytes = 24u * 1024u * 1024u,
+					.virtualClusters = 700u, .physicalPages = 200u, .physicalBlocks = 400u });
+				const auto dense = SelectGeometryRouteCompact(input);
+				context.Expect(dense.selected == GeometryRoute::VirtualGeometryHardware,
+					"Automatic routing must still choose virtual geometry when its savings exceed preparation cost.");
+
+				input.authorOverride = GeometryRoute::DirectMeshlet;
+				const auto forced = SelectGeometryRouteCompact(input);
+				context.Expect(forced.selected == GeometryRoute::DirectMeshlet
+					&& forced.source == GeometryRouteSelectionSource::AuthorOverride,
+					"An eligible explicit route must still take precedence over the estimate.");
+			});
+
 		registry.Add("VirtualGeometry.RoutePolicy.CorrectnessFirstEligibilityAndFallback",
 			[](TestContext &context)
 			{

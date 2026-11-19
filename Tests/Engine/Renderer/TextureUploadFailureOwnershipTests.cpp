@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 namespace TerraEngine::Tests::Review
@@ -297,6 +298,119 @@ namespace TerraEngine::Tests::Review
 			}
 			return result;
 		}
+
+		static void ExerciseMipPromotion(VulkanContext& context, const UUID& id, TestContext& test)
+		{
+			auto& state = *context.impl;
+			auto& resources = ResourceManager::Instance();
+			std::lock_guard lock(state.deviceStateMutex);
+			resources.MarkTextureStreamingDistance(id, 100.0, 1, "far texture demand");
+			state.EnsureTexture(id);
+			const auto original = state.textureCache.at(id);
+			const auto alias = state.textureIndexMap.at(id);
+			test.Expect(original.residentMipOffset == 3U && alias > 2U, "Far demand initially publishes a valid coarse mip tail.");
+			VmaTotalStatistics before{}, after{};
+			vmaCalculateStatistics(state.allocator, &before);
+
+			// A genuine copy succeeds before native image-view creation fails.
+			// Existing readers must keep the old image and material alias.
+			resources.MarkTextureStreamingDistance(id, 0.0, 2, "near texture demand");
+			TextureUploadFailureHook hook;
+			hook.role = ReviewTextureRole::Ordinary;
+			hook.failure = ReviewTextureFailure::ImageView;
+			test.Expect(SetTextureUploadFailureHook(&hook), "Arm the real replacement fault hook.");
+			{
+				struct Disarm { ~Disarm() { SetTextureUploadFailureHook(nullptr); } } disarm;
+				state.EnsureTexture(id);
+			}
+			vmaCalculateStatistics(state.allocator, &after);
+			test.Expect(hook.actualCopySubmitAndFenceSucceeded && hook.reached == 1
+				&& before.total.statistics.allocationCount == after.total.statistics.allocationCount,
+				"The failed promotion destroys only the new unpublished allocation.");
+			test.Expect(state.textureCache.at(id).view == original.view && state.textureIndexMap.at(id) == alias,
+				"The previous image and bindless material alias survive the failed promotion.");
+
+			state.EnsureTexture(id);
+			const auto promoted = state.textureCache.at(id);
+			test.Expect(promoted.view != original.view && promoted.residentMipOffset == 0U && state.textureIndexMap.at(id) == alias,
+				"A successful retry switches the same material alias to the finer image.");
+			// Advance beyond the nearest-view aggregation window so the
+			// backend receives an actual coarser demand on the same owner.
+			std::this_thread::sleep_for(std::chrono::milliseconds(275));
+			resources.MarkTextureStreamingDistance(id, 100.0, 3, "far texture demand again");
+			test.Expect(resources.ResolveTextureMipResidencyForTexture(id, 5).sourceMipOffset == 3U,
+				"The distance publisher has selected the coarser tail again.");
+			state.EnsureTexture(id);
+			test.Expect(state.textureCache.at(id).view == promoted.view && state.textureCache.at(id).residentMipOffset == 0U,
+				"Moving away retains the sharper image and avoids a replacement copy.");
+		}
+
+		static void ExerciseReloadDuringMipPromotion(VulkanContext& context, const UUID& id,
+			const std::filesystem::path& path, TestContext& test)
+		{
+			auto& state = *context.impl;
+			auto& resources = ResourceManager::Instance();
+			std::lock_guard lock(state.deviceStateMutex);
+			resources.MarkTextureStreamingDistance(id, 100.0, 1, "far texture demand");
+			state.EnsureTexture(id);
+			const auto original = state.textureCache.at(id);
+			const auto alias = state.textureIndexMap.at(id);
+			const auto aliasGeneration = state.textureViewGenerations.at(id);
+			test.Expect(original.sourceOwner && original.residentMipOffset == 3U && alias > 2U,
+				"The original coarse tail and its real alias must be resident.");
+
+			// Change the cooked bytes before the upload starts. The old immutable
+			// owner remains current until the rendezvous reloads the new file.
+			TextureFixtures::Make(8, 8, 4, [](unsigned, unsigned, unsigned) { return TextureFixtures::Blue; }).Save(path);
+			resources.MarkTextureStreamingDistance(id, 0.0, 2, "near texture demand");
+			struct Replacement {
+				UUID id;
+				std::shared_ptr<const Texture> owner;
+				std::optional<Resource::StreamableAssetRecord> accounting;
+			} replacement{id, {}, {}};
+			TextureUploadFailureHook hook;
+			hook.role = ReviewTextureRole::Ordinary;
+			hook.remaining = 0;
+			hook.commitContext = &replacement;
+			hook.beforeTextureCommit = [](void* data) {
+				auto& replacement = *static_cast<Replacement*>(data);
+				auto& resources = ResourceManager::Instance();
+				// Wait for a real loader worker to replace the CPU owner after
+				// the old upload has finished its descriptor-idle wait.
+				if (resources.ReloadTexturePublicationAsync(replacement.id).get() != replacement.id)
+					throw std::runtime_error("Replacement texture failed to publish.");
+				replacement.owner = resources.AcquireTextureSnapshot(replacement.id);
+				replacement.accounting = resources.GetStreamableAsset(replacement.id);
+			};
+			VmaTotalStatistics before{}, after{};
+			vmaCalculateStatistics(state.allocator, &before);
+			test.Expect(SetTextureUploadFailureHook(&hook), "Install the real upload rendezvous.");
+			{
+				struct Disarm { ~Disarm() { SetTextureUploadFailureHook(nullptr); } } disarm;
+				state.EnsureTexture(id);
+			}
+			vmaCalculateStatistics(state.allocator, &after);
+			test.Expect(hook.actualCopySubmitAndFenceSucceeded && replacement.owner
+				&& replacement.owner != original.sourceOwner,
+				"The reload must supersede the CPU owner after a real completed copy.");
+			test.Expect(state.textureCache.at(id).view == original.view && state.textureIndexMap.at(id) == alias
+				&& state.textureViewGenerations.at(id) == aliasGeneration
+				&& after.total.statistics.allocationCount == before.total.statistics.allocationCount,
+				"Reject the stale upload without changing the bound image or leaking its allocation.");
+			const auto accounting = resources.GetStreamableAsset(id);
+			test.Expect(replacement.accounting && accounting
+				&& accounting->residencyGeneration == replacement.accounting->residencyGeneration
+				&& accounting->textureResidentMipCount == replacement.accounting->textureResidentMipCount
+				&& accounting->estimatedGpuBytes == replacement.accounting->estimatedGpuBytes,
+				"Reject the stale upload before it can overwrite the replacement owner's accounting.");
+
+			state.EnsureTexture(id);
+			const auto& current = state.textureCache.at(id);
+			test.Expect(current.sourceOwner == replacement.owner && current.sourceMipCount == 4U
+				&& current.residentMipOffset == 0U && state.textureIndexMap.at(id) == alias
+				&& state.textureViewGenerations.at(id) == aliasGeneration + 1U,
+				"A later ensure publishes the replacement owner to the same descriptor alias.");
+		}
 	};
 	AnimationUploadProductionObservation ExerciseAnimationUploadProduction(VulkanContext& context,
 		const Renderer::RenderBackendWorkPublication& publication, const std::filesystem::path& artifacts)
@@ -366,6 +480,44 @@ namespace TerraEngine::Tests
 	{
 		using namespace Review;
 		if (!VulkanReviewFixture::IsNativeReviewEnabled()) return;
+		registry.Add("Native.ReviewSimulation.Lifecycle.OrdinaryTexture.MipPromotionPreservesResidentImage", [](TestContext& test) {
+			const std::string name = "Native.ReviewSimulation.Lifecycle.OrdinaryTexture.MipPromotionPreservesResidentImage";
+			if (!EnterTextureChild(test, name)) return;
+			ExistingRendererFixtureSession session(name);
+			auto& resources = ResourceManager::Instance();
+			auto policy = resources.GetStreamingPolicy();
+			policy.textureMipStreamingEnabled = true;
+			policy.textureMinStreamMip = 0;
+			policy.textureMaxStreamMip = 3;
+			policy.streamingDistance = 100.0;
+			resources.SetStreamingPolicy(policy);
+			const auto path = session.Artifacts() / "ordinary-mip-promotion.tetf";
+			TextureFixtures::Make(16, 16, 5).Save(path);
+			const auto id = resources.LoadTexture(path);
+			test.Expect(id != EMPTY_UUID, "The owned mip-chain fixture must load.");
+			VulkanTextureReviewAccess::ExerciseMipPromotion(session.Native(), id, test);
+			session.CloseRenderer();
+			test.Expect(session.ValidationErrors() == 0, "Mip replacement and teardown must pass Vulkan validation.");
+		});
+		registry.Add("Native.ReviewSimulation.Lifecycle.OrdinaryTexture.ReloadSupersedesCompletedMipUpload", [](TestContext& test) {
+			const std::string name = "Native.ReviewSimulation.Lifecycle.OrdinaryTexture.ReloadSupersedesCompletedMipUpload";
+			if (!EnterTextureChild(test, name)) return;
+			ExistingRendererFixtureSession session(name);
+			auto& resources = ResourceManager::Instance();
+			auto policy = resources.GetStreamingPolicy();
+			policy.textureMipStreamingEnabled = true;
+			policy.textureMinStreamMip = 0;
+			policy.textureMaxStreamMip = 3;
+			policy.streamingDistance = 100.0;
+			resources.SetStreamingPolicy(policy);
+			const auto path = session.Artifacts() / "ordinary-mip-reload.tetf";
+			TextureFixtures::Make(16, 16, 5).Save(path);
+			const auto id = resources.LoadTexture(path);
+			test.Expect(id != EMPTY_UUID, "The owned texture fixture must load.");
+			VulkanTextureReviewAccess::ExerciseReloadDuringMipPromotion(session.Native(), id, path, test);
+			session.CloseRenderer();
+			test.Expect(session.ValidationErrors() == 0, "Concurrent reload and teardown must pass Vulkan validation.");
+		});
 		for (const auto role : {ReviewTextureRole::Normal, ReviewTextureRole::Mask})
 			for (const auto failure : {ReviewTextureFailure::ImageAllocation, ReviewTextureFailure::CopyRefusal, ReviewTextureFailure::CompletedCopyCallerAmbiguity})
 			{

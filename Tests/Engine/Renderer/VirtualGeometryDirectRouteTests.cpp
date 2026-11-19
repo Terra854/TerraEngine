@@ -1,9 +1,13 @@
 #include "TestHarness.h"
 
+#include "File Formats/TerraEngineMeshFile.h"
+#include "Renderer/Frame/RenderVirtualGeometrySelection.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/VirtualGeometry/Selection/GeometryRoutePolicy.h"
 #include "Resource/VirtualGeometryStreamingDiagnostics.h"
+
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace TerraEngine::Tests
 {
@@ -86,6 +90,53 @@ namespace TerraEngine::Tests
 					"Direct LOD selection must submit only the selected range.");
 				context.Expect(!farRange.virtualGeometryActive && !farRange.failOpen,
 					"Direct LOD selection must not manufacture virtual hierarchy or fallback work.");
+			});
+
+		registry.Add("VirtualGeometry.DirectRoute.OrthographicLodFollowsZoomAndPerspectiveKeepsDistance",
+			[](TestContext& context)
+			{
+				Mesh mesh{};
+				mesh.hasVirtualGeometry = true;
+				mesh.hasLocalBounds = true;
+				for (int axis = 0; axis < 3; ++axis)
+				{
+					mesh.localBoundsMin[axis] = -1.0f;
+					mesh.localBoundsMax[axis] = 1.0f;
+				}
+				mesh.virtualGeometryDetailLevels = {
+					{ .lodIndex = 0u, .meshletCount = 8u },
+					{ .lodIndex = 1u, .meshletOffset = 8u, .meshletCount = 4u, .geometricError = 0.02f },
+					{ .lodIndex = 2u, .meshletOffset = 12u, .meshletCount = 2u, .geometricError = 0.04f }
+				};
+				auto quality = MakeDefaultVirtualGeometryQualityProfile();
+				quality.maxLodDrop = 2u;
+				const glm::uvec2 viewport(1280u, 640u);
+				const glm::vec3 nearCamera(0.0f, 0.0f, 3.0f);
+				const glm::vec3 farCamera(0.0f, 0.0f, 40.0f);
+				const auto select = [&](const glm::mat4& projection, const glm::vec3& camera) {
+					const auto view = glm::lookAtRH(camera, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+					return Renderer::Frame::SelectCookedDirectLodRange(
+						mesh, quality, glm::mat4(1.0f), projection * view, camera, viewport);
+				};
+
+				// The box still spans the viewport after the orthographic camera
+				// dollies back. Increasing the projection size shrinks its footprint.
+				const auto ortho = glm::orthoRH_ZO(-1.0f, 1.0f, -0.5f, 0.5f, 0.1f, 100.0f);
+				const auto widerOrtho = glm::orthoRH_ZO(-8.0f, 8.0f, -4.0f, 4.0f, 0.1f, 100.0f);
+				context.ExpectEqual(0u, select(ortho, nearCamera).selectedLodIndex,
+					"A large orthographic footprint must retain full detail.");
+				context.ExpectEqual(0u, select(ortho, farCamera).selectedLodIndex,
+					"Changing orthographic camera depth must preserve detail.");
+				const auto zoomedOut = select(widerOrtho, farCamera);
+				context.Expect(zoomedOut.selectedLodIndex == 2u && zoomedOut.meshletOffset == 12u
+					&& zoomedOut.meshletCount == 2u,
+					"Orthographic zoom must select the appropriate cooked meshlet range.");
+
+				const auto perspective = glm::perspectiveRH_ZO(glm::radians(60.0f), 2.0f, 0.1f, 100.0f);
+				context.ExpectEqual(0u, select(perspective, nearCamera).selectedLodIndex,
+					"The perspective selector must still retain near detail.");
+				context.ExpectEqual(2u, select(perspective, farCamera).selectedLodIndex,
+					"The perspective selector must still reduce detail with distance.");
 			});
 
 		registry.Add("VirtualGeometry.DirectRoute.SuppressionDiagnosticsRemainExplicit",

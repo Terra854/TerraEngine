@@ -837,45 +837,58 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	TerraEngine::Tests::Review::TextureReviewRoleScope reviewRole(TerraEngine::Tests::Review::ReviewTextureRole::Ordinary);
 	if (deviceLost || !initialized) return;
-	const auto textureOwner = ResourceManager::Instance().AcquireTextureSnapshot(textureId);
-	if (textureCache.contains(textureId)) {
-		const VulkanImage& cachedTexture = textureCache[textureId];
-		const TerraEngine::Resource::TextureMipResidency desiredMipResidency =
-			ResourceManager::Instance().ResolveTextureMipResidencyForTexture(textureId, cachedTexture.sourceMipCount);
-		if (cachedTexture.sourceOwner != textureOwner
-			|| desiredMipResidency.residentMipCount != cachedTexture.residentMipCount
-			|| desiredMipResidency.sourceMipOffset != cachedTexture.residentMipOffset)
-		{
-			// UUID identity survives CPU replacement. The uploaded pixels must
-			// follow the actual immutable owner as well as the desired mip tail.
+	auto& resources = ResourceManager::Instance();
+	const auto textureOwner = resources.AcquireTextureSnapshot(textureId);
+	const auto cached = textureCache.find(textureId);
+	if (!textureOwner || textureOwner->publicationGeneration == 0U) {
+		if (cached != textureCache.end())
 			InvalidateTexture(textureId, false, true);
-			if (textureCache.contains(textureId)) return;
-			if (deviceLost || !initialized) return;
-		}
-		else
-		{
-		ResourceManager::Instance().MarkResourceUploadedToGpu(
-			textureId,
-			AssetType::Texture,
-			static_cast<std::uint64_t>(currentFrame),
-			static_cast<std::uint64_t>(cachedTexture.size),
-			"vulkan texture cache hit",
-			cachedTexture.residentMipCount,
-			cachedTexture.sourceMipCount,
-			cachedTexture.residentMipOffset);
-		if (!textureIndexMap.contains(textureId)) {
-			const auto key = NormalizeTextureSampler(DefaultTextureSamplerRequest());
-			textureIndexMap[textureId] = AcquireSampledTextureAlias(textureId, key);
-		}
 		return;
-		}
 	}
 
+	const std::uint32_t sourceMipCount = std::max(1u, static_cast<std::uint32_t>(textureOwner->descriptor.mipCount));
+	const TerraEngine::Resource::TextureMipResidency mipResidency =
+		resources.ResolveTextureMipResidencyForTexture(textureId, sourceMipCount);
+	std::uint32_t residentMipOffset = std::min(mipResidency.sourceMipOffset, sourceMipCount - 1u);
+	// A sharper tail contains every required coarser level of the same source.
+	// Keep it for the lifetime of the resident image. Policy edits and the
+	// ordinary idle and budget eviction paths can still release that image.
+	if (cached != textureCache.end() && cached->second.sourceOwner == textureOwner
+		&& cached->second.residentMipOffset <= residentMipOffset)
+	{
+		const VulkanImage& cachedTexture = cached->second;
+		{
+			// A cache hit must also keep its accounting tied to the accepted owner.
+			const auto ownerLock = resources.TryLockTexturePublication(textureId, *textureOwner);
+			if (!ownerLock.owns_lock()) return;
+			resources.MarkResourceUploadedToGpu(textureId, AssetType::Texture,
+				static_cast<std::uint64_t>(currentFrame), static_cast<std::uint64_t>(cachedTexture.size),
+				"vulkan texture cache hit", cachedTexture.residentMipCount,
+				cachedTexture.sourceMipCount, cachedTexture.residentMipOffset);
+		}
+		if (!textureIndexMap.contains(textureId)) {
+			const auto key = NormalizeTextureSampler(DefaultTextureSamplerRequest());
+			const auto index = AcquireSampledTextureAlias(textureId, key);
+			if (index != 0U) textureIndexMap[textureId] = index;
+		}
+		return;
+	}
+
+	// Preview cameras can cross a distance tier for many materials at once.
+	// Include one finer level when the editor first uploads an owner, within
+	// the configured mip range, while the image and staging buffer are new.
+	// Future requests still use their normal desired level to decide promotion.
+	if (editorMode && residentMipOffset != 0u
+		&& (cached == textureCache.end() || cached->second.sourceOwner != textureOwner))
+	{
+		const auto finestAllowed = TerraEngine::Resource::ResolveTextureMipResidency(resources.GetStreamingPolicy(), sourceMipCount);
+		if (residentMipOffset > finestAllowed.sourceMipOffset) --residentMipOffset;
+	}
+
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Upload Texture Mip Tail", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 1U);
 	ambiguousUploadImages.reserve(ambiguousUploadImages.size() + 1U);
 	const Texture* cpuTexture = textureOwner.get(); // Retain bytes across asynchronous publication.
-
-	if (!cpuTexture || cpuTexture->publicationGeneration == 0U) return;
 
 	// Ensure we have transcoded UASTC data
 
@@ -885,11 +898,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		return;
 	}
 
-	const std::uint32_t sourceMipCount = std::max(1u, static_cast<std::uint32_t>(cpuTexture->descriptor.mipCount));
-	const TerraEngine::Resource::TextureMipResidency mipResidency =
-		ResourceManager::Instance().ResolveTextureMipResidencyForTexture(textureId, sourceMipCount);
-	const std::uint32_t residentMipOffset = std::min(mipResidency.sourceMipOffset, sourceMipCount - 1u);
-	const std::uint32_t residentMipCount = std::max(1u, std::min(mipResidency.residentMipCount, sourceMipCount - residentMipOffset));
+	const std::uint32_t residentMipCount = sourceMipCount - residentMipOffset;
 	VkDeviceSize residentPayloadSize = 0u;
 	for (std::uint32_t mipIndex = 0u; mipIndex < residentMipCount; ++mipIndex)
 	{
@@ -1031,31 +1040,36 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 
 	DestroyBufferImmediate(stagingBuffer);
 
-	struct ViewCreationImageOwner
+	struct CompletedTextureOwner
 	{
-		VmaAllocator allocator; VulkanImage& image; bool accepted = false;
-		~ViewCreationImageOwner() noexcept
+		VkDevice device;
+		VmaAllocator allocator;
+		VulkanImage& image;
+		~CompletedTextureOwner() noexcept
 		{
-			if (!accepted && image.image != VK_NULL_HANDLE)
+			if (image.image != VK_NULL_HANDLE)
 			{
-				// The actual texture upload completed above. A thrown image-view
-				// error cannot strand its newly allocated, unpublished image.
+				// Owns the completed staging image before commit and the
+				// drained previous image after the cache swap.
+				if (image.sampler != VK_NULL_HANDLE) vkDestroySampler(device, image.sampler, nullptr);
+				if (image.view != VK_NULL_HANDLE) vkDestroyImageView(device, image.view, nullptr);
 				vmaDestroyImage(allocator, image.image, image.allocation);
-				image = {};
 			}
 		}
-	} imageOwner{allocator, vImage};
-	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT, residentMipCount);
-	imageOwner.accepted = true;
+	} imageOwner{device, allocator, vImage};
+	try {
+		vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT, residentMipCount);
+	} catch (const std::runtime_error&) {
+		// An already resident texture can still be drawn when a promotion fails.
+		if (cached != textureCache.end()) return;
+		throw;
+	}
 	vImage.size = residentPayloadSize;
 	vImage.sourceMipCount = sourceMipCount;
 	vImage.residentMipCount = residentMipCount;
 	vImage.residentMipOffset = residentMipOffset;
 
-	if (vImage.view == VK_NULL_HANDLE) {
-		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
-		return;
-	}
+	if (vImage.view == VK_NULL_HANDLE) return;
 
 	VkSamplerCreateInfo samplerInfo{};
 	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -1070,33 +1084,37 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	samplerInfo.maxLod = static_cast<float>(residentMipCount - 1u);
 
 
-	if (vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler) != VK_SUCCESS) {
-		vkDestroyImageView(device, vImage.view, nullptr);
-		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
-		return;
-	}
-
-	if (!UpdateSampledTextureAliases(textureId, vImage)) {
-		RetainAmbiguousUpload(vImage);
-		return;
-	}
+	if (vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler) != VK_SUCCESS) return;
 	vImage.sourceOwner = textureOwner;
-	textureCache[textureId] = vImage;
-	ResourceManager::Instance().MarkResourceUploadedToGpu(
-		textureId,
-		AssetType::Texture,
-		static_cast<std::uint64_t>(currentFrame),
-		static_cast<std::uint64_t>(residentPayloadSize),
-		mipResidency.partial ? "vulkan texture partial mip upload" : "vulkan texture upload",
-		residentMipCount,
-		sourceMipCount,
-		residentMipOffset);
+	{
+		std::lock_guard descriptorLock(descriptorHostAccessMutex);
+		// Current aliases can still be in use. Let CPU loads publish while
+		// those readers finish, then claim the owner for the short commit.
+		if (textureViewGenerations.contains(textureId) && !WaitForDescriptorMutationIdle()) return;
+		if (auto* hook = TerraEngine::Tests::Review::ReviewTarget(); hook && hook->beforeTextureCommit)
+			hook->beforeTextureCommit(hook->commitContext);
+		const auto ownerLock = resources.TryLockTexturePublication(textureId, *textureOwner);
+		if (!ownerLock.owns_lock()) return;
+
+		// A rejected upload leaves the previous image, its descriptors and
+		// accounting intact. Allocate before writing any descriptors.
+		const auto [published, inserted] = textureCache.try_emplace(textureId, VulkanImage{});
+		WriteSampledTextureAliasesAfterIdle(textureId, vImage);
+		std::swap(published->second, vImage);
+		// A new mip range can change alpha-tested silhouettes.
+		if (!inserted) ResetShadowPublication(false);
+		resources.MarkResourceUploadedToGpu(textureId, AssetType::Texture,
+			static_cast<std::uint64_t>(currentFrame), static_cast<std::uint64_t>(residentPayloadSize),
+			residentMipOffset != 0u ? "vulkan texture partial mip upload" : "vulkan texture upload",
+			residentMipCount, sourceMipCount, residentMipOffset);
+	}
 
 	// A mip replacement retains existing alias indices. Publish the new view to
 	// every sampler variant first, then ensure legacy callers have the ordinary
 	// trilinear-repeat alias recorded in textureIndexMap.
 	const auto defaultKey = NormalizeTextureSampler(DefaultTextureSamplerRequest());
-	textureIndexMap[textureId] = AcquireSampledTextureAlias(textureId, defaultKey);
+	const auto index = AcquireSampledTextureAlias(textureId, defaultKey);
+	if (index != 0U) textureIndexMap[textureId] = index;
 }
 
 
@@ -1436,7 +1454,7 @@ void VulkanContext::Impl::InvalidateTexture(
 	if(hasAliases)
 	{
 		if(retainAliases)
-		{ if (!UpdateSampledTextureAliases(textureId, defaultTexture)) return; }
+		{ WriteSampledTextureAliasesAfterIdle(textureId, defaultTexture); }
 		else
 		{ if (!RetireSampledTextureAliases(textureId)) return; }
 		textureWasKnown = true;
@@ -2081,6 +2099,11 @@ uint32_t VulkanContext::Impl::AcquireSampledTextureAlias(
 	if(sampler == VK_NULL_HANDLE) return 0u;
 
 	if (!WaitForDescriptorMutationIdle()) return 0U;
+	// An alias created after an upload is a separate descriptor publication.
+	// Refuse it if a reload replaced the owner during this idle wait.
+	if (!image->second.sourceOwner) return 0U;
+	const auto ownerLock = ResourceManager::Instance().TryLockTexturePublication(textureId, *image->second.sourceOwner);
+	if (!ownerLock.owns_lock()) return 0U;
 	const uint32_t descriptorIndex = AllocateTextureIndex();
 	CachedTextureSampler& cachedSampler = textureSamplerCache.at(key);
 	++cachedSampler.aliasReferenceCount;
@@ -2092,25 +2115,20 @@ uint32_t VulkanContext::Impl::AcquireSampledTextureAlias(
 	return descriptorIndex;
 }
 
-bool VulkanContext::Impl::UpdateSampledTextureAliases(
+void VulkanContext::Impl::WriteSampledTextureAliasesAfterIdle(
 	TerraEngine::UUID textureId, const VulkanImage& image)
 {
-	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
-	if(image.view == VK_NULL_HANDLE) return true;
-	const bool hasAliases = std::any_of(
-		sampledTextureAliases.begin(), sampledTextureAliases.end(),
-		[textureId](const auto& entry) { return entry.first.textureId == textureId; });
-	if(!hasAliases) return true;
-
-	if (!WaitForDescriptorMutationIdle()) return false;
-	const std::uint64_t generation = ++textureViewGenerations[textureId];
+	// Alias creation establishes the generation entry before writing. Reuse
+	// it here so the guarded descriptor commit neither allocates nor waits.
+	const auto entry = textureViewGenerations.find(textureId);
+	if (entry == textureViewGenerations.end() || image.view == VK_NULL_HANDLE) return;
+	const std::uint64_t generation = ++entry->second;
 	for(auto& [key, alias] : sampledTextureAliases)
 	{
 		if(key.textureId != textureId) continue;
 		WriteGlobalTextureAlias(alias.descriptorIndex, image.view, alias.sampler);
 		alias.imageViewGeneration = generation;
 	}
-	return true;
 }
 
 bool VulkanContext::Impl::RetireSampledTextureAliases(TerraEngine::UUID textureId)

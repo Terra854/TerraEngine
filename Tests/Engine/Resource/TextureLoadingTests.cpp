@@ -6,6 +6,7 @@
 #include "ThreadPool/ThreadPool.h"
 #include <chrono>
 #include <future>
+#include <thread>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -50,6 +51,32 @@ namespace TerraEngine::Tests {
 
 	}
 	void RegisterTextureLoadingTests(TestRegistry& registry) {
+		registry.Add("Engine.Resource.Texture.VisibleMaterialRequestsCookedPayload", [](TestContext& context) {
+			Session session;
+			const auto textureId = GenerateUUID();
+			const auto cooked = session.Save(Make());
+			// Model a registered package child with a distinct authored path.
+			// Retention bookkeeping alone must not be mistaken for a decoded texture.
+			session.resources.RegisterAssetPath(textureId, cooked, AssetType::Texture);
+			session.resources.RegisterStreamableAsset(textureId, AssetType::Texture, session.owned.Child("authored.png"));
+			context.Expect(!session.resources.AcquireTextureSnapshot(textureId), "Registration leaves the texture payload deferred.");
+
+			Renderer::VisibleStreamingTouchSet touches;
+			touches.valid = true;
+			touches.viewType = RenderViewType::Scene;
+			touches.textures.push_back({textureId, 12.0, 90});
+			session.resources.PublishVisibleStreamingTouches(touches, 42u, "visible material test");
+
+			// Only the visibility path may trigger the load. GetTexture would load
+			// synchronously and make this test pass even without the worker request.
+			const auto deadline = std::chrono::steady_clock::now() + Correctness::kDefaultTimeout;
+			auto snapshot = session.resources.AcquireTextureSnapshot(textureId);
+			while (!snapshot && std::chrono::steady_clock::now() < deadline) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				snapshot = session.resources.AcquireTextureSnapshot(textureId);
+			}
+			context.Expect(snapshot && !snapshot->transcodedData.empty(), "A visible material requests its registered cooked texture and publishes decoded pixels under the original UUID.");
+		});
 		registry.Add("Engine.Resource.Texture.Bounds.WrappedDescriptorRejected",[](TestContext& context) {
 			Session session; auto image=Make(); const auto base=image.Chunk(0).offset;
 			// Four real prefix bytes make the descriptor's relative start nonzero.

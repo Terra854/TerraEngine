@@ -45,9 +45,6 @@ namespace
 	using BackendClock = std::chrono::steady_clock;
 
 	constexpr std::uint32_t kMaxSceneDynamicLights = 1024u;
-	constexpr float kDirectionalShadowNear = 0.1f;
-	constexpr float kDirectionalShadowFar = 180.0f;
-	constexpr float kDirectionalShadowExtent = 40.0f;
 	constexpr float kTemporalResetDistance = 25.0f;
 	constexpr float kTemporalResetMatrixEpsilon = 0.75f;
 	constexpr float kDepthHistoryMatrixEpsilon = 0.0005f;
@@ -612,43 +609,6 @@ namespace
 
 		return !MatricesApproximatelyEqual(presentation.projectionMatrix,
 			lastProjectionMatrix, kTemporalResetMatrixEpsilon);
-	}
-
-
-	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraLocalPosition)
-	{
-		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
-		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
-			? glm::vec3(1.0f, 0.0f, 0.0f)
-			: glm::vec3(0.0f, 1.0f, 0.0f);
-		const float texelWorldSize = (kDirectionalShadowExtent * 2.0f) / 1024.0f;
-
-		// Directional shadows follow the camera, but snapping the light-space
-		// center to whole shadow texels keeps the shadow map from crawling as the
-		// camera moves by sub-texel amounts.
-		const glm::vec3 provisionalLightPosition = cameraLocalPosition - lightDirection * 60.0f;
-		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraLocalPosition, worldUp);
-		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraLocalPosition, 1.0f);
-		snappedCenterLightSpace.x = std::floor(snappedCenterLightSpace.x / texelWorldSize) * texelWorldSize;
-		snappedCenterLightSpace.y = std::floor(snappedCenterLightSpace.y / texelWorldSize) * texelWorldSize;
-		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
-	}
-
-
-	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraLocalPosition)
-	{
-		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
-		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
-			? glm::vec3(1.0f, 0.0f, 0.0f)
-			: glm::vec3(0.0f, 1.0f, 0.0f);
-		const float shadowExtent = kDirectionalShadowExtent;
-		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraLocalPosition);
-
-		const glm::vec3 lightPosition = snappedCenterWorld - lightDirection * 60.0f;
-		glm::mat4 view = glm::lookAtRH(lightPosition, snappedCenterWorld, worldUp);
-		glm::mat4 projection = glm::orthoRH_ZO(-shadowExtent, shadowExtent, -shadowExtent, shadowExtent, kDirectionalShadowNear, kDirectionalShadowFar);
-		projection[1][1] *= -1.0f;
-		return projection * view;
 	}
 
 

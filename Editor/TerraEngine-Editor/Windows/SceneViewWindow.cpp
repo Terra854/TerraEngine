@@ -838,6 +838,8 @@ bool SceneViewWindow::RestoreWorkspaceState(const nlohmann::json& value, std::st
 	m_CameraFocus = state->focus;
 	m_CameraFocusDistance = state->focusDistance;
 	m_CameraFocusInitialized = state->focusInitialized;
+	// A restored camera starts a new tracking session in its workspace.
+	m_FlyShadowFocus.reset();
 	m_Fov = state->fieldOfViewDegrees;
 	m_OrthographicHeight = state->orthographicHeight;
 	m_ToolState.projectionMode = state->projectionMode;
@@ -1244,6 +1246,36 @@ TerraEngine::Scene::WorldPosition SceneViewWindow::ResolveSceneViewFocus(float f
 	const TerraEngine::Scene::WorldCoordinateResult result = TerraEngine::Scene::ApplyWorldDelta(
 		m_CameraPosition, {{}, glm::dvec3(GetCameraForward()) * static_cast<double>(std::max(fallbackDistance, 1.0f))});
 	return result.Succeeded() ? result.position : m_CameraPosition;
+}
+
+float SceneViewWindow::ResolveShadowFocusDepth(const glm::vec3& forward) const
+{
+	// Keep explicitly framed subjects eligible for shadows. A free-flight
+	// reference is used only until navigation has an actual focus.
+	if (!m_CameraFocusInitialized && !m_FlyShadowFocus) return 0.0f;
+	const auto& focus = m_CameraFocusInitialized ? m_CameraFocus : *m_FlyShadowFocus;
+	const auto localized = TerraEngine::Scene::LocalizeWorldPosition(focus, m_CameraPosition, 1000.0);
+	if (!localized.Succeeded()) return 0.0f;
+
+	const glm::vec3 offset(localized.offsetMetres);
+	const float depth = glm::dot(offset, forward);
+	const glm::vec3 lateral = offset - forward * depth;
+	// A point behind the camera or far from its view ray cannot usefully anchor
+	// the shadow map. Returning zero keeps coverage near the camera.
+	return depth > 0.0f && glm::dot(lateral, lateral) <= 0.25f * depth * depth ? depth : 0.0f;
+}
+
+void SceneViewWindow::CaptureFlyShadowFocus()
+{
+	if (m_CameraFocusInitialized) return;
+	const glm::vec3 forward = GetCameraForward();
+	// Keep tracking the same subject if the user backs away over several
+	// right-click sessions. A new direction can establish a new reference.
+	if (ResolveShadowFocusDepth(forward) > 0.0f) return;
+
+	const auto focus = TerraEngine::Scene::ApplyWorldDelta(m_CameraPosition,
+		{{}, glm::dvec3(forward) * static_cast<double>(m_CameraFocusDistance)});
+	if (focus.Succeeded()) m_FlyShadowFocus = focus.position;
 }
 
 float SceneViewWindow::ResolveSceneViewFocusDistance(
@@ -2540,7 +2572,10 @@ void SceneViewWindow::OnGui() {
 	sceneViewInterest.priority = TerraEngine::Scene::ObserverInterestPriority::Important;
 	sceneViewInterest.leaseGeneration = m_MarkerViewGeneration;
 	TerraEngine::Scene::WorldStreamingSystem::Instance().SubmitObserverInterest(std::move(sceneViewInterest));
-	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPosition, m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
+	// Free flight changes the tracked point's depth independently of dolly.
+	const float shadowFocusDistance = ResolveShadowFocusDepth(forward);
+	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPosition,
+		m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic, shadowFocusDistance);
 	ApplyPrefabContextTintForNextRender();
 
 	// Register the transform gizmo before marker hit testing and object picking.
@@ -3334,6 +3369,7 @@ void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportS
 		if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && ImGui::IsWindowHovered() && !ImGuizmo::IsUsing()) {
 			m_IsFlyCamActive = true;
 			m_StoredCursorPos = InputSystem::Instance().GetCursorPosition();
+			CaptureFlyShadowFocus();
 			
 			// Hide the cursor explicitly since we tell ImGui not to touch it
 			glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);

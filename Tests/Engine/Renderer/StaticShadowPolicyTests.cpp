@@ -1,5 +1,7 @@
 #include "TestHarness.h"
+#include "Renderer/DirectionalShadowProjection.h"
 #include "Renderer/ShadowWorkPlan.h"
+#include <future>
 #include <limits>
 
 namespace TerraEngine::Tests
@@ -32,6 +34,36 @@ namespace TerraEngine::Tests
 	}
 	void RegisterStaticShadowPolicyTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.Efficiency.StaticShadowPolicy.SceneViewDollyRetainsDirectionalCoverage", [](TestContext& test) {
+			const glm::vec3 subject(0.0f);
+			const glm::vec3 light(0.0f, 1.0f, 0.0f);
+			const glm::vec3 up(0.0f, 1.0f, 0.0f);
+			const auto covered = [&](const glm::vec3& anchor, const glm::vec3& point) {
+				const auto shadow = BuildDirectionalShadowProjection(light, anchor);
+				const glm::vec4 clip = shadow.viewProjection * glm::vec4(point, 1.0f);
+				return std::abs(clip.x) <= clip.w && std::abs(clip.y) <= clip.w && clip.z >= 0.0f && clip.z <= clip.w;
+			};
+
+			// Move both the eye and a typical camera-relative reference frame
+			// while keeping the subject in the center of the editor view.
+			for (const float distance : {20.0f, 40.0f, 64.0f, 140.0f}) {
+				const glm::vec3 eye(0.0f, 0.0f, distance);
+				const glm::mat4 view = glm::lookAtRH(eye, subject, up);
+				const glm::vec3 indexAnchor = ResolveSceneDirectionalShadowAnchor(eye, view, distance);
+				const glm::vec3 viewAnchor = ResolveSceneDirectionalShadowAnchor(subject, view, distance);
+				test.Expect(glm::length(indexAnchor - (eye + viewAnchor)) < 0.0001f,
+					"The caster index and Vulkan must use the same physical shadow anchor after rebasing.");
+				if (distance <= 28.0f)
+					test.Expect(indexAnchor == eye, "Close views retain the existing camera-centered coverage.");
+				if (distance >= 64.0f)
+					test.Expect(!covered(eye, subject) && covered(indexAnchor, subject + glm::vec3(30.0f, 0.0f, 12.0f))
+						&& covered(viewAnchor, subject + glm::vec3(-30.0f, 0.0f, -12.0f) - eye),
+						"A pulled-back view must retain subject and caster coverage inside its fixed-resolution map.");
+			}
+			const glm::vec3 eye(1.0f, 2.0f, 3.0f);
+			test.Expect(ResolveSceneDirectionalShadowAnchor(eye, glm::mat4(1.0f), std::numeric_limits<float>::quiet_NaN()) == eye,
+				"Invalid focus distance preserves the ordinary camera-centered path.");
+		});
 		registry.Add("Renderer.Efficiency.StaticShadowPolicy.ExplicitSupport", [](TestContext& test) {
 			auto row = StaticInput(1).semantic;
 			test.Expect(ClassifyStaticShadowCaster(row).eligible, "Complete explicit native/static proof admits the caster.");
@@ -86,6 +118,31 @@ namespace TerraEngine::Tests
 				&& next.staticSourceIndices == std::vector<std::uint32_t>({1})
 				&& next.dynamicSourceIndices == std::vector<std::uint32_t>({0})
 				&& !ExactShadowCasterMembershipEqual(old.staticMembership, next.staticMembership), "One category transition atomically changes static and dynamic coverage.");
+		});
+		registry.Add("Renderer.Efficiency.StaticShadowPolicy.OnePassPartitionMatchesExactMembership", [](TestContext& test) {
+			// Shuffled static and dynamic records include nested texture data,
+			// so the partition must preserve complete proof and original draw order.
+			std::vector<ShadowCasterStampInput> inputs, statics, dynamics;
+			std::vector<std::uint32_t> staticIndices, dynamicIndices;
+			for (unsigned id = 1024; id > 0; --id) {
+				auto input = StaticInput(id);
+				input.semantic.objectId[1] = static_cast<std::uint8_t>(id >> 8);
+				input.semantic.staticSupport.authoredStatic = id % 3 != 0;
+				input.semantic.texturePublications.push_back({input.semantic.objectId, id, 0});
+				(input.semantic.staticSupport.authoredStatic ? staticIndices : dynamicIndices)
+					.push_back(static_cast<std::uint32_t>(inputs.size()));
+				(input.semantic.staticSupport.authoredStatic ? statics : dynamics).push_back(input);
+				inputs.push_back(std::move(input));
+			}
+			auto worker = std::async(std::launch::async, [&] { return BuildStaticShadowPartition(StaticView(), inputs); });
+			const auto reference = NormalizeShadowCasterMembership(inputs);
+			const auto plan = worker.get();
+			test.Expect(plan.valid && ExactShadowCasterMembershipEqual(plan.allMembership, reference)
+				&& ExactShadowCasterMembershipEqual(plan.staticMembership, NormalizeShadowCasterMembership(statics))
+				&& ExactShadowCasterMembershipEqual(plan.dynamicMembership, NormalizeShadowCasterMembership(dynamics)),
+				"Concurrent classification must produce the exact same memberships as separate normalization.");
+			test.Expect(plan.staticSourceIndices == staticIndices && plan.dynamicSourceIndices == dynamicIndices,
+				"Static and dynamic recording must use the original source order.");
 		});
 		registry.Add("Renderer.Efficiency.StaticShadowPolicy.MalformedCoverageAtomic", [](TestContext& test) {
 			for (unsigned fault = 0; fault < 6; ++fault) {

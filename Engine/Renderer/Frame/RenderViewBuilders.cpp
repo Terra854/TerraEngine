@@ -1,5 +1,6 @@
 // Existing Scene, Game/runtime and dedicated capture view preparation in original output order.
 #include "RenderFrameSealing.h"
+#include "Renderer/DirectionalShadowProjection.h"
 #include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureCameras.h"
 #include "Tests/Support/RendererEfficiency/Renderer/RendererEfficiencyFixtureControls.h"
 #include "Profiling/ProfilerScope.h"
@@ -122,6 +123,13 @@ void RenderSystem::PrepareFrameSceneView(const FrameVisibilityInputs& visibility
 			RenderOutputKind::SceneView, 1U);
 		sceneFrameData.cameraLocalPosition = fixedSceneCamera ? fixedSceneCamera->cameraLocalPosition : glm::vec3(0.0F);
 		LocalizeFrameFixtureCamera(sceneFrameData, sceneViewCamera.canonicalPosition, sealedFixtureCameras);
+		if (!fixedSceneCamera)
+		{
+			// Resolve once in the view's reference frame and seal the result for
+			// both the spatial caster query and the backend shadow projection.
+			sceneFrameData.directionalShadowAnchor = TerraEngine::Renderer::ResolveSceneDirectionalShadowAnchor(
+				sceneFrameData.cameraLocalPosition, sceneFrameData.viewMatrix, sceneViewCamera.shadowFocusDistanceMetres);
+		}
 		LocalizeFrameLights(sceneFrameData);
 		sceneFrameData.sceneViewGridVisible = !fixedSceneCamera && sceneViewGridVisible;
 		sceneFrameData.sceneViewOrthographic = !fixedSceneCamera && sceneViewCamera.orthographic;
@@ -173,7 +181,9 @@ void RenderSystem::PrepareFrameSceneView(const FrameVisibilityInputs& visibility
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			// The spatial query uses its unchanged canonical index frame, not the
 			// deliberately shifted GPU view frame. Rebasing cannot change membership.
-			sceneFrameData.shadowDrawLists = PrepareFrameShadowLists(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, renderableDrawCommandsByOrdinal, renderPreparationSettingsSignature, renderableSubmissionSignature, renderGraphWorkerCount, sceneFrameData.lightCandidates, sceneFrameData.cameraLocalPosition, sceneFrameData.referenceFrame, RenderViewType::Scene,1);
+			sceneFrameData.shadowDrawLists = PrepareFrameShadowLists(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, renderableDrawCommandsByOrdinal, renderPreparationSettingsSignature, renderableSubmissionSignature, renderGraphWorkerCount, sceneFrameData.lightCandidates,
+				sceneFrameData.directionalShadowAnchor.value_or(sceneFrameData.cameraLocalPosition),
+				sceneFrameData.referenceFrame, RenderViewType::Scene, 1U);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Scene View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -469,6 +479,12 @@ void RenderSystem::PrepareFrameDedicatedViews(const FrameVisibilityInputs& visib
 		captureFrameData.viewMatrix = captureRequest.viewMatrix;
 		captureFrameData.projectionMatrix = captureRequest.projectionMatrix;
 		captureFrameData.cameraLocalPosition = glm::vec3(0.0F);
+		if (captureRequest.viewType == RenderViewType::Scene)
+		{
+			// A Scene capture with a look-at target uses the same orbit coverage.
+			captureFrameData.directionalShadowAnchor = TerraEngine::Renderer::ResolveSceneDirectionalShadowAnchor(
+				captureFrameData.cameraLocalPosition, captureFrameData.viewMatrix, captureRequest.sceneShadowFocusDistanceMetres);
+		}
 		captureFrameData.editorContextTint = glm::vec4(0.0f);
 		captureFrameData.uiBatch = {};
 		const TerraEngine::Renderer::RenderCaptureViewIdentity captureIdentity =
@@ -502,7 +518,9 @@ void RenderSystem::PrepareFrameDedicatedViews(const FrameVisibilityInputs& visib
 			captureIdentity.outputId,
 			captureGroupingCompatibilitySignature,
 			visibleCommands.cacheHit);
-		captureFrameData.shadowDrawLists = PrepareFrameShadowLists(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, renderableDrawCommandsByOrdinal, renderPreparationSettingsSignature, renderableSubmissionSignature, renderGraphWorkerCount, captureFrameData.lightCandidates, captureFrameData.cameraLocalPosition, captureFrameData.referenceFrame, RenderViewType::Scene, 0U);
+		captureFrameData.shadowDrawLists = PrepareFrameShadowLists(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, renderableDrawCommandsByOrdinal, renderPreparationSettingsSignature, renderableSubmissionSignature, renderGraphWorkerCount, captureFrameData.lightCandidates,
+			captureFrameData.directionalShadowAnchor.value_or(captureFrameData.cameraLocalPosition),
+			captureFrameData.referenceFrame, RenderViewType::Scene, 0U);
 
 		RenderOutputRequest captureOutputRequest = MakeFrameOutputRequest(
 			RenderOutputKind::OffscreenTexture, captureIdentity.viewType,

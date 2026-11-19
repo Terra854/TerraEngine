@@ -3960,7 +3960,6 @@ void ResourceManager::MarkTextureStreamingDistance(
 
 	const double nowSeconds = ResidencyClockSeconds();
 	const double safeDistance = std::max(0.0, viewDistance);
-	bool mipResidencyChanged = false;
 	{
 		std::unique_lock lock(m_StreamingMutex);
 		TerraEngine::Resource::StreamableAssetRecord& record = m_StreamableAssets[id];
@@ -3980,74 +3979,11 @@ void ResourceManager::MarkTextureStreamingDistance(
 			record.textureClosestViewDistance = safeDistance;
 			record.textureDistanceUpdatedSeconds = nowSeconds;
 		}
-		if (record.textureSourceMipCount > 0u && record.textureResidentMipCount > 0u)
-		{
-			TerraEngine::Resource::TextureMipResidency desired =
-				TerraEngine::Resource::ResolveTextureMipResidency(m_StreamingPolicy, record.textureSourceMipCount);
-			if (m_StreamingPolicy.textureMipStreamingEnabled
-				&& m_StreamingPolicy.textureMaxStreamMip > 0u
-				&& record.textureSourceMipCount > 0u)
-			{
-				const std::uint32_t maxSourceMip = record.textureSourceMipCount - 1u;
-				const std::uint32_t minStreamMip = std::min(m_StreamingPolicy.textureMinStreamMip, maxSourceMip);
-				const std::uint32_t maxStreamMip = std::clamp(m_StreamingPolicy.textureMaxStreamMip, minStreamMip, maxSourceMip);
-				if (maxStreamMip > minStreamMip)
-				{
-					const double fadeDistance = std::max(1.0, m_StreamingPolicy.streamingDistance);
-					const double normalized = std::clamp(record.textureClosestViewDistance / fadeDistance, 0.0, 1.0);
-					const double mipSpan = static_cast<double>(maxStreamMip - minStreamMip);
-					desired.sourceMipOffset = minStreamMip
-						+ static_cast<std::uint32_t>(std::round(normalized * mipSpan));
-					desired.sourceMipOffset = std::clamp(desired.sourceMipOffset, minStreamMip, maxStreamMip);
-					desired.residentMipCount = record.textureSourceMipCount - desired.sourceMipOffset;
-					desired.partial = desired.sourceMipOffset > 0u;
-				}
-			}
-			mipResidencyChanged =
-				desired.residentMipCount != record.textureResidentMipCount
-				|| desired.sourceMipOffset != record.textureResidentMipOffset;
-		}
 	}
 
+	// Distance is demand metadata. Leave the accepted GPU image and its
+	// residency accounting intact until the backend actually replaces or evicts it.
 	TouchResource(id, AssetType::Texture, frameId, TerraEngine::Resource::ResidencyPinReason::None, reason);
-	if (mipResidencyChanged)
-	{
-		RenderSystem::Instance().RetireLoadedResource(id, frameId, "texture-mip-distance-changed");
-		{
-			std::unique_lock lock(m_ResidencyMutex);
-			if (auto it = m_ResidentAssets.find(id); it != m_ResidentAssets.end())
-			{
-				it->second.estimatedGpuBytes = 0u;
-				it->second.gpuAllocations.clear();
-				it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
-				if (it->second.state != TerraEngine::Resource::ResidencyState::Pinned)
-				{
-					it->second.state = it->second.estimatedCpuBytes > 0u
-						? TerraEngine::Resource::ResidencyState::Idle
-						: TerraEngine::Resource::ResidencyState::Released;
-				}
-				it->second.lastTouchedReason = "texture mip distance changed";
-				it->second.releaseGeneration += 1u;
-			}
-		}
-		std::unique_lock lock(m_StreamingMutex);
-		if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
-		{
-			it->second.payloadState = it->second.estimatedCpuBytes > 0u
-				? TerraEngine::Resource::StreamablePayloadState::RamResident
-				: TerraEngine::Resource::StreamablePayloadState::Released;
-			it->second.estimatedGpuBytes = 0u;
-			it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
-			if (it->second.estimatedCpuBytes == 0u)
-			{
-				it->second.exactCpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
-			}
-			it->second.textureResidentMipCount = 0u;
-			it->second.textureSourceMipCount = 0u;
-			it->second.textureResidentMipOffset = 0u;
-			it->second.residencyGeneration += 1u;
-		}
-	}
 }
 
 TerraEngine::Resource::TextureMipResidency ResourceManager::ResolveTextureMipResidencyForTexture(
@@ -4144,10 +4080,17 @@ TerraEngine::Resource::StreamableAssetRecord ResourceManager::RegisterStreamable
 	}
 	record.sourceKey = key;
 	record.lastReferencedSeconds = nowSeconds;
+	// A freshly registered cooked texture can repair a failed import. Visibility
+	// alone does not retry failed files every frame.
+	const bool repairedTexture = type == AssetType::Texture
+		&& record.payloadState == TerraEngine::Resource::StreamablePayloadState::Failed
+		&& HasNativeExtensionForAssetType(resolvedPath, type);
 	if (record.payloadState == TerraEngine::Resource::StreamablePayloadState::Registered
-		|| record.payloadState == TerraEngine::Resource::StreamablePayloadState::Released)
+		|| record.payloadState == TerraEngine::Resource::StreamablePayloadState::Released
+		|| repairedTexture)
 	{
 		record.payloadState = TerraEngine::Resource::StateAfterRegistration(referencedByScene && m_StreamingPolicy.enabled && m_StreamingPolicy.deferScenePayloadsOnLoad);
+		if (repairedTexture) record.failureReason.clear();
 	}
 	return record;
 }
@@ -4412,6 +4355,31 @@ void ResourceManager::PublishVisibleStreamingTouches(
 		{
 			continue;
 		}
+		// The Vulkan uploader only reads published CPU payloads. Request the
+		// cooked texture here at the protected streaming boundary so file I/O and
+		// transcoding run on the resource workers, outside draw preparation.
+		bool needsLoad = false;
+		{
+			std::shared_lock lock(textureCache.mutex);
+			const auto path = textureCache.idToPath.find(touch.textureId);
+			needsLoad = path != textureCache.idToPath.end()
+				&& !textureCache.resources.contains(touch.textureId)
+				&& !textureCache.inFlight.contains(path->second);
+		}
+		if (needsLoad)
+		{
+			std::shared_lock lock(m_StreamingMutex);
+			const auto record = m_StreamableAssets.find(touch.textureId);
+			needsLoad = record == m_StreamableAssets.end()
+				|| record->second.payloadState != TerraEngine::Resource::StreamablePayloadState::Failed;
+		}
+		if (needsLoad)
+		{
+			(void)RequestStreamableLoad(touch.textureId, AssetType::Texture,
+				TerraEngine::Resource::StreamingNeedType::Visible, frameId, detail);
+		}
+		// Keep the original view priority and distance even when the request
+		// already exists or the shared load budget is exhausted this frame.
 		MarkStreamingNeed(
 			touch.textureId,
 			AssetType::Texture,
@@ -4459,7 +4427,8 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 	// Streaming records may retain an authored package source for diagnostics.
 	// Native renderer demands instead use the currently registered cooked path;
 	// the asynchronous loader still validates its request/session at publication.
-	std::filesystem::path sourcePath = (type == AssetType::Mesh || type == AssetType::Material)
+	std::filesystem::path sourcePath = (type == AssetType::Mesh
+		|| type == AssetType::Material || type == AssetType::Texture)
 		? GetRegisteredAssetPath(id, type) : std::filesystem::path{};
 	{
 		std::shared_lock lock(m_StreamingMutex);
@@ -5095,6 +5064,19 @@ std::shared_ptr<const Texture> ResourceManager::AcquireTextureSnapshot(const Ter
 	std::shared_lock lock(textureCache.mutex);
 	const auto found = textureCache.resources.find(id);
 	return found != textureCache.resources.end() ? found->second : std::shared_ptr<const Texture>{};
+}
+
+std::shared_lock<std::shared_mutex> ResourceManager::TryLockTexturePublication(
+	const TerraEngine::UUID& id, const Texture& expectedOwner) const
+{
+	// CPU publication takes the same lock exclusively when it swaps owners.
+	// Use the texture cache lock alone: residency cleanup may hold the broader
+	// resource publication gate while calling the renderer.
+	std::shared_lock lock(textureCache.mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return {};
+	const auto found = textureCache.resources.find(id);
+	if (found == textureCache.resources.end() || found->second.get() != &expectedOwner) return {};
+	return lock;
 }
 
 std::optional<RendererEfficiencyResourcePublicationSnapshot>

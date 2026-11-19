@@ -79,12 +79,12 @@ namespace TerraEngine::Renderer
 		{
 			for (const auto value : values) HashValue(digest, value);
 		}
-		std::uint64_t DigestRows(std::span<const ShadowCasterStamp> rows)
+		// Hash each caster once, then fold its digest into whichever membership
+		// lists own it. A digest only rejects mismatches. Reuse still compares
+		// every exact row against the submitted content.
+		std::uint64_t DigestCaster(const ShadowCasterStamp& row)
 		{
 			std::uint64_t digest = 14695981039346656037ULL;
-			HashValue(digest, rows.size());
-			for (const auto& row : rows)
-			{
 			HashValue(digest, row.objectId);
 			HashValue(digest, row.lifetimeGeneration);
 			HashValue(digest, row.segmentId);
@@ -149,7 +149,18 @@ namespace TerraEngine::Renderer
 			HashValue(digest, row.staticSupport.deformationAbsent);
 			HashValue(digest, row.staticClassificationReason);
 			HashValue(digest, row.evidenceMask);
-			}
+			return digest;
+		}
+		std::uint64_t BeginMembershipDigest(std::size_t rowCount)
+		{
+			std::uint64_t digest = 14695981039346656037ULL;
+			HashValue(digest, rowCount);
+			return digest;
+		}
+		std::uint64_t DigestRows(std::span<const ShadowCasterStamp> rows)
+		{
+			std::uint64_t digest = BeginMembershipDigest(rows.size());
+			for (const auto& row : rows) HashValue(digest, DigestCaster(row));
 			return digest;
 		}
 		bool IsCube(const ShadowViewKey& view) { return static_cast<std::uint32_t>(view.resourceKind) == 1U; }
@@ -290,7 +301,9 @@ namespace TerraEngine::Renderer
 	}
 	bool ExactShadowCasterMembershipEqual(const ShadowCasterMembership& left, const ShadowCasterMembership& right)
 	{
-		return ValidMembership(left) && ValidMembership(right) && left.digest == right.digest && left.rows == right.rows;
+		// Compare the cheap selectors before scanning the exact rows for proof.
+		return left.digest == right.digest && left.rows.size() == right.rows.size()
+			&& ValidMembership(left) && ValidMembership(right) && left.rows == right.rows;
 	}
 
 	StaticShadowClassification ClassifyStaticShadowCaster(const ShadowCasterStamp& stamp)
@@ -313,11 +326,11 @@ namespace TerraEngine::Renderer
 		if (inputs.size() > std::numeric_limits<std::uint32_t>::max()) {
 			plan.reason = "Caster count exceeds original-index capacity."; return plan;
 		}
-		for (std::size_t i = 0; i < inputs.size(); ++i) plan.allSourceIndices.push_back(static_cast<std::uint32_t>(i));
+		plan.allSourceIndices.reserve(inputs.size());
+		for (std::uint32_t i = 0; i < inputs.size(); ++i) plan.allSourceIndices.push_back(i);
 		if (!ValidView(view, view.rendererSessionGeneration) || static_cast<std::uint8_t>(view.viewType) > 1) {
 			plan.reason = "Static partition requires a valid qualified render view."; return plan;
 		}
-		std::set<std::tuple<UUID, std::uint64_t, std::uint64_t>> identities;
 		// Structural coverage is different from shader-input reuse proof. Unknown
 		// dynamic owners must remain drawable without poisoning proven statics.
 		for (const auto& input : inputs) {
@@ -328,28 +341,55 @@ namespace TerraEngine::Renderer
 				|| !std::all_of(row.deformationPalette.begin(), row.deformationPalette.end(), [](const auto& matrix) { return Finite(matrix); })
 				|| !std::all_of(row.morphWeights.begin(), row.morphWeights.end(), [](double weight) { return std::isfinite(weight); })
 				|| row.firstMeshlet > UINT64_MAX - row.meshletCount || row.firstCluster > UINT64_MAX - row.clusterCount
-				|| row.payloadByteOffset > UINT64_MAX - row.payloadByteSize
-				|| !identities.emplace(row.objectId, row.lifetimeGeneration, row.segmentId).second) {
+				|| row.payloadByteOffset > UINT64_MAX - row.payloadByteSize) {
 				plan.reason = "Malformed or duplicate original caster coverage."; return plan;
 			}
 		}
-		std::vector<ShadowCasterStampInput> statics;
-		for (std::size_t i = 0; i < inputs.size(); ++i) {
-			const auto& input = inputs[i]; plan.allMembership.rows.push_back(input.semantic);
-			if (ClassifyStaticShadowCaster(input.semantic).eligible) {
-				statics.push_back(input); plan.staticSourceIndices.push_back(static_cast<std::uint32_t>(i));
+		// Sort small source indices once. Each partition will inherit the same
+		// canonical row order, while its draw indices retain source order.
+		auto sortedIndices = plan.allSourceIndices;
+		const auto identity = [&](std::uint32_t index) { return MembershipIdentity(inputs[index].semantic); };
+		std::sort(sortedIndices.begin(), sortedIndices.end(), [&](std::uint32_t left, std::uint32_t right) {
+			return identity(left) < identity(right);
+		});
+		if (std::adjacent_find(sortedIndices.begin(), sortedIndices.end(), [&](std::uint32_t left, std::uint32_t right) {
+			return identity(left) == identity(right);
+		}) != sortedIndices.end()) {
+			plan.reason = "Malformed or duplicate original caster coverage."; return plan;
+		}
+
+		std::vector<bool> staticRows(inputs.size());
+		bool dynamicProofComplete = true;
+		for (const auto index : plan.allSourceIndices) {
+			const auto& row = inputs[index].semantic;
+			const bool isStatic = ClassifyStaticShadowCaster(row).eligible;
+			staticRows[index] = isStatic;
+			if (isStatic) {
+				plan.staticSourceIndices.push_back(index);
 			} else {
-				plan.dynamicMembership.rows.push_back(input.semantic); plan.dynamicSourceIndices.push_back(static_cast<std::uint32_t>(i));
+				plan.dynamicSourceIndices.push_back(index);
+				dynamicProofComplete = dynamicProofComplete && IsShadowCasterStampReusable(row);
 			}
 		}
-		const auto finishCoverage = [](ShadowCasterMembership& membership) {
-			std::sort(membership.rows.begin(), membership.rows.end(), [](const auto& a, const auto& b) { return MembershipIdentity(a) < MembershipIdentity(b); });
-			membership.digest = DigestRows(membership.rows);
-			membership.reusable = std::all_of(membership.rows.begin(), membership.rows.end(), IsShadowCasterStampReusable);
-			if (!membership.reusable) membership.reason = "Complete drawable coverage contains unknown semantic proof.";
+
+		const auto initialize = [](ShadowCasterMembership& membership, std::size_t count, bool reusable) {
+			membership.rows.reserve(count);
+			membership.digest = BeginMembershipDigest(count);
+			membership.reusable = reusable;
+			if (!reusable) membership.reason = "Complete drawable coverage contains unknown semantic proof.";
 		};
-		finishCoverage(plan.allMembership); finishCoverage(plan.dynamicMembership);
-		plan.staticMembership = NormalizeShadowCasterMembership(statics);
+		initialize(plan.allMembership, inputs.size(), dynamicProofComplete);
+		initialize(plan.staticMembership, plan.staticSourceIndices.size(), true);
+		initialize(plan.dynamicMembership, plan.dynamicSourceIndices.size(), dynamicProofComplete);
+		for (const auto index : sortedIndices) {
+			const auto& row = inputs[index].semantic;
+			auto& partition = staticRows[index] ? plan.staticMembership : plan.dynamicMembership;
+			const std::uint64_t digest = DigestCaster(row);
+			HashValue(plan.allMembership.digest, digest);
+			HashValue(partition.digest, digest);
+			plan.allMembership.rows.push_back(row);
+			partition.rows.push_back(row);
+		}
 		plan.valid = true;
 		return plan;
 	}

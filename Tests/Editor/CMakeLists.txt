@@ -790,7 +790,7 @@ terraengine_add_correctness_slice(Editor.WorkspaceLayoutSections TerraEngine-Edi
 	"Editor.WorkspaceSections" 4)
 
 # Recovery slices retain independent process-tree watchdogs and exact case floors.
-terraengine_add_correctness_slice(Editor.AssetDiscoveryRecovery TerraEngine-EditorTests Editor.AssetDiscoveryRecovery 9)
+terraengine_add_correctness_slice(Editor.AssetDiscoveryRecovery TerraEngine-EditorTests Editor.AssetDiscoveryRecovery 10)
 terraengine_add_correctness_slice(Editor.ExportArtifactValidation TerraEngine-EditorTests Editor.ExportArtifactValidation 12)
 terraengine_add_correctness_slice(Editor.ExportRetention TerraEngine-EditorTests Editor.ExportRetention 10)
 

@@ -1473,7 +1473,8 @@ struct VulkanContext::Impl {
 	[[nodiscard]] uint32_t AcquireSampledTextureAlias(
 		TerraEngine::UUID textureId,
 		const TerraEngine::Renderer::Vulkan::SamplerKey& key);
-	bool UpdateSampledTextureAliases(TerraEngine::UUID textureId, const VulkanImage& image);
+	// The caller holds the descriptor lock and has already completed GPU readers.
+	void WriteSampledTextureAliasesAfterIdle(TerraEngine::UUID textureId, const VulkanImage& image);
 	bool RetireSampledTextureAliases(TerraEngine::UUID textureId);
 	void WriteGlobalTextureAlias(uint32_t index, VkImageView view, VkSampler sampler);
 	// Caller has already proven completion at its existing protected boundary.

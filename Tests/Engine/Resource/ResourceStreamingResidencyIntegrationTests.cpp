@@ -66,6 +66,35 @@ namespace {
 
 			context.Expect(Resource::BuildReleaseCandidates(snapshot).empty(), "Recently used streamed resources should not churn during the grace window.");
 		});
+		registry.Add("Resource.Streaming.Residency.DistanceDemandKeepsPublishedMipAccounting", [](TestContext& context) {
+			auto& resources = ResourceManager::Instance();
+			const auto previous = resources.GetStreamingPolicy();
+			struct RestorePolicy {
+				ResourceManager& resources;
+				Resource::StreamingPolicy previous;
+				~RestorePolicy() { resources.SetStreamingPolicy(previous); }
+			} restore{resources, previous};
+			auto policy = previous;
+			policy.textureMipStreamingEnabled = true;
+			policy.textureMinStreamMip = 0;
+			policy.textureMaxStreamMip = 3;
+			policy.streamingDistance = 100.0;
+			resources.SetStreamingPolicy(policy);
+
+			// Simulate accepted GPU publications independently of view-distance
+			// demand. A changed demand must leave the allocation accounted for.
+			for (const auto offset : {0U, 3U}) {
+				const auto id = GenerateUUID();
+				resources.MarkResourceUploadedToGpu(id, AssetType::Texture, 1, 1024, "test allocation", 5U - offset, 5, offset);
+				resources.MarkTextureStreamingDistance(id, offset == 0U ? 100.0 : 0.0, 2, "changed distance");
+				const auto desired = resources.ResolveTextureMipResidencyForTexture(id, 5);
+				const auto actual = resources.GetStreamableAsset(id);
+				context.Expect(desired.sourceMipOffset == 3U - offset, "The next upload sees the new mip demand.");
+				context.Expect(actual && actual->textureResidentMipOffset == offset && actual->textureResidentMipCount == 5U - offset
+					&& actual->estimatedGpuBytes == 1024 && actual->payloadState == Resource::StreamablePayloadState::VramResident,
+					"Distance changes preserve the published mip range and its physical byte count.");
+			}
+		});
 
 		registry.Add("Renderer.VisibleStreamingTouches.BatchPublicationMarksUniqueResourcesVisible", [](TestContext& context) {
 			ResourceManager& resourceManager = ResourceManager::Instance();

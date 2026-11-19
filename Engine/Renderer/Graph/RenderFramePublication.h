@@ -377,6 +377,8 @@ namespace TerraEngine::Renderer
 		glm::mat4 viewMatrix = glm::mat4(1.0f);
 		glm::mat4 projectionMatrix = glm::mat4(1.0f);
 		glm::vec3 cameraLocalPosition = glm::vec3(0.0f);
+		// Use the CPU caster query's anchor for the directional shadow pass.
+		std::optional<glm::vec3> directionalShadowAnchor;
 		float deltaTimeSeconds = 0.0f;
 		bool globalTaskShaderCullingEnabled = true;
 		float cullingEpsilon = 0.001f;
