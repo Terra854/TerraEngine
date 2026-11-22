@@ -134,7 +134,8 @@ namespace TerraEngine::Tests
 				(input.semantic.staticSupport.authoredStatic ? statics : dynamics).push_back(input);
 				inputs.push_back(std::move(input));
 			}
-			auto worker = std::async(std::launch::async, [&] { return BuildStaticShadowPartition(StaticView(), inputs); });
+			auto scratch = inputs;
+			auto worker = std::async(std::launch::async, [&] { return TakeStaticShadowPartition(StaticView(), scratch); });
 			const auto reference = NormalizeShadowCasterMembership(inputs);
 			const auto plan = worker.get();
 			test.Expect(plan.valid && ExactShadowCasterMembershipEqual(plan.allMembership, reference)
@@ -147,6 +148,7 @@ namespace TerraEngine::Tests
 		registry.Add("Renderer.Efficiency.StaticShadowPolicy.MalformedCoverageAtomic", [](TestContext& test) {
 			for (unsigned fault = 0; fault < 6; ++fault) {
 				std::array inputs{StaticInput(1), StaticInput(2)};
+				inputs[0].semantic.texturePublications.push_back({inputs[0].semantic.objectId, 1, 0});
 				auto& row = inputs[1].semantic;
 				if (fault == 0) inputs[1] = inputs[0];
 				if (fault == 1) row.objectId = {};
@@ -154,9 +156,11 @@ namespace TerraEngine::Tests
 				if (fault == 3) row.rotation[0] = std::numeric_limits<double>::quiet_NaN();
 				if (fault == 4) row.firstMeshlet = std::numeric_limits<std::uint64_t>::max();
 				if (fault == 5) row.payloadByteOffset = std::numeric_limits<std::uint64_t>::max(), row.payloadByteSize = 2;
-				auto plan = BuildStaticShadowPartition(StaticView(), inputs);
+				auto plan = TakeStaticShadowPartition(StaticView(), inputs);
 				test.Expect(!plan.valid && plan.staticSourceIndices.empty() && plan.dynamicSourceIndices.empty()
-					&& plan.allSourceIndices == std::vector<std::uint32_t>({0, 1}), "Malformed coverage publishes no partial optimized partition and retains all originals.");
+					&& plan.allSourceIndices == std::vector<std::uint32_t>({0, 1})
+					&& inputs[0].semantic.texturePublications.size() == 1,
+					"Malformed coverage publishes no partial partition and leaves owner proof available for fallback.");
 			}
 		});
 		registry.Add("Renderer.Efficiency.StaticShadowPolicy.EmptyStatic", [](TestContext& test) {

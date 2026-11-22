@@ -177,14 +177,19 @@ static const uint kVirtualGeometryDebugModeCluster = 8u;
 static const float kLocalIndirectWrap = 0.55f;
 static const float kLocalIndirectStrength = 0.24f;
 static const float kLocalIndirectMaxMultiplier = 16.0f;
-float3 SafeNormalize(float3 value, float3 fallback)
+// Reuse the squared length when a caller already needs it for attenuation.
+float3 SafeNormalizeWithLength(float3 value, float3 fallback, float lenSq)
 {
-	const float lenSq = dot(value, value);
 	if (lenSq <= 1e-8f || !all(isfinite(value)))
 	{
 		return fallback;
 	}
 	return value * rsqrt(lenSq);
+}
+
+float3 SafeNormalize(float3 value, float3 fallback)
+{
+	return SafeNormalizeWithLength(value, fallback, dot(value, value));
 }
 
 static const float kLocalIndirectBounceFloor = 0.12f;
@@ -226,11 +231,9 @@ uint ComputeClusterIndex(PSIn input, FrameCullingData frame)
 	return x + y * gridDim.x + z * (gridDim.x * gridDim.y);
 }
 
-float ComputePointAttenuation(GPULight light, float3 worldPosition)
+float ComputePointAttenuation(float distanceSq, float lightRange)
 {
-	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float distanceSq = dot(toLight, toLight);
-	const float range = max(light.directionAndRange.w, 0.001f);
+	const float range = max(lightRange, 0.001f);
 	const float rangeSq = range * range;
 
 	// Inverse square law
@@ -401,7 +404,7 @@ float SampleAreaShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kAreaShadowBias, texel * kernelScale);
 }
 
-float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPosition)
+float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPosition, uint lightType)
 {
 	// Manual debug switch for shadow isolation. It defaults off so runtime
 	// builds sample the real shadow maps, while a future release-only issue can
@@ -412,7 +415,12 @@ float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPo
 		return 1.0f;
 	}
 
-	const uint lightType = (uint)(light.positionAndType.w + 0.5);
+	// The light budget can retain many unshadowed lights. In that case there
+	// is no shadow resource to sample, regardless of the light's shape.
+	if (light.shadowAndPadding.x <= 0.5f || light.shadowAndPadding.y < 0.0f)
+	{
+		return 1.0f;
+	}
 	float rawVisibility = 1.0f;
 	if (lightType == kLightTypeDirectional)
 	{
@@ -520,14 +528,9 @@ float3 EvaluateDirectionalLight(GPULight light, float3 normal, float3 viewDir, f
 	return (diffuse + specular) * radiance * nDotL * lightVisibility;
 }
 
-float3 EvaluatePointLight(GPULight light, float3 worldPosition, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
+float3 EvaluateLocalDirect(float3 lightDir, float rawNDotL, float attenuation, float3 radiance,
+	float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
 {
-	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
-	const float rawNDotL = dot(normal, lightDir);
-	const float attenuation = ComputePointAttenuation(light, worldPosition);
-	if (attenuation <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
-
 	const float nDotL = saturate(rawNDotL);
 	if (nDotL <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
 
@@ -545,47 +548,44 @@ float3 EvaluatePointLight(GPULight light, float3 worldPosition, float3 normal, f
 	const float3 kD = (1.0 - F) * (1.0 - saturate(metallic));
 	const float3 diffuse = kD * albedo / kPi;
 
-	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
 	return (diffuse + specular) * radiance * nDotL * attenuation;
 }
 
-float3 EvaluatePointLightIndirect(GPULight light, FrameCullingData frame, float3 worldPosition, float3 normal, float3 albedo, float metallic, float roughness)
+float3 EvaluateLocalLight(GPULight light, FrameCullingData frame, float3 worldPosition, float3 normal,
+	float3 viewDir, float3 albedo, float metallic, float roughness, float shadowFactor, bool isSpot)
 {
+	// Direct and bounce lighting use the same direction, distance and range.
+	// Compute those once per light and skip both terms outside its influence.
 	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
+	const float distanceSq = dot(toLight, toLight);
+	const float attenuation = ComputePointAttenuation(distanceSq, light.directionAndRange.w);
+	if (attenuation <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
+
+	const float3 lightDir = SafeNormalizeWithLength(toLight, float3(0.0, -1.0, 0.0), distanceSq);
 	const float rawNDotL = dot(normal, lightDir);
-	const float attenuation = ComputePointAttenuation(light, worldPosition);
-	return EvaluateLocalIndirectDiffuse(light, frame, rawNDotL, attenuation, albedo, metallic, roughness);
-}
+	float coneAttenuation = 1.0f;
+	if (isSpot)
+	{
+		const float3 spotDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
+		const float cosTheta = dot(lightDir, spotDir);
+		const float innerCos = light.coneAnglesAndArea.x;
+		const float outerCos = light.coneAnglesAndArea.y;
+		coneAttenuation = saturate((cosTheta - outerCos) / max(innerCos - outerCos, 0.0001));
+	}
 
-float3 EvaluateSpotLight(GPULight light, float3 worldPosition, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
-{
-	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
-	const float3 spotDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
-	const float cosTheta = dot(lightDir, spotDir);
-	const float innerCos = light.coneAnglesAndArea.x;
-	const float outerCos = light.coneAnglesAndArea.y;
-	const float coneAttenuation = saturate((cosTheta - outerCos) / max(innerCos - outerCos, 0.0001));
-	return EvaluatePointLight(light, worldPosition, normal, viewDir, albedo, metallic, roughness) * coneAttenuation;
-}
-
-float3 EvaluateSpotLightIndirect(GPULight light, FrameCullingData frame, float3 worldPosition, float3 normal, float3 albedo, float metallic, float roughness)
-{
-	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
-	const float3 spotDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
-	const float cosTheta = dot(lightDir, spotDir);
-	const float innerCos = light.coneAnglesAndArea.x;
-	const float outerCos = light.coneAnglesAndArea.y;
-	const float coneAttenuation = saturate((cosTheta - outerCos) / max(innerCos - outerCos, 0.0001));
-	return EvaluatePointLightIndirect(light, frame, worldPosition, normal, albedo, metallic, roughness) * coneAttenuation;
+	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
+	const float3 direct = EvaluateLocalDirect(lightDir, rawNDotL, attenuation, radiance, normal, viewDir,
+		albedo, metallic, roughness);
+	const float3 indirect = EvaluateLocalIndirectDiffuse(light, frame, rawNDotL, attenuation, albedo, metallic, roughness);
+	// The local bounce term respects the same cone and shadow visibility as
+	// direct lighting. Apply each factor to both terms before adding them.
+	return direct * coneAttenuation * shadowFactor + indirect * coneAttenuation * shadowFactor;
 }
 
 float3 EvaluateAreaLightLTC(GPULight light, float3 worldPosition, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
 {
 	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float distanceAttenuation = ComputePointAttenuation(light, worldPosition);
+	const float distanceAttenuation = ComputePointAttenuation(dot(toLight, toLight), light.directionAndRange.w);
 	const float nDotL = saturate(dot(normal, SafeNormalize(toLight, float3(0.0, -1.0, 0.0))));
 	const float areaScale = max(light.coneAnglesAndArea.z * light.coneAnglesAndArea.w, 0.001);
 	const uint amplitudeLutIndex = (uint)(light.shadowAndPadding.z + 0.5f);
@@ -617,40 +617,20 @@ float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, 
 {
 	const GPULight light = globalLights[lightDataOffset + lightIndex];
 	const uint lightType = (uint)(light.positionAndType.w + 0.5);
-	const float shadowFactor = ComputeShadowFactor(light, frame, input.worldPosition);
+	const float shadowFactor = ComputeShadowFactor(light, frame, input.worldPosition, lightType);
 	if (lightType == kLightTypeDirectional)
 	{
 		return EvaluateDirectionalLight(light, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
 	}
-	if (lightType == kLightTypePoint)
+	if (lightType == kLightTypeAreaRect && frame.renderSettings0.w > 0u)
 	{
-		const float3 directLighting = EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
-		// The local indirect approximation comes from this same light, so it
-		// must respect blocker visibility. Environment IBL remains separate.
-		const float3 indirectLighting = EvaluatePointLightIndirect(light, frame, input.worldPosition, normal, albedo, metallic, roughness) * shadowFactor;
-		return directLighting + indirectLighting;
+		return EvaluateAreaLightLTC(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
 	}
-	if (lightType == kLightTypeSpot)
+	if (lightType == kLightTypePoint || lightType == kLightTypeSpot || lightType == kLightTypeAreaRect)
 	{
-		const float3 directLighting = EvaluateSpotLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
-		// Spot bounce is still emitted by the local light, so occluders should
-		// damp it together with the direct spotlight contribution.
-		const float3 indirectLighting = EvaluateSpotLightIndirect(light, frame, input.worldPosition, normal, albedo, metallic, roughness) * shadowFactor;
-		return directLighting + indirectLighting;
-	}
-	if (lightType == kLightTypeAreaRect)
-	{
-		if (frame.renderSettings0.w > 0u)
-		{
-			return EvaluateAreaLightLTC(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
-		}
-		else
-		{
-			// Fallback to point light if LTC is disabled
-			const float3 directLighting = EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
-			const float3 indirectLighting = EvaluatePointLightIndirect(light, frame, input.worldPosition, normal, albedo, metallic, roughness) * shadowFactor;
-			return directLighting + indirectLighting;
-		}
+		// Area lights use point evaluation as their existing LTC fallback.
+		return EvaluateLocalLight(light, frame, input.worldPosition, normal, viewDir, albedo, metallic, roughness,
+			shadowFactor, lightType == kLightTypeSpot);
 	}
 	return float3(0.0, 0.0, 0.0);
 }

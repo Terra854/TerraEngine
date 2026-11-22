@@ -62,13 +62,13 @@ TerraEngine::Renderer::Vulkan::PreparedShadowPageSet VulkanContext::Impl::Ensure
 			result.complete = true;
 			return result;
 		}
+		// Recording consumes only bindings published before its primary began.
+		// A changed cut or loader publication keeps the complete owner fallback;
+		// rebuilding the cut on a cache miss cannot make it recordable here.
+		if (!allowUpload) return reject("Authored shadow page cut was not prepared before command recording.");
 		const auto cut = BuildShadowAuthoredPageCut(request);
 		if (!cut.complete) return {false, {}, cut.fallbackReason};
 		if (!hasCurrentPublication()) return reject("Current native authored payload or device is unavailable.");
-		// Recording consumes only bindings published before its primary began.
-		// A changed cut or loader publication keeps the complete owner fallback;
-		// the next frame can prepare its missing page descriptors safely.
-		if (!allowUpload) return reject("Authored shadow page cut was not prepared before command recording.");
 
 		auto result = prepareBindings(cut.segments);
 		// Each light-selected cut gets independent packet descriptors. Camera

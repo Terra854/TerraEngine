@@ -304,6 +304,27 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(std::uint64_t{0}, alias->completionSerial, "Alias cannot manufacture completion.");
 		});
 
+		registry.Add("Renderer.Efficiency.ShadowPublication.RecordingOwnsImmutableAliasProof", [](TestContext& context) {
+			ShadowCachePublicationLedger ledger(1u);
+			const auto source = PublicationView(1u);
+			const auto destination = PublicationView(2u);
+			auto candidate = Candidate(source, 101u, 11u);
+			candidate.membership = AliasMembership();
+			const auto original = candidate.membership;
+			context.Expect(ledger.Record(candidate) && ledger.Contains(source),
+				"Recording publishes a lookup receipt and owns a copy of caller evidence.");
+			candidate.membership.rows[0].segmentId++;
+			context.Expect(ledger.ConfirmSubmission(11u, 21u, true), "The recorded copy remains valid.");
+			context.Expect(!ledger.AliasSubmittedContent(destination, 101u, candidate.membership)
+				&& ledger.AliasSubmittedContent(destination, 101u, original),
+				"Only the recorded evidence can qualify an alias.");
+			auto diagnostic = ledger.Find(destination);
+			context.Expect(diagnostic.has_value(), "The submitted alias has an independent diagnostic snapshot.");
+			if (diagnostic) diagnostic->membership.rows.clear();
+			context.Expect(ledger.CanReuse(source, 101u) && ledger.CanReuse(destination, 101u),
+				"Editing a diagnostic copy cannot change either qualified receipt.");
+		});
+
 		registry.Add("Renderer.Efficiency.ShadowPublication.AliasRejectsExactViewContentMismatch", [](TestContext& context) {
 			ExpectAliasMismatch(context, [](auto& view, auto&) { ++view.referenceOrigin.cell[0]; });
 			ExpectAliasMismatch(context, [](auto& view, auto&) { view.referenceOrigin.offsetMetres[0] = 0.25; });

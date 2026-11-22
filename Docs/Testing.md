@@ -3371,6 +3371,11 @@ run `Engine.RendererEfficiency`, `Engine.VirtualGeometryShadow` and
 `Engine.VirtualGeometryRenderer`. The static shadow policy test compares the
 partition built on a worker with separately normalized exact memberships. It
 also checks the source draw order for mixed static and dynamic casters.
+The publication tests verify that submitted and aliased shadow receipts retain
+the recorded caster proof when the caller or a diagnostic copy changes its rows.
+Check backend readbacks when changing shadow submission. Direct casters use
+their full light-selected resident range. A page-local caster must publish
+one packet for each page draw so the task shader emits the entire range.
 
 For the live Bistro comparison, warm up all visible textures, run the same
 Scene View camera sweep before and after, and compare the median and tail frame

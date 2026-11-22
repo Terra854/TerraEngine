@@ -8,7 +8,6 @@
 #include <cmath>
 #include <limits>
 #include <tuple>
-#include <map>
 #include <set>
 
 namespace TerraEngine::Renderer
@@ -78,6 +77,13 @@ namespace TerraEngine::Renderer
 		void HashValue(std::uint64_t& digest, const std::array<T, N>& values)
 		{
 			for (const auto value : values) HashValue(digest, value);
+		}
+		void HashValue(std::uint64_t& digest, const UUID& id)
+		{
+			// UUIDs dominate the stamp. Fingerprint two words per ID and let
+			// the exact semantic comparison settle any hash collision.
+			const auto words = std::bit_cast<std::array<std::uint64_t, 2>>(id);
+			HashValue(digest, words);
 		}
 		// Hash each caster once, then fold its digest into whichever membership
 		// lists own it. A digest only rejects mismatches. Reuse still compares
@@ -218,18 +224,8 @@ namespace TerraEngine::Renderer
 			return candidate.requiredFaceMask == required
 				&& (!recorded || (candidate.recordingComplete && candidate.recordedFaceMask == required));
 		}
-		ShadowCachePublicationEntry Entry(const ShadowRefreshCandidate& candidate, ShadowCachePublicationState status)
-		{
-			ShadowCachePublicationEntry entry;
-			entry.view = candidate.view;
-			entry.membership = candidate.membership;
-			entry.contentToken = candidate.contentToken;
-			entry.frameSerial = candidate.frameSerial;
-			entry.commandSerial = candidate.commandSerial;
-			entry.status = status;
-			return entry;
-		}
-		void Store(std::vector<ShadowCachePublicationEntry>& entries, ShadowCachePublicationEntry value, bool physical)
+		template<typename Publication>
+		void Store(std::vector<Publication>& entries, Publication value, bool physical)
 		{
 			const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) {
 				if (physical) return PhysicalOverlap(entry.view, value.view);
@@ -247,7 +243,7 @@ namespace TerraEngine::Renderer
 			if (found == entries.end()) entries.push_back(std::move(value));
 			else *found = std::move(value);
 		}
-		bool Submitted(const ShadowCachePublicationEntry& entry)
+		bool Submitted(const auto& entry)
 		{
 			return (entry.status == ShadowCachePublicationState::Submitted
 				|| entry.status == ShadowCachePublicationState::Complete) && entry.submitSerial != 0;
@@ -319,8 +315,9 @@ namespace TerraEngine::Renderer
 		return {true, StaticShadowClassificationReason::Eligible};
 	}
 
-	StaticShadowPartition BuildStaticShadowPartition(const ShadowViewKey& view,
-		std::span<const ShadowCasterStampInput> inputs)
+	template<typename Input>
+	static StaticShadowPartition PartitionShadowCasters(const ShadowViewKey& view,
+		std::span<Input> inputs)
 	{
 		StaticShadowPartition plan; plan.view = view;
 		if (inputs.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -382,16 +379,28 @@ namespace TerraEngine::Renderer
 		initialize(plan.staticMembership, plan.staticSourceIndices.size(), true);
 		initialize(plan.dynamicMembership, plan.dynamicSourceIndices.size(), dynamicProofComplete);
 		for (const auto index : sortedIndices) {
-			const auto& row = inputs[index].semantic;
+			auto& row = inputs[index].semantic;
 			auto& partition = staticRows[index] ? plan.staticMembership : plan.dynamicMembership;
 			const std::uint64_t digest = DigestCaster(row);
 			HashValue(plan.allMembership.digest, digest);
 			HashValue(partition.digest, digest);
 			plan.allMembership.rows.push_back(row);
-			partition.rows.push_back(row);
+			// The immutable overload copies from const input. Recording owns
+			// mutable scratch rows and can transfer their texture/pose vectors.
+			partition.rows.push_back(std::move(row));
 		}
 		plan.valid = true;
 		return plan;
+	}
+	StaticShadowPartition BuildStaticShadowPartition(const ShadowViewKey& view,
+		std::span<const ShadowCasterStampInput> inputs)
+	{
+		return PartitionShadowCasters(view, inputs);
+	}
+	StaticShadowPartition TakeStaticShadowPartition(const ShadowViewKey& view,
+		std::span<ShadowCasterStampInput> inputs)
+	{
+		return PartitionShadowCasters(view, inputs);
 	}
 
 	namespace
@@ -498,13 +507,23 @@ namespace TerraEngine::Renderer
 	}
 
 	ShadowCachePublicationLedger::ShadowCachePublicationLedger(std::uint64_t session) : rendererSessionGeneration(session) {}
+	ShadowCachePublicationLedger::StoredPublication ShadowCachePublicationLedger::Snapshot(
+		ShadowRefreshCandidate candidate, ShadowCachePublicationState status)
+	{
+		return {candidate.view, std::make_shared<const ShadowCasterMembership>(std::move(candidate.membership)),
+			candidate.contentToken, candidate.frameSerial, candidate.commandSerial, 0, 0, status};
+	}
+	ShadowCachePublicationEntry ShadowCachePublicationLedger::StoredPublication::CopyForDiagnostics() const
+	{
+		return {view, *membership, contentToken, frameSerial, commandSerial, submitSerial, completionSerial, status};
+	}
 	bool ShadowCachePublicationLedger::Prepare(const ShadowRefreshCandidate& candidate)
 	{
 		if (!ValidCandidate(candidate, rendererSessionGeneration, false)) return false;
-		Store(entries, Entry(candidate, ShadowCachePublicationState::Prepared), false);
+		Store(entries, Snapshot(candidate, ShadowCachePublicationState::Prepared), false);
 		return true;
 	}
-	bool ShadowCachePublicationLedger::Record(const ShadowRefreshCandidate& candidate)
+	bool ShadowCachePublicationLedger::Record(ShadowRefreshCandidate candidate)
 	{
 		// Revoke all logical aliases before checking recording completeness. Even
 		// rejected five-face work may overwrite a physical image when submitted.
@@ -523,8 +542,9 @@ namespace TerraEngine::Renderer
 			std::erase_if(pending, [&](const auto& older) { return PhysicalOverlap(older.view, candidate.view); });
 			return false;
 		}
-		pending.push_back(candidate);
-		Store(entries, Entry(candidate, ShadowCachePublicationState::Recorded), false);
+		const auto recorded = Snapshot(std::move(candidate), ShadowCachePublicationState::Recorded);
+		pending.push_back(recorded);
+		Store(entries, recorded, false);
 		return true;
 	}
 	bool ShadowCachePublicationLedger::ConfirmSubmission(std::uint64_t commandSerial, std::uint64_t submitSerial, bool succeeded)
@@ -539,12 +559,11 @@ namespace TerraEngine::Renderer
 		std::uint64_t contentToken, std::uint64_t commandSerial) const noexcept
 	{
 		if (!contentToken || !commandSerial) return false;
-		// Only the latest recorded physical writer can be copied. An older exact
-		// key is not safe after a later writer recorded over that image region.
+		// Only the latest recorded physical writer can be copied. Record already
+		// validated all faces and caster rows before taking the immutable snapshot.
 		for (auto item = pending.rbegin(); item != pending.rend(); ++item)
 			if (PhysicalOverlap(item->view, view)) return item->view == view
-				&& item->contentToken == contentToken && item->commandSerial == commandSerial
-				&& ValidCandidate(*item, rendererSessionGeneration, true);
+				&& item->contentToken == contentToken && item->commandSerial == commandSerial;
 		return false;
 	}
 	bool ShadowCachePublicationLedger::ConfirmSubmissionBatch(std::span<const std::uint64_t> commands,
@@ -565,21 +584,22 @@ namespace TerraEngine::Renderer
 		}
 		// GPU command order, rather than CPU recording order, determines the final
 		// physical owner. Within each command, its recording order is preserved.
-		std::vector<ShadowRefreshCandidate> confirmed;
+		std::vector<StoredPublication> confirmed;
 		for (auto command : commands)
 			for (const auto& item : pending)
 				if (item.commandSerial == command) confirmed.push_back(item);
 		std::erase_if(pending, [&](const auto& item) { return std::find(commands.begin(), commands.end(), item.commandSerial) != commands.end(); });
-		for (const auto& item : confirmed)
+		for (auto& entry : confirmed)
 		{
-			auto entry = Entry(item, ShadowCachePublicationState::Submitted);
+			entry.status = ShadowCachePublicationState::Submitted;
 			entry.submitSerial = submitSerial;
 			Store(submittedPhysicalOwners, entry, true);
+			const auto view = entry.view;
 			Store(entries, std::move(entry), false);
 			if (std::none_of(pending.begin(), pending.end(),
-				[&](const auto& writer) { return PhysicalOverlap(writer.view, item.view); }))
+				[&](const auto& writer) { return PhysicalOverlap(writer.view, view); }))
 				std::erase_if(blockedPhysicalRegions,
-					[&](const auto& view) { return PhysicalOverlap(view, item.view); });
+					[&](const auto& region) { return PhysicalOverlap(region, view); });
 		}
 		lastSubmissionSerial = submitSerial;
 		return true;
@@ -597,7 +617,7 @@ namespace TerraEngine::Renderer
 		// Remove the aborted command and every earlier overlapping writer. A newer
 		// complete recording may establish fresh ownership; an older one must never
 		// clear the aborted writer's barrier on a delayed successful confirmation.
-		std::vector<ShadowRefreshCandidate> retained;
+		std::vector<StoredPublication> retained;
 		retained.reserve(pending.size());
 		for (std::size_t i = 0; i < pending.size(); ++i)
 		{
@@ -629,24 +649,27 @@ namespace TerraEngine::Renderer
 				[&](const auto& region) { return PhysicalOverlap(region, view); }))
 			return false;
 		const auto logical = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) {
-			return entry.view == view && entry.contentToken == contentToken && Submitted(entry) && ValidMembership(entry.membership);
+			return entry.view == view && entry.contentToken == contentToken && Submitted(entry);
 		});
 		if (logical == entries.end()) return false;
 		return std::any_of(submittedPhysicalOwners.begin(), submittedPhysicalOwners.end(), [&](const auto& owner) {
 			return PhysicalOverlap(owner.view, view) && owner.contentToken == contentToken && Submitted(owner)
 				&& owner.submitSerial == logical->submitSerial && SameContentInputs(owner.view, logical->view)
-				&& ExactShadowCasterMembershipEqual(owner.membership, logical->membership);
+				&& (owner.membership == logical->membership
+					|| ExactShadowCasterMembershipEqual(*owner.membership, *logical->membership));
 		});
 	}
 	bool ShadowCachePublicationLedger::AliasSubmittedContent(const ShadowViewKey& view, std::uint64_t token,
 		const ShadowCasterMembership& membership)
 	{
-		if (!ValidView(view, rendererSessionGeneration) || token == 0 || !ValidMembership(membership)
+		if (!ValidView(view, rendererSessionGeneration) || token == 0 || !membership.reusable
 			|| std::any_of(blockedPhysicalRegions.begin(), blockedPhysicalRegions.end(),
 				[&](const auto& region) { return PhysicalOverlap(region, view); })) return false;
 		const auto owner = std::find_if(submittedPhysicalOwners.begin(), submittedPhysicalOwners.end(), [&](const auto& entry) {
 			return Submitted(entry) && entry.contentToken == token && SameContentInputs(entry.view, view)
-				&& ExactShadowCasterMembershipEqual(entry.membership, membership);
+				&& entry.membership->digest == membership.digest
+				&& entry.membership->rows.size() == membership.rows.size()
+				&& ValidMembership(membership) && entry.membership->rows == membership.rows;
 		});
 		if (owner == submittedPhysicalOwners.end()) return false;
 		// Copy the actual submission/completion receipt without recording a write.
@@ -660,14 +683,24 @@ namespace TerraEngine::Renderer
 		const auto owner = std::find_if(submittedPhysicalOwners.begin(), submittedPhysicalOwners.end(), [&](const auto& entry) {
 			return PhysicalOverlap(entry.view, view) && Submitted(entry);
 		});
-		return owner == submittedPhysicalOwners.end() ? std::nullopt : std::optional<ShadowCachePublicationEntry>(*owner);
+		if (owner == submittedPhysicalOwners.end()) return std::nullopt;
+		return owner->CopyForDiagnostics();
+	}
+	const ShadowCachePublicationLedger::StoredPublication* ShadowCachePublicationLedger::FindStored(const ShadowViewKey& view) const noexcept
+	{
+		for (auto it = pending.rbegin(); it != pending.rend(); ++it)
+			if (it->view == view) return &*it;
+		for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+			if (it->view == view) return &*it;
+		return nullptr;
+	}
+	bool ShadowCachePublicationLedger::Contains(const ShadowViewKey& view) const noexcept
+	{
+		return FindStored(view) != nullptr;
 	}
 	std::optional<ShadowCachePublicationEntry> ShadowCachePublicationLedger::Find(const ShadowViewKey& view) const
 	{
-		for (auto it = pending.rbegin(); it != pending.rend(); ++it)
-			if (it->view == view) return Entry(*it, ShadowCachePublicationState::Recorded);
-		for (auto it = entries.rbegin(); it != entries.rend(); ++it)
-			if (it->view == view) return *it;
+		if (const auto* stored = FindStored(view)) return stored->CopyForDiagnostics();
 		return std::nullopt;
 	}
 	void ShadowCachePublicationLedger::InvalidatePhysicalRegion(const ShadowViewKey& view) noexcept
@@ -712,10 +745,13 @@ namespace TerraEngine::Renderer
 		{ fail(ShadowBatchFailure::Capacity); return plan; }
 		using Contribution = std::tuple<UUID, std::uint64_t, std::uint64_t>;
 		std::set<Contribution> contributions;
-		// Ordered exact keys avoid digest-only authorization. Each bucket retains
-		// original member order; bucket recording order follows its first member.
-		std::map<ShadowBatchCompatibilityKey, std::vector<std::uint32_t>> buckets;
+		// Sort compact indices rather than allocating a tree node and a vector
+		// for each distinct pipeline/mesh/material key. Ordering still uses the
+		// entire compatibility key, and ties keep their original member order.
+		std::vector<std::uint32_t> compatible;
+		compatible.reserve(members.size());
 		std::vector<std::uint32_t> singles;
+		singles.reserve(members.size());
 		for (std::uint32_t i = 0; i < members.size(); ++i)
 		{
 			const auto& member = members[i]; const auto& key = member.key;
@@ -742,32 +778,42 @@ namespace TerraEngine::Renderer
 			if (!completeKey || !member.knownDefaultTaskAbi || !member.supportedRoute
 				|| !member.deformationBridgeComplete || member.conservativeDeformation)
 			{ singles.push_back(i); continue; }
-			buckets[key].push_back(i);
+			compatible.push_back(i);
 		}
-		std::vector<const std::vector<std::uint32_t>*> ordered;
-		ordered.reserve(buckets.size());
-		for (const auto& [key, indices] : buckets) ordered.push_back(&indices);
-		std::sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) { return a->front() < b->front(); });
+		std::sort(compatible.begin(), compatible.end(), [&](std::uint32_t a, std::uint32_t b) {
+			const auto order = members[a].key <=> members[b].key;
+			return order == 0 ? a < b : order < 0;
+		});
+		std::vector<std::span<const std::uint32_t>> ordered;
+		for (std::size_t begin = 0; begin < compatible.size();) {
+			std::size_t end = begin + 1;
+			while (end < compatible.size() && members[compatible[begin]].key == members[compatible[end]].key) ++end;
+			if (end - begin == 1) singles.push_back(compatible[begin]);
+			else ordered.emplace_back(compatible.data() + begin, end - begin);
+			begin = end;
+		}
+		// Draw groups still record in first-member order, independent of sort keys.
+		std::sort(ordered.begin(), ordered.end(), [](auto a, auto b) { return a.front() < b.front(); });
 		std::uint64_t uploaded = 0;
-		for (const auto* indices : ordered)
+		for (const auto indices : ordered)
 		{
-			const auto& key = members[indices->front()].key;
+			const auto& key = members[indices.front()].key;
 			const std::uint64_t tasksPerInstance = (std::uint64_t(key.dispatchMeshletCount) + 31U) / 32U;
 			const auto chunkLimit = std::min({std::uint64_t(limits.maxInstancesPerGroup),
 				std::uint64_t(limits.maxTaskGroupsX) / tasksPerInstance,
 				std::uint64_t(limits.maxTaskGroupsTotal) / tasksPerInstance});
-			if (chunkLimit < 2) { singles.insert(singles.end(), indices->begin(), indices->end()); continue; }
-			for (std::size_t begin = 0; begin < indices->size();)
+			if (chunkLimit < 2) { singles.insert(singles.end(), indices.begin(), indices.end()); continue; }
+			for (std::size_t begin = 0; begin < indices.size();)
 			{
-				const auto count = std::min<std::uint64_t>(chunkLimit, indices->size() - begin);
-				if (count < 2) { singles.push_back((*indices)[begin]); ++begin; continue; }
+				const auto count = std::min<std::uint64_t>(chunkLimit, indices.size() - begin);
+				if (count < 2) { singles.push_back(indices[begin]); ++begin; continue; }
 				if (plan.groups.size() >= limits.maxGroups || count > limits.instanceCapacity - uploaded)
 				{ fail(ShadowBatchFailure::Capacity); return plan; }
-				ShadowBatchGroup group; group.key = key; group.representativeIndex = (*indices)[begin];
+				ShadowBatchGroup group; group.key = key; group.representativeIndex = indices[begin];
 				group.firstInstance = static_cast<std::uint32_t>(limits.firstInstance + uploaded);
 				group.instanceCount = static_cast<std::uint32_t>(count);
 				group.taskGroupsX = static_cast<std::uint32_t>(tasksPerInstance * count);
-				group.memberIndices.assign(indices->begin() + begin, indices->begin() + begin + static_cast<std::size_t>(count));
+				group.memberIndices.assign(indices.begin() + begin, indices.begin() + begin + static_cast<std::size_t>(count));
 				plan.groups.push_back(std::move(group)); uploaded += count; begin += static_cast<std::size_t>(count);
 			}
 		}

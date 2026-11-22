@@ -6,6 +6,7 @@
 #include "Core/Export.h"
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -159,6 +160,10 @@ namespace TerraEngine::Renderer
 	TERRAENGINE_API StaticShadowClassification ClassifyStaticShadowCaster(const ShadowCasterStamp& stamp);
 	TERRAENGINE_API StaticShadowPartition BuildStaticShadowPartition(const ShadowViewKey& view,
 		std::span<const ShadowCasterStampInput> inputs);
+	// Protected recording can give up its scratch rows once partitioning has
+	// succeeded. Invalid inputs remain available for the whole-map fallback.
+	TERRAENGINE_API StaticShadowPartition TakeStaticShadowPartition(const ShadowViewKey& view,
+		std::span<ShadowCasterStampInput> inputs);
 
 	inline constexpr std::uint64_t kStaticShadowDefaultBudgetBytes = 64ULL * 1024ULL * 1024ULL;
 	enum class StaticShadowChargeState : std::uint8_t { Reserved, Resident, Retiring };
@@ -221,7 +226,7 @@ namespace TerraEngine::Renderer
 	public:
 		explicit ShadowCachePublicationLedger(std::uint64_t session = 1);
 		bool Prepare(const ShadowRefreshCandidate& candidate);
-		bool Record(const ShadowRefreshCandidate& candidate);
+		bool Record(ShadowRefreshCandidate candidate);
 		bool ConfirmSubmission(std::uint64_t commandSerial, std::uint64_t submitSerial, bool succeeded = true);
 		// Commands must be listed in their actual order in one graphics submission.
 		bool ConfirmSubmissionBatch(std::span<const std::uint64_t> orderedCommandSerials,
@@ -236,6 +241,8 @@ namespace TerraEngine::Renderer
 		bool CanReuse(const ShadowViewKey& view, std::uint64_t contentToken) const;
 		bool AliasSubmittedContent(const ShadowViewKey& qualifiedView, std::uint64_t expectedContentToken,
 			const ShadowCasterMembership& exactMembership);
+		// Hot paths can test prior coverage without copying the caster proof.
+		bool Contains(const ShadowViewKey& view) const noexcept;
 		std::optional<ShadowCachePublicationEntry> Find(const ShadowViewKey& view) const;
 		// Validation can inspect the actual submitted region owner across views.
 		// Callers still use CanReuse with that full key; this grants no cache hit.
@@ -248,10 +255,22 @@ namespace TerraEngine::Renderer
 		// This logical operation never releases a charged physical allocation.
 		void InvalidatePhysicalRegion(const ShadowViewKey& view) noexcept;
 	private:
+		// Recording snapshots caller-owned evidence once. A physical owner and
+		// every qualified logical receipt can then share those immutable rows.
+		struct StoredPublication
+		{
+			ShadowViewKey view{};
+			std::shared_ptr<const ShadowCasterMembership> membership;
+			std::uint64_t contentToken = 0, frameSerial = 0, commandSerial = 0, submitSerial = 0, completionSerial = 0;
+			ShadowCachePublicationState status = ShadowCachePublicationState::Invalid;
+			ShadowCachePublicationEntry CopyForDiagnostics() const;
+		};
+		static StoredPublication Snapshot(ShadowRefreshCandidate candidate, ShadowCachePublicationState status);
+		const StoredPublication* FindStored(const ShadowViewKey& view) const noexcept;
 		std::uint64_t rendererSessionGeneration = 1;
-		std::vector<ShadowCachePublicationEntry> entries;
-		std::vector<ShadowCachePublicationEntry> submittedPhysicalOwners;
-		std::vector<ShadowRefreshCandidate> pending;
+		std::vector<StoredPublication> entries;
+		std::vector<StoredPublication> submittedPhysicalOwners;
+		std::vector<StoredPublication> pending;
 		// Blocked ownership is separate from last submitted diagnostic receipts.
 		// Once recording can overwrite a face, failure never revives an old alias.
 		std::vector<ShadowViewKey> blockedPhysicalRegions;

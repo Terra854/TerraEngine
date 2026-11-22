@@ -653,6 +653,38 @@ void VulkanContext::RenderFrame(
 	std::shared_ptr<const Material> lastPreparationMaterialOwner;
 	const Material* lastPreparationMaterial = nullptr;
 	std::optional<DrawResourcePreparationKey> lastPreparedResourceKey;
+	// Mesh and pipeline preparation are pass-specific. Material data and
+	// texture aliases are shared across the view's camera and shadow passes.
+	thread_local std::unordered_map<TerraEngine::UUID, std::uint64_t> preparedMaterialGenerations;
+	preparedMaterialGenerations.clear();
+	const auto PrepareMaterialOnce = [&](TerraEngine::UUID collectionId,
+		TerraEngine::UUID materialId, const Material* material) {
+		auto& resources = ResourceManager::Instance();
+		const auto generation = resources.GetRendererResourcePublicationGeneration();
+		const auto prepared = preparedMaterialGenerations.find(materialId);
+		if (prepared != preparedMaterialGenerations.end() && prepared->second == generation
+			&& impl->materialIndexMap.contains(materialId)) return;
+
+		impl->EnsureMaterialDescriptorSets(collectionId, materialId);
+		const auto owner = impl->materialSourceOwners.find(materialId);
+		const auto dependencies = impl->materialTextureSourceOwners.find(materialId);
+		if (!impl->materialIndexMap.contains(materialId) || owner == impl->materialSourceOwners.end()
+			|| owner->second.get() != material || dependencies == impl->materialTextureSourceOwners.end()) return;
+		// An upload can keep an older usable alias after a failure. Cache only
+		// accepted current owners and mip ranges so another pass can still retry.
+		const auto current = [&](const auto& dependency) {
+			const auto& [id, textureOwner] = dependency;
+			const auto texture = impl->textureCache.find(id);
+			return textureOwner && texture != impl->textureCache.end()
+				&& texture->second.sourceOwner == textureOwner
+				&& resources.AcquireTextureSnapshot(id) == textureOwner
+				&& texture->second.residentMipOffset <= resources.ResolveTextureMipResidencyForTexture(
+					id, texture->second.sourceMipCount).sourceMipOffset;
+		};
+		if (std::all_of(dependencies->second.begin(), dependencies->second.end(), current)
+			&& generation == resources.GetRendererResourcePublicationGeneration())
+			preparedMaterialGenerations.insert_or_assign(materialId, generation);
+	};
 	const auto PrepareDrawResources = [&](const RenderItemRecord& command,
 		VkRenderPass preparationPass) {
 		const Material* material = nullptr;
@@ -716,7 +748,7 @@ void VulkanContext::RenderFrame(
 		impl->EnsureMesh(command.meshId);
 		impl->EnsurePipeline(collectionId, preparationPass, material->header.flags,
 			preparationUsesConventionalVisibilityIdentity);
-		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
+		PrepareMaterialOnce(collectionId, command.materialId, material);
 
 		// Fallback for failed task pipeline
 		auto passIt = impl->pipelineCache.find(preparationPass);
@@ -782,6 +814,9 @@ void VulkanContext::RenderFrame(
 				// but shadow visibility never reuses camera Hi-Z decisions.
 				if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE)
 					PrepareDrawResources(command, impl->shadowRenderPass);
+				// A direct caster already owns its full light-selected range.
+				// Only other routes can replace that draw with authored pages.
+				if (command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet) continue;
 				// Prewarm every real light-qualified cut, including off-camera
 				// casters. Resource-key deduplication cannot substitute another
 				// light's selected range; page preparation owns its exact cut key.
@@ -3460,6 +3495,10 @@ void VulkanContext::RenderFrame(
 		preparedList.lightId = shadowDrawList.lightId;
 		preparedList.sourceOrdinalCount = shadowDrawList.stableOrdinals.size();
 		preparedList.draws.reserve(shadowDrawList.stableOrdinals.size());
+		// One immutable publication qualifies the entire instance record array.
+		// Every caster segment in this light uses the same frame proof.
+		const bool sourceCurrent = TerraEngine::Renderer::ShadowPreparedInstanceInputsCurrent(
+			*publication, presentation, shadowDrawList);
 
 		// The renderer already asked the spatial index for one list per light.
 		// Rebuilding the shadow draws from that list preserves the culling win
@@ -3696,7 +3735,11 @@ void VulkanContext::RenderFrame(
 			pageRequest.materialUnsupported = !shadowPreparation->hasTaskStage
 				|| (shadowPreparation->selectedCollectionId != defaultTaskCollectionId
 					&& shadowPreparation->selectedCollectionId != defaultMeshCollectionId);
-			const auto pageSet = impl->EnsureShadowAuthoredPagePayload(pageRequest, false);
+			// Keep direct shadows on the same complete resident range selected
+			// for the light, instead of splitting it into page-local draws.
+			const auto pageSet = command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+				? TerraEngine::Renderer::Vulkan::PreparedShadowPageSet{}
+				: impl->EnsureShadowAuthoredPagePayload(pageRequest, false);
 			const auto emit = [&](PreparedDraw draw, TerraEngine::Renderer::ShadowCasterStampInput input, std::uint32_t count) {
 				// Static admission follows accepted native owners, never an authored
 				// flag or empty animation palette alone. Unknown proof stays dynamic.
@@ -3756,7 +3799,6 @@ void VulkanContext::RenderFrame(
 				member.deformationBridgeComplete = !command.HasCompleteGpuAnimation()
 					|| (canonicalGraphicsGroup.has_value() && draw.push.meshDataIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
 						&& draw.push.textureIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX);
-				const bool sourceCurrent = TerraEngine::Renderer::ShadowPreparedInstanceInputsCurrent(*publication, presentation, shadowDrawList);
 				member.knownDefaultTaskAbi = member.knownDefaultTaskAbi && sourceCurrent;
 				RenderInstanceRecord record;
 				if (sourceCurrent) record = shadowDrawList.instanceInputs->records[itemIndex];
@@ -3807,6 +3849,11 @@ void VulkanContext::RenderFrame(
 					// remain in semantic identity, rather than transient GPU offsets.
 					pageDraw.push.virtualMeshletOffset = 0;
 					pageDraw.push.virtualMeshletCount = segment.ownerMeshletCount;
+					// This draw owns exactly one packet. The task shader walks
+					// the packet count, so a zero inherited from the owner LOD
+					// silently drops every meshlet in an otherwise valid page.
+					pageDraw.push.selectedVirtualClusterOffset = binding.descriptorIndex;
+					pageDraw.push.selectedVirtualClusterCount = 1u;
 					pageDraw.push.virtualGeometryPagePayloadBufferIndex = binding.payloadBufferIndex;
 					pageDraw.push.virtualGeometryPacketDescriptorIndex = binding.descriptorIndex;
 					pageDraw.push.virtualGeometryPayloadSource = static_cast<std::uint32_t>(VirtualGeometryPagePayloadSource::ResidentPagePayload);
@@ -3867,7 +3914,15 @@ void VulkanContext::RenderFrame(
 	const auto HashBytes = [&](std::uint64_t& seed, const void* data,
 		std::size_t byteCount) {
 		const auto* bytes = static_cast<const std::uint8_t*>(data);
-		for(std::size_t byteIndex = 0u; byteIndex < byteCount; ++byteIndex) {
+		// Push constants still contribute every byte to the secondary recording
+		// signature. Copy whole words to avoid a serial hash operation per byte.
+		std::size_t byteIndex = 0;
+		for (; byteCount - byteIndex >= sizeof(std::uint64_t); byteIndex += sizeof(std::uint64_t)) {
+			std::uint64_t word{};
+			std::memcpy(&word, bytes + byteIndex, sizeof(word));
+			HashCombine(seed, word);
+		}
+		for(; byteIndex < byteCount; ++byteIndex) {
 			HashCombine(seed, bytes[byteIndex]);
 		}
 	};
@@ -4084,7 +4139,7 @@ void VulkanContext::RenderFrame(
 			const auto partition = [&record]() {
 				TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Shadow Memberships", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				auto& list = *record.preparedList;
-				list.staticPartition = TerraEngine::Renderer::BuildStaticShadowPartition(
+				list.staticPartition = TerraEngine::Renderer::TakeStaticShadowPartition(
 					record.qualifiedKey, list.casterInputs);
 				// Whole-map proof remains available when static partition policy
 				// rejects a view that still supports ordinary shadow reuse.
@@ -4110,7 +4165,7 @@ void VulkanContext::RenderFrame(
 	for (auto& record : shadowLightRecords)
 	{
 		const auto& key = record.qualifiedKey;
-		const auto previous = impl->shadowPublicationLedger.Find(key);
+		const bool previous = impl->shadowPublicationLedger.Contains(key);
 		if (record.type == 1U && selectIncompletePointFaces) {
 			record.validationIncompletePointFaces = true; selectIncompletePointFaces = false;
 		}
@@ -4121,7 +4176,7 @@ void VulkanContext::RenderFrame(
 				record.validationPriorPhysicalKey = physicalOwner->view;
 			}
 		}
-		record.invalidatedThisFrame = previous.has_value();
+		record.invalidatedThisFrame = previous;
 		const bool reuseRequested = presentation.efficiencyOptions.options.shadowReuse
 			== TerraEngine::Renderer::RendererEfficiencyShadowReuse::Enabled;
 		if (reuseRequested && !record.validationIncompletePointFaces && record.preparedList != nullptr && record.preparedList->recordingReady
@@ -4158,6 +4213,7 @@ void VulkanContext::RenderFrame(
 	std::vector<TerraEngine::Renderer::StaticShadowAllocationCharge> staticCharges;
 	std::vector<ShadowLightRecord*> staticRequestRecords;
 	try {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Admit Static Shadow Depth", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// The owned failure seam exercises a fresh allocator admission. Retire
 		// this view's inherited cache logically first, while exact native users
 		// keep its physical storage charged until their real fence/discard proof.
@@ -4182,7 +4238,20 @@ void VulkanContext::RenderFrame(
 				record.staticFallback = "OwnedTransferUnavailable"; continue;
 			}
 			TerraEngine::Renderer::StaticShadowAdmissionRequest request;
-			if (!impl->QueryStaticShadowRequirements(record.qualifiedKey, request, record.staticFallback)) continue;
+			const auto existing = std::find_if(impl->staticShadowEntries.begin(), impl->staticShadowEntries.end(),
+				[&](const auto& entry) { return !entry->retiring && entry->finalView == record.qualifiedKey; });
+			if (existing != impl->staticShadowEntries.end()) {
+				// The live native image already proves size and compatibility.
+				// This request retains its charge and cannot admit a new image.
+				const auto& owner = (*existing)->owner;
+				request = {record.qualifiedKey, record.staticPriority, owner.actualBytes, 0,
+					static_cast<std::uint8_t>(owner.layers == 6 ? 0x3f : 1)};
+			} else {
+				// A reused final map needs no speculative copy source. A later
+				// refresh can still request normal static admission.
+				if (record.reusedCachedResult && !shadowValidationRequested) continue;
+				if (!impl->QueryStaticShadowRequirements(record.qualifiedKey, request, record.staticFallback)) continue;
+			}
 			request.retainedLightPriority = record.staticPriority;
 			staticRequests.push_back(request); staticRequestRecords.push_back(&record);
 		}
@@ -4268,6 +4337,9 @@ void VulkanContext::RenderFrame(
 		{
 			auto* list = record.preparedList;
 			if (!list) continue;
+			// A submitted map already covers this light. Keep the diagnostics
+			// fixture's reference plan, but skip draw planning on normal reuse.
+			if (record.reusedCachedResult && !shadowValidationRequested) continue;
 			TerraEngine::Renderer::ShadowBatchLimits limits;
 			limits.firstInstance = static_cast<std::uint32_t>(shadowStreamRecordCount);
 			limits.instanceCapacity = static_cast<std::uint32_t>(list->batchMembers.size());
@@ -4285,9 +4357,13 @@ void VulkanContext::RenderFrame(
 				impl->maximumStorageBufferRange / sizeof(RenderInstanceRecord));
 			if (shadowStreamRecordCount > maximumRecords) { shadowStreamPrepared = false; break; }
 			const auto plan = [list, key = record.qualifiedKey, limits]() {
+				TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Shadow Batch Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				list->batch = TerraEngine::Renderer::BuildShadowBatchPlan(key, list->batchMembers, limits);
 			};
-			if (presentation.efficiencyOptions.options.validationPreparation == TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent)
+			// One light has no independent sibling work to overlap. Recording
+			// can consume its CPU plan inline without waiting on another worker.
+			if (parallelShadowProof || (shadowValidationRequested
+				&& presentation.efficiencyOptions.options.validationPreparation == TerraEngine::Renderer::RendererEfficiencyPreparation::Concurrent))
 			{ shadowBatchSettlement.CreateAndEnqueue(ThreadPool::instance(), plan); ++shadowPreparationWorkerTasks; }
 			else { shadowBatchSettlement.RunInline(plan); ++shadowPreparationInlineTasks; }
 		}
@@ -4363,6 +4439,7 @@ void VulkanContext::RenderFrame(
 	shadowStreamOwner.frameSlot = currentFrame; shadowStreamOwner.snapshotSlot = snapshotSlotIndex;
 	for (auto& record : shadowLightRecords) if (record.preparedList)
 	{
+		if (record.reusedCachedResult && !shadowValidationRequested) continue;
 		auto& list = *record.preparedList;
 		const auto originalCommandCount = indirectCommands.size();
 		try
@@ -4933,7 +5010,7 @@ void VulkanContext::RenderFrame(
 			candidate.contentToken = entry.contentToken; candidate.frameSerial = publication->frameId;
 			candidate.commandSerial = shadowCommandSerial; candidate.requiredFaceMask = requiredMask;
 			candidate.recordedFaceMask = record.staticRecordedFaceMask; candidate.recordingComplete = record.staticRecordedFaceMask == requiredMask;
-			if (!impl->staticShadowPublicationLedger.Record(candidate)) { record.staticFallback = "IncompleteStaticRecording"; return false; }
+			if (!impl->staticShadowPublicationLedger.Record(std::move(candidate))) { record.staticFallback = "IncompleteStaticRecording"; return false; }
 			record.staticSourceCommand = shadowCommandSerial; record.staticSourceSubmit = 0;
 		}
 		// Cached source coverage is proved by the submitted publication below.
@@ -5064,11 +5141,13 @@ void VulkanContext::RenderFrame(
 			candidate.recordingComplete = record.recordedFaceMask == requiredFaces && record.preparedList != nullptr && record.preparedList->recordingReady;
 			try
 			{
-				if (record.preparedList != nullptr) candidate.membership = record.preparedList->membership;
+				// All validation faces have copied their observations. Recording can
+				// now transfer the exact rows to the ledger without duplicating them.
+				if (record.preparedList != nullptr) candidate.membership = std::move(record.preparedList->membership);
 				// Record blocks every older alias even if completeness or proof fails.
 				// Submission alone can promote a fully validated pending candidate.
-				impl->shadowPublicationLedger.Record(candidate);
-				impl->shadowPhysicalTokenHints[record.physicalRegionKey] = candidate.contentToken;
+				impl->shadowPublicationLedger.Record(std::move(candidate));
+				impl->shadowPhysicalTokenHints[record.physicalRegionKey] = record.contentToken;
 			}
 			catch (...) { impl->shadowPublicationLedger.Reset(impl->renderSessionGeneration); impl->shadowPhysicalTokenHints.clear(); }
 			if (record.validationIncompletePointFaces) {
