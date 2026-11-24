@@ -3651,7 +3651,8 @@ void VulkanContext::RenderFrame(
 	staticDrawPreparationCache.reserve(std::min<std::size_t>(
 		commandResolver.Count() + presentation.shadowDrawLists.size(), 128U));
 	std::optional<StaticDrawPreparationKey> lastStaticPreparationKey;
-	std::optional<StaticDrawPreparation> lastStaticPreparation;
+	// Cache entries keep stable addresses until the next view clears the map.
+	const StaticDrawPreparation* lastStaticPreparation = nullptr;
 	const char* staticPreparationFailure = nullptr;
 	const auto ResolveStaticDrawPreparation = [&](const RenderItemRecord& command,
 		TerraEngine::UUID requestedCollectionId,
@@ -3667,20 +3668,19 @@ void VulkanContext::RenderFrame(
 		if(lastStaticPreparationKey.has_value()
 			&& *lastStaticPreparationKey == key)
 		{
-			return lastStaticPreparation.has_value()
-				? &*lastStaticPreparation : nullptr;
+			return lastStaticPreparation;
 		}
 		if(const auto cached = staticDrawPreparationCache.find(key);
 			cached != staticDrawPreparationCache.end())
 		{
 			lastStaticPreparationKey = key;
-			lastStaticPreparation = cached->second;
 			staticPreparationFailure = cached->second.rejectionStage;
-			return lastStaticPreparation->pipeline != VK_NULL_HANDLE
-				&& lastStaticPreparation->pipelineLayout != VK_NULL_HANDLE
-				&& lastStaticPreparation->meshDescriptorSet != VK_NULL_HANDLE
-				&& lastStaticPreparation->meshletCount != 0u
-				? &*lastStaticPreparation : nullptr;
+			const auto& preparation = cached->second;
+			lastStaticPreparation = preparation.pipeline != VK_NULL_HANDLE
+				&& preparation.pipelineLayout != VK_NULL_HANDLE
+				&& preparation.meshDescriptorSet != VK_NULL_HANDLE
+				&& preparation.meshletCount != 0u ? &preparation : nullptr;
+			return lastStaticPreparation;
 		}
 
 		// All normal camera commands and every off-camera light caster were
@@ -3693,7 +3693,7 @@ void VulkanContext::RenderFrame(
 			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
 			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
-			lastStaticPreparation.reset();
+			lastStaticPreparation = nullptr;
 			return nullptr;
 		}
 
@@ -3709,7 +3709,7 @@ void VulkanContext::RenderFrame(
 			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
 			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
-			lastStaticPreparation.reset();
+			lastStaticPreparation = nullptr;
 			return nullptr;
 		}
 
@@ -3719,7 +3719,7 @@ void VulkanContext::RenderFrame(
 			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
 			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
-			lastStaticPreparation.reset();
+			lastStaticPreparation = nullptr;
 			return nullptr;
 		}
 		const VkDescriptorSet meshDescriptorSet =
@@ -3729,7 +3729,7 @@ void VulkanContext::RenderFrame(
 			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
 			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
-			lastStaticPreparation.reset();
+			lastStaticPreparation = nullptr;
 			return nullptr;
 		}
 		if(pipeline->pushConstants.size() > kMaxPreparedPushConstantRanges)
@@ -3740,7 +3740,7 @@ void VulkanContext::RenderFrame(
 			StaticDrawPreparation rejected; rejected.rejectionStage = staticPreparationFailure;
 			staticDrawPreparationCache.emplace(key, std::move(rejected));
 			lastStaticPreparationKey = key;
-			lastStaticPreparation.reset();
+			lastStaticPreparation = nullptr;
 			return nullptr;
 		}
 		StaticDrawPreparation preparation{};
@@ -3767,9 +3767,9 @@ void VulkanContext::RenderFrame(
 			std::move(preparation));
 		(void)wasInserted;
 		lastStaticPreparationKey = key;
-		lastStaticPreparation = inserted->second;
+		lastStaticPreparation = &inserted->second;
 		staticPreparationFailure = nullptr;
-		return &*lastStaticPreparation;
+		return lastStaticPreparation;
 	};
 
 
@@ -4199,6 +4199,30 @@ void VulkanContext::RenderFrame(
 	// Measure caster preparation separately from visible draw work. The CPU may
 	// still need to qualify caster state when an existing shadow map is reused.
 	beginCommandRecordingPhase("Vulkan: Primary Prepare Shadow Caster Draws");
+	using TerraEngine::Renderer::ShadowCasterEvidence;
+	constexpr auto geometryOwnerEvidence = static_cast<std::uint64_t>(ShadowCasterEvidence::Geometry)
+		| static_cast<std::uint64_t>(ShadowCasterEvidence::Residency);
+	constexpr auto materialOwnerEvidence = static_cast<std::uint64_t>(ShadowCasterEvidence::Material);
+	constexpr auto shaderOwnerEvidence = static_cast<std::uint64_t>(ShadowCasterEvidence::Shader);
+	constexpr auto textureOwnerEvidence = static_cast<std::uint64_t>(ShadowCasterEvidence::Texture);
+	const auto CurrentShaderOwner = [&](const StaticDrawPreparation& preparation) {
+		const auto owner = drawResources.AcquireShaderCollectionSnapshot(preparation.selectedCollectionId);
+		return preparation.collectionGeneration && owner && owner->collectionGeneration == preparation.collectionGeneration
+			&& (preparation.selectedCollectionId == defaultMeshCollectionId
+				|| preparation.selectedCollectionId == defaultTaskCollectionId);
+	};
+	const auto CurrentMeshOwner = [&](const StaticDrawPreparation& preparation, const TerraEngine::UUID& meshId) {
+		return preparation.meshOwner && preparation.meshPublicationGeneration && preparation.meshAllocationGeneration
+			&& drawResources.AcquireMeshSnapshot(meshId) == preparation.meshOwner;
+	};
+	struct OpaqueShadowOwnerProof {
+		const StaticDrawPreparation* preparation = nullptr;
+		const Material* material = nullptr;
+		TerraEngine::UUID meshId{}, materialId{};
+		std::uint64_t resourceGeneration = 0;
+		std::size_t firstInput = 0;
+		bool shared = false;
+	};
 	for(std::size_t shadowListIndex = 0U;
 		shadowListIndex < presentation.shadowDrawLists.size(); ++shadowListIndex) {
 		const ShadowDrawList& shadowDrawList =
@@ -4212,6 +4236,26 @@ void VulkanContext::RenderFrame(
 		// Every caster segment in this light uses the same frame proof.
 		const bool sourceCurrent = TerraEngine::Renderer::ShadowPreparedInstanceInputsCurrent(
 			*publication, presentation, shadowDrawList);
+		OpaqueShadowOwnerProof ownerProof;
+		const auto FinishOwnerProof = [&] {
+			// Recheck the actual publications after a shared run. Eviction can
+			// remove an owner without advancing the renderer publication counter.
+			if (ownerProof.shared
+				&& (!CurrentShaderOwner(*ownerProof.preparation)
+					|| drawResources.AcquireMaterialSnapshot(ownerProof.materialId).get() != ownerProof.material
+					|| !CurrentMeshOwner(*ownerProof.preparation, ownerProof.meshId)
+					|| drawResources.GetRendererResourcePublicationGeneration() != ownerProof.resourceGeneration)) {
+				for (std::size_t index = ownerProof.firstInput; index < preparedList.casterInputs.size(); ++index) {
+					auto& stamp = preparedList.casterInputs[index].semantic;
+					stamp.evidenceMask &= ~(geometryOwnerEvidence | materialOwnerEvidence | shaderOwnerEvidence | textureOwnerEvidence);
+					stamp.staticSupport.ownerPublicationsComplete = false;
+					const auto classification = TerraEngine::Renderer::ClassifyStaticShadowCaster(stamp);
+					stamp.staticEligible = classification.eligible;
+					stamp.staticClassificationReason = static_cast<std::uint32_t>(classification.reason);
+				}
+			}
+			ownerProof = {};
+		};
 
 		// The renderer already asked the spatial index for one list per light.
 		// Rebuilding the shadow draws from that list preserves the culling win
@@ -4351,34 +4395,32 @@ void VulkanContext::RenderFrame(
 			shadowDraw.materialFlags = materialFlags;
 			// Qualify the exact range that the validated owner-buffer path consumes,
 			// rather than a zero meaning 'all meshlets' or a camera packet offset.
-			RenderItemRecord semanticCommand = command;
-			semanticCommand.virtualMeshletOffset = selectedShadowMeshletOffset;
-			semanticCommand.virtualMeshletCount = selectedShadowMeshletCount;
-			semanticCommand.virtualGeometryFlags = shadowDraw.push.virtualGeometryFlags;
+			command.virtualMeshletOffset = selectedShadowMeshletOffset;
+			command.virtualMeshletCount = selectedShadowMeshletCount;
+			command.virtualGeometryFlags = shadowDraw.push.virtualGeometryFlags;
 			const std::uint64_t segmentId = (static_cast<std::uint64_t>(selectedShadowMeshletOffset) << 32U)
 				| selectedShadowMeshletCount;
 			auto casterInput = TerraEngine::Renderer::BuildShadowCasterStampInput(
-				semanticCommand, presentation.referenceFrame, segmentId);
+				command, presentation.referenceFrame, segmentId);
+			const auto currentResourceGeneration = drawResources.GetRendererResourcePublicationGeneration();
+			// Adjacent opaque draws can share their exact native owner check.
+			// The preparation key includes the mesh, material and selected pipeline.
+			// Object transforms, deformation and selection stay on each stamp.
+			const bool sharedOwnerProof = ownerProof.preparation == shadowPreparation
+				&& ownerProof.resourceGeneration == currentResourceGeneration;
+			if (sharedOwnerProof) ownerProof.shared = true;
+			else if (ownerProof.preparation) FinishOwnerProof();
+			const bool currentShader = sharedOwnerProof || CurrentShaderOwner(*shadowPreparation);
 			// This protected preparation already resolved the actual shadow pipeline
 			// and owner buffers. Authored/unknown shader proof remains conservative.
 			casterInput.semantic.shaderId = shadowPreparation->selectedCollectionId;
 			casterInput.semantic.shaderRevision = shadowPreparation->collectionGeneration;
-			if (!shadowPreparation->collectionGeneration)
-				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Shader);
-			const auto currentShaderCollection = ResourceManager::Instance().AcquireShaderCollectionSnapshot(shadowPreparation->selectedCollectionId);
-			if (!currentShaderCollection || currentShaderCollection->collectionGeneration != shadowPreparation->collectionGeneration)
-				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Shader);
+			if (!currentShader) casterInput.semantic.evidenceMask &= ~shaderOwnerEvidence;
 			// A publication can race the end of immutable capture. The actual GPU
 			// preparation must not authorize an older semantic row under new data.
-			const auto currentResourceGeneration = ResourceManager::Instance().GetRendererResourcePublicationGeneration();
 			if (casterInput.semantic.meshRevision != currentResourceGeneration
 				|| casterInput.semantic.materialRevision != currentResourceGeneration)
-				casterInput.semantic.evidenceMask &= ~(static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Geometry)
-					| static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Material)
-					| static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Residency));
-			if (shadowPreparation->selectedCollectionId != defaultMeshCollectionId
-				&& shadowPreparation->selectedCollectionId != defaultTaskCollectionId)
-				casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Shader);
+				casterInput.semantic.evidenceMask &= ~(geometryOwnerEvidence | materialOwnerEvidence);
 			if (command.animationBinding.HasCpuDeformation()
 				&& (impl->activeCpuAnimationGraphicsBufferIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
 					|| shadowDraw.push.meshDataIndex != impl->activeCpuAnimationGraphicsBufferIndex
@@ -4391,16 +4433,15 @@ void VulkanContext::RenderFrame(
 			casterInput.semantic.meshRevision = shadowPreparation->meshPublicationGeneration;
 			// These owners are the successfully uploaded material and pixels bound
 			// by this draw. Current CPU publications alone cannot prove GPU content.
-			const auto materialOwner = impl->materialSourceOwners.find(command.materialId);
-			const bool actualMaterial = materialOwner != impl->materialSourceOwners.end()
-				&& materialOwner->second && materialOwner->second.get() == material
-				&& ResourceManager::Instance().AcquireMaterialSnapshot(command.materialId) == materialOwner->second
-				&& materialOwner->second->publicationGeneration != 0;
-			if (actualMaterial) casterInput.semantic.materialRevision = materialOwner->second->publicationGeneration;
-			else casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Material);
+			// ResolveMaterial already pins the exact uploaded SSBO owner for this view.
+			const bool actualMaterial = sharedOwnerProof || (material->publicationGeneration != 0
+				&& drawResources.AcquireMaterialSnapshot(command.materialId).get() == material);
+			if (actualMaterial) casterInput.semantic.materialRevision = material->publicationGeneration;
+			else casterInput.semantic.evidenceMask &= ~materialOwnerEvidence;
 			casterInput.semantic.textureId = TerraEngine::EMPTY_UUID;
 			casterInput.semantic.textureRevision = 0;
-			bool textureProof = actualMaterial && material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Opaque);
+			const bool opaque = material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Opaque);
+			bool textureProof = actualMaterial && opaque;
 			if (actualMaterial && material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask)) {
 				const auto dependencies = impl->materialTextureSourceOwners.find(command.materialId);
 				textureProof = dependencies != impl->materialTextureSourceOwners.end();
@@ -4410,7 +4451,7 @@ void VulkanContext::RenderFrame(
 					const auto uploaded = impl->textureCache.find(dependency.first);
 					if (!dependency.second || !dependency.second->publicationGeneration
 						|| uploaded == impl->textureCache.end() || uploaded->second.sourceOwner != dependency.second
-						|| ResourceManager::Instance().AcquireTextureSnapshot(dependency.first) != dependency.second) {
+						|| drawResources.AcquireTextureSnapshot(dependency.first) != dependency.second) {
 						textureProof = false; break;
 					}
 					casterInput.semantic.texturePublications.push_back({dependency.first, dependency.second->publicationGeneration, static_cast<std::uint32_t>(binding)});
@@ -4420,15 +4461,16 @@ void VulkanContext::RenderFrame(
 					casterInput.semantic.textureRevision = casterInput.semantic.texturePublications.front().publicationGeneration;
 				}
 			}
-			if (textureProof) casterInput.semantic.evidenceMask |= static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Texture);
-			else casterInput.semantic.evidenceMask &= ~static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Texture);
+			if (textureProof) casterInput.semantic.evidenceMask |= textureOwnerEvidence;
+			else casterInput.semantic.evidenceMask &= ~textureOwnerEvidence;
 			casterInput.semantic.assetRevision = shadowPreparation->meshPublicationGeneration;
 			casterInput.semantic.residencyGeneration = shadowPreparation->meshAllocationGeneration;
-			if (!shadowPreparation->meshOwner || !shadowPreparation->meshPublicationGeneration
-				|| !shadowPreparation->meshAllocationGeneration
-				|| ResourceManager::Instance().AcquireMeshSnapshot(command.meshId) != shadowPreparation->meshOwner)
-				casterInput.semantic.evidenceMask &= ~(static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Geometry)
-					| static_cast<std::uint64_t>(TerraEngine::Renderer::ShadowCasterEvidence::Residency));
+			const bool currentMesh = sharedOwnerProof || CurrentMeshOwner(*shadowPreparation, command.meshId);
+			if (!currentMesh) casterInput.semantic.evidenceMask &= ~geometryOwnerEvidence;
+			if (!sharedOwnerProof && opaque && currentShader && actualMaterial && currentMesh) {
+				ownerProof = {shadowPreparation, material, command.meshId, command.materialId,
+					currentResourceGeneration, preparedList.casterInputs.size()};
+			}
 			if (selectedShadowMeshletCount == 0U) {
 				preparedList.recordingReady = false;
 				preparedList.rejection.Capture("EmptySelectedMeshletRange", shadowDrawList.stableOrdinals[itemIndex], &command);
@@ -4580,7 +4622,7 @@ void VulkanContext::RenderFrame(
 				emit(std::move(shadowDraw), std::move(casterInput), selectedShadowMeshletCount);
 			}
 		}
-
+		if (ownerProof.shared) FinishOwnerProof();
 	}
 	beginCommandRecordingPhase("Vulkan: Primary Prepare Shadow Reuse and Batches");
 	std::uint32_t shadowPreparationWorkerTasks = 0, shadowPreparationInlineTasks = 0;

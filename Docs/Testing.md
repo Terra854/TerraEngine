@@ -3388,6 +3388,15 @@ Check backend readbacks when changing shadow submission. Direct casters use
 their full light-selected resident range. A page-local caster must publish
 one packet for each page draw so the task shader emits the entire range.
 
+To measure shared shadow owner checks, use a shadow-casting light and a grid
+of 4,096 opaque instances of one resident mesh and material. Warm the scene,
+then replay the same Scene View camera path with detailed CPU profiling. Compare
+the median and 95th percentile of `Vulkan: Primary Prepare Shadow Caster Draws`.
+Check the backend readbacks at matching near, wide, and far poses. Repeated
+opaque casters share resource checks while retaining individual transform and
+selection stamps. A changed publication makes the shared proof ineligible for
+reuse and the original draws remain available for refresh.
+
 For the live Bistro comparison, warm up all visible textures, run the same
 Scene View camera sweep before and after, and compare the median and tail frame
 times against 16.7 ms. Use a detailed Play Mode capture with Scene View visible
