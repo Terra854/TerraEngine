@@ -684,6 +684,8 @@ struct VulkanContext::Impl {
 	// by an unsubmitted Game View command buffer (or vice versa).
 	static constexpr uint32_t MAX_HIZ_DESCRIPTOR_MIP_LEVELS = std::numeric_limits<uint32_t>::digits;
 	static constexpr uint32_t MAX_SHADOW_RESOURCE_SLOTS = kMaxShadowResourceSlots;
+	// Scene View uses a second directional bank when the editor requests it.
+	static constexpr uint32_t MAX_DIRECTIONAL_SHADOW_SLOTS = 2u * MAX_SHADOW_RESOURCE_SLOTS;
 	static constexpr uint32_t SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t POINT_SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
@@ -712,14 +714,32 @@ struct VulkanContext::Impl {
 	struct ShadowResourceRequest
 	{
 		std::uint32_t directionalCount = 0u;
+		std::uint32_t sceneDirectionalCount = 0u;
 		std::uint32_t spotCount = 0u;
 		std::uint32_t areaCount = 0u;
 		std::uint32_t pointCount = 0u;
 
 
+		// Walk only allocated slots. A Scene View slot has the same resolution
+		// tier as the corresponding logical slot in the primary bank.
+		static constexpr std::uint32_t DirectionalSlot(std::uint32_t logicalSlot, bool sceneBank)
+		{
+			return logicalSlot + (sceneBank ? MAX_SHADOW_RESOURCE_SLOTS : 0u);
+		}
+
+		std::uint32_t DirectionalCount() const
+		{
+			return directionalCount + sceneDirectionalCount;
+		}
+
+		std::uint32_t PhysicalDirectionalSlot(std::uint32_t ordinal) const
+		{
+			return ordinal < directionalCount ? ordinal : DirectionalSlot(ordinal - directionalCount, true);
+		}
+
 		std::uint32_t Total2DCount() const
 		{
-			return directionalCount + spotCount + areaCount;
+			return DirectionalCount() + spotCount + areaCount;
 		}
 
 
@@ -1122,10 +1142,10 @@ struct VulkanContext::Impl {
 	// Shadow resources are tracked by live typed demand. The fixed arrays cap
 	// descriptor usage, while activeShadowResourceRequest decides how many
 	// images and framebuffers each light family actually owns this frame.
-	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowDepths{};
-	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowColors{};
-	std::array<VkFramebuffer, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowFramebuffers{};
-	std::array<uint32_t, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowTextureIndices{};
+	std::array<VulkanImage, MAX_DIRECTIONAL_SHADOW_SLOTS> directionalShadowDepths{};
+	std::array<VulkanImage, MAX_DIRECTIONAL_SHADOW_SLOTS> directionalShadowColors{};
+	std::array<VkFramebuffer, MAX_DIRECTIONAL_SHADOW_SLOTS> directionalShadowFramebuffers{};
+	std::array<uint32_t, MAX_DIRECTIONAL_SHADOW_SLOTS> directionalShadowTextureIndices{};
 	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> spotShadowDepths{};
 	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> spotShadowColors{};
 	std::array<VkFramebuffer, MAX_SHADOW_RESOURCE_SLOTS> spotShadowFramebuffers{};
@@ -1140,7 +1160,7 @@ struct VulkanContext::Impl {
 	std::array<std::array<VkImageView, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowColorFaceViewsBySlot{};
 	std::array<std::array<VkFramebuffer, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowFaceFramebuffersBySlot{};
 	ShadowResourceRequest activeShadowResourceRequest{};
-	std::array<ShadowStorageRegion, MAX_SHADOW_RESOURCE_SLOTS> shadowStorageRegions{};
+	std::array<ShadowStorageRegion, MAX_DIRECTIONAL_SHADOW_SLOTS + MAX_SHADOW_RESOURCE_SLOTS> shadowStorageRegions{};
 	std::unordered_map<TerraEngine::UUID, ShadowCacheEntry> shadowCacheEntries{};
 	// Exact shadow ownership is protected by deviceStateMutex. A recorded write
 	// is provisional until its real graphics submission receives a serial.

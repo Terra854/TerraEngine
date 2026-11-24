@@ -10,6 +10,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	ShadowResourceRequest targetRequest{};
 	targetRequest.directionalCount = std::min(request.directionalCount, MAX_SHADOW_RESOURCE_SLOTS);
+	targetRequest.sceneDirectionalCount = std::min(request.sceneDirectionalCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.spotCount = std::min(request.spotCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.areaCount = std::min(request.areaCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.pointCount = std::min(request.pointCount, MAX_SHADOW_RESOURCE_SLOTS);
@@ -36,9 +37,13 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	// Make every retired descriptor safe before freeing its native owner, then
 	// preserve those semantic assignments when replacement images are bound.
 	std::vector<std::uint32_t> retiredSlots;
-	retiredSlots.reserve(3U * MAX_SHADOW_RESOURCE_SLOTS + 2U);
-	for (const auto& indices : {directionalShadowTextureIndices, spotShadowTextureIndices, areaShadowTextureIndices})
-		for (auto index : indices) if (index != 0U) retiredSlots.push_back(index);
+	retiredSlots.reserve(MAX_DIRECTIONAL_SHADOW_SLOTS + 2U * MAX_SHADOW_RESOURCE_SLOTS + 2U);
+	const auto appendRetiredSlots = [&](std::span<const std::uint32_t> indices) {
+		for (const auto index : indices) if (index != 0U) retiredSlots.push_back(index);
+	};
+	appendRetiredSlots(directionalShadowTextureIndices);
+	appendRetiredSlots(spotShadowTextureIndices);
+	appendRetiredSlots(areaShadowTextureIndices);
 	if (ltcAmplitudeTextureIndex != 0U) retiredSlots.push_back(ltcAmplitudeTextureIndex);
 	if (ltcInverseTextureIndex != 0U) retiredSlots.push_back(ltcInverseTextureIndex);
 	if (!RetireGlobalTextureDescriptorSlotsAfterIdle(retiredSlots)) return false;
@@ -345,8 +350,9 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	};
 
 
-	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
-		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+	for (uint32_t ordinal = 0u; ordinal < targetRequest.DirectionalCount(); ++ordinal) {
+		const auto slotIndex = targetRequest.PhysicalDirectionalSlot(ordinal);
+		const auto regionSize = Shadow2DRegionSizeForSlot(slotIndex % MAX_SHADOW_RESOURCE_SLOTS);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, directionalShadowDepths[slotIndex]);
 		CreateShadowSampler(directionalShadowDepths[slotIndex], false);
@@ -432,15 +438,18 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	};
 	// Validate all active owners and slot assignments before publishing any new
 	// descriptor. A failed replacement leaves inactive/old slots fallback-bound.
-	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex)
+	for (uint32_t ordinal = 0u; ordinal < targetRequest.DirectionalCount(); ++ordinal) {
+		const auto slotIndex = targetRequest.PhysicalDirectionalSlot(ordinal);
 		if (!depthOwnerReady(directionalShadowDepths[slotIndex]) || !retainSlot(directionalShadowTextureIndices[slotIndex])) return false;
+	}
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex)
 		if (!depthOwnerReady(spotShadowDepths[slotIndex]) || !retainSlot(spotShadowTextureIndices[slotIndex])) return false;
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex)
 		if (!depthOwnerReady(areaShadowDepths[slotIndex]) || !retainSlot(areaShadowTextureIndices[slotIndex])) return false;
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex)
 		if (!depthOwnerReady(pointShadowCubeDepths[slotIndex])) return false;
-	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
+	for (uint32_t ordinal = 0u; ordinal < targetRequest.DirectionalCount(); ++ordinal) {
+		const auto slotIndex = targetRequest.PhysicalDirectionalSlot(ordinal);
 		BindDepthTexture(directionalShadowTextureIndices[slotIndex], directionalShadowDepths[slotIndex]);
 	}
 
@@ -503,15 +512,16 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		if (regionIndex >= shadowStorageRegions.size()) {
 			return;
 		}
-		const bool reduced2DRegion = kind != ShadowResourceKind::PointCube && typedSlot >= 16u;
+		const auto logicalSlot = typedSlot % MAX_SHADOW_RESOURCE_SLOTS;
+		const bool reduced2DRegion = kind != ShadowResourceKind::PointCube && logicalSlot >= 16u;
 		ShadowStorageRegion& region = shadowStorageRegions[regionIndex++];
 		region.resourceKind = kind;
 		region.typedSlot = typedSlot;
 		region.atlasId = static_cast<std::uint32_t>(kind);
 		region.x = 0u;
 		region.y = 0u;
-		region.width = reduced2DRegion ? Shadow2DRegionSizeForSlot(typedSlot) : SHADOW_MAP_RESOLUTION;
-		region.height = reduced2DRegion ? Shadow2DRegionSizeForSlot(typedSlot) : SHADOW_MAP_RESOLUTION;
+		region.width = reduced2DRegion ? Shadow2DRegionSizeForSlot(logicalSlot) : SHADOW_MAP_RESOLUTION;
+		region.height = region.width;
 		region.qualityTier = reduced2DRegion ? ShadowQualityTier::ReducedResolution : ShadowQualityTier::FullResolution;
 		region.estimatedBytes = estimateRegionBytes(kind);
 
@@ -521,8 +531,8 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		region.live = true;
 	};
 
-	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
-		registerRegion(ShadowResourceKind::DirectionalCascade, slotIndex);
+	for (uint32_t ordinal = 0u; ordinal < targetRequest.DirectionalCount(); ++ordinal) {
+		registerRegion(ShadowResourceKind::DirectionalCascade, targetRequest.PhysicalDirectionalSlot(ordinal));
 	}
 
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {

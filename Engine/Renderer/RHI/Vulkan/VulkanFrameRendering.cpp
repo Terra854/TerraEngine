@@ -603,7 +603,18 @@ void VulkanContext::RenderFrame(
 		impl->ApplyFrameLightBudgets(*publicationPresentation, renderViewType);
 	const uint32_t requestedShadowSlotCount = std::min(budgetResult.diagnostics.shadowLightBudget, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 	VulkanContext::Impl::ShadowResourceRequest requestedShadowResources{};
-	requestedShadowResources.directionalCount = std::min(budgetResult.diagnostics.allocatedDirectionalRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+	// An interactive Scene View uses a camera-specific directional projection.
+	// Keep it resident beside the Game View's allocation even when the other
+	// view does not submit this frame. Sealed validation cameras can still
+	// deliberately exercise shared-slot overwrite and submission proofs.
+	const bool sceneDirectionalBank = impl->editorMode && outputRequest.kind == RenderOutputKind::SceneView
+		&& presentation.efficiencyFixtureIntent.cameras.empty();
+	requestedShadowResources.directionalCount = impl->activeShadowResourceRequest.directionalCount;
+	requestedShadowResources.sceneDirectionalCount = impl->activeShadowResourceRequest.sceneDirectionalCount;
+	auto& directionalDemand = sceneDirectionalBank
+		? requestedShadowResources.sceneDirectionalCount : requestedShadowResources.directionalCount;
+	directionalDemand = std::min(budgetResult.diagnostics.allocatedDirectionalRegionCount,
+		VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 	requestedShadowResources.spotCount = std::min(budgetResult.diagnostics.allocatedSpotRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 	requestedShadowResources.areaCount = std::min(budgetResult.diagnostics.allocatedAreaRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 	requestedShadowResources.pointCount = std::min(budgetResult.diagnostics.allocatedPointRegionCount, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
@@ -614,8 +625,13 @@ void VulkanContext::RenderFrame(
 		if (requestedShadowSlotCount == 0u || requestedShadowResources.TotalCount() == 0u) {
 			return true;
 		}
-		const bool directionalMissing = requestedShadowResources.directionalCount > 0u
-			&& (impl->directionalShadowDepths[0].view == VK_NULL_HANDLE || impl->directionalShadowColors[0].view == VK_NULL_HANDLE);
+		const auto directionalBankMissing = [&](std::uint32_t demand, bool sceneBank) {
+			const auto first = VulkanContext::Impl::ShadowResourceRequest::DirectionalSlot(0u, sceneBank);
+			return demand > 0u && (impl->directionalShadowDepths[first].view == VK_NULL_HANDLE
+				|| impl->directionalShadowColors[first].view == VK_NULL_HANDLE);
+		};
+		const bool directionalMissing = directionalBankMissing(requestedShadowResources.directionalCount, false)
+			|| directionalBankMissing(requestedShadowResources.sceneDirectionalCount, true);
 		const bool spotMissing = requestedShadowResources.spotCount > 0u
 			&& (impl->spotShadowDepths[0].view == VK_NULL_HANDLE || impl->spotShadowColors[0].view == VK_NULL_HANDLE);
 		const bool areaMissing = requestedShadowResources.areaCount > 0u
@@ -770,8 +786,9 @@ void VulkanContext::RenderFrame(
 		};
 
 
-		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceRequest.directionalCount; ++slotIndex) {
-			const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+		for (uint32_t ordinal = 0u; ordinal < impl->activeShadowResourceRequest.DirectionalCount(); ++ordinal) {
+			const auto slotIndex = impl->activeShadowResourceRequest.PhysicalDirectionalSlot(ordinal);
+			const auto regionSize = Shadow2DRegionSizeForSlot(slotIndex % VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
 			if (!EnsureFramebuffer(impl->directionalShadowFramebuffers[slotIndex], impl->directionalShadowColors[slotIndex].view, impl->directionalShadowDepths[slotIndex].view, regionSize, regionSize)) {
 				return false;
 			}
@@ -1051,12 +1068,40 @@ void VulkanContext::RenderFrame(
 		drawResourceUpperBound, 128u));
 	// Mesh/material IDs are intentionally empty in this local key: graphics
 	// pipeline selection depends only on the exact pass/collection/flags tuple.
-	std::unordered_map<DrawResourcePreparationKey, VulkanPipeline*, DrawResourcePreparationKeyHash> preparedFramePipelines;
-	preparedFramePipelines.reserve(std::min<std::size_t>(drawResourceUpperBound, 128U));
+	struct FramePipelinePreparation
+	{
+		std::uint64_t ensuredGeneration = 0;
+		std::uint64_t sealedGeneration = 0;
+		VulkanPipeline* pipeline = nullptr;
+	};
+	std::unordered_map<DrawResourcePreparationKey, FramePipelinePreparation, DrawResourcePreparationKeyHash> preparedFramePipelines;
+	preparedFramePipelines.reserve(std::min<std::size_t>(drawResourceUpperBound, 16U));
+	auto& drawResources = ResourceManager::Instance();
+	const auto EnsureCurrentFramePipeline = [&](const DrawResourcePreparationKey& selection, FramePipelinePreparation& prepared) {
+		// Only a complete pipeline for the current shader publication can cover
+		// another mesh in this view. Failed preparation stays eligible for retry.
+		const auto generation = drawResources.GetRendererResourcePublicationGeneration();
+		if (prepared.ensuredGeneration == generation) return true;
+		impl->EnsurePipeline(selection.collectionId, selection.renderPass, selection.materialFlags,
+			selection.conventionalVisibilityIdentity);
+		const auto pass = impl->pipelineCache.find(selection.renderPass);
+		if (pass == impl->pipelineCache.end()) return false;
+		const auto exactKey = impl->BuildPipelineKey(selection.collectionId, selection.materialFlags,
+			selection.conventionalVisibilityIdentity);
+		if (!exactKey) return false;
+		const auto exact = pass->second.find(*exactKey);
+		if (exact == pass->second.end() || !exact->second.pipeline || !exact->second.layout) return false;
+		if (generation == drawResources.GetRendererResourcePublicationGeneration()) prepared.ensuredGeneration = generation;
+		return true;
+	};
 	const auto PrepareFramePipeline = [&](TerraEngine::UUID collection, VkRenderPass pass, std::uint32_t flags) {
 		if (indexedRaster && pass == cameraRasterPass) return; // Indexed uses an exact prepared key below.
 		const bool identity = impl->UsesConventionalVisibilityAttachments(pass);
-		impl->EnsurePipeline(collection, pass, flags, identity);
+		const DrawResourcePreparationKey selection{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID, collection, pass, flags, identity};
+		auto& prepared = preparedFramePipelines[selection];
+		const auto generation = drawResources.GetRendererResourcePublicationGeneration();
+		if (prepared.sealedGeneration == generation) return;
+		const bool currentReady = EnsureCurrentFramePipeline(selection, prepared);
 		const auto cachedPass = impl->pipelineCache.find(pass);
 		if (cachedPass == impl->pipelineCache.end()) return;
 		VulkanPipeline* selected = nullptr;
@@ -1072,7 +1117,13 @@ void VulkanContext::RenderFrame(
 		// Valid historical entries remain allocated. If a new shader cannot build,
 		// retain the latest real usable GPU pipeline rather than fabricate a new
 		// publication or remove complete geometry during command recording.
-		if (selected) preparedFramePipelines[{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID, collection, pass, flags, identity}] = selected;
+		if (selected) {
+			prepared.pipeline = selected;
+			// Do not let a historical fallback hide a failed or racing publication
+			// from later preparation of the same variant.
+			if (currentReady && prepared.ensuredGeneration == generation
+				&& generation == drawResources.GetRendererResourcePublicationGeneration()) prepared.sealedGeneration = generation;
+		}
 	};
 	TerraEngine::UUID lastPreparationMaterialId = TerraEngine::EMPTY_UUID;
 	std::shared_ptr<const Material> lastPreparationMaterialOwner;
@@ -1178,26 +1229,16 @@ void VulkanContext::RenderFrame(
 		// selection so animated fallback and shadow render-pass differences remain
 		// independent.
 		impl->EnsureMesh(command.meshId);
-		impl->EnsurePipeline(collectionId, preparationPass, material->header.flags,
-			preparationUsesConventionalVisibilityIdentity);
+		const DrawResourcePreparationKey selection{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID,
+			collectionId, preparationPass, material->header.flags, preparationUsesConventionalVisibilityIdentity};
+		const bool pipelineReady = EnsureCurrentFramePipeline(selection, preparedFramePipelines[selection]);
 		PrepareMaterialOnce(collectionId, command.materialId, material);
 
-		// Fallback for failed task pipeline
-		auto passIt = impl->pipelineCache.find(preparationPass);
-		if (passIt != impl->pipelineCache.end()) {
-			const std::optional<PipelineKey> pipeKey =
-				impl->BuildPipelineKey(collectionId, material->header.flags,
-					preparationUsesConventionalVisibilityIdentity);
-
-			if (!pipeKey.has_value()
-				|| passIt->second.find(*pipeKey) == passIt->second.end()
-				|| passIt->second.at(*pipeKey).pipeline == VK_NULL_HANDLE) {
-
-				if (collectionId == defaultTaskCollectionId) {
-					impl->EnsurePipeline(defaultMeshCollectionId, preparationPass,
-						material->header.flags, preparationUsesConventionalVisibilityIdentity);
-				}
-			}
+		// A failed task variant can still render through the mesh-only pipeline.
+		if (!pipelineReady && collectionId == defaultTaskCollectionId && impl->pipelineCache.contains(preparationPass)) {
+			auto fallback = selection;
+			fallback.collectionId = defaultMeshCollectionId;
+			(void)EnsureCurrentFramePipeline(fallback, preparedFramePipelines[fallback]);
 		}
 	};
 
@@ -1946,7 +1987,10 @@ void VulkanContext::RenderFrame(
 					glm::vec3(light.directionAndRange),
 					presentation.directionalShadowAnchor.value_or(presentation.cameraLocalPosition));
 				light.positionAndType = glm::vec4(shadow.center, light.positionAndType.w);
-				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndices[shadowSlotIndex]);
+				// Publish the same physical bank that owns this view's depth pass.
+				const auto physicalSlot = VulkanContext::Impl::ShadowResourceRequest::DirectionalSlot(
+					shadowSlotIndex, sceneDirectionalBank);
+				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndices[physicalSlot]);
 				StoreShadowViewProjection(light, shadow.viewProjection);
 			}
 			else if (lightType == 1u) {
@@ -3114,16 +3158,16 @@ void VulkanContext::RenderFrame(
 			shaderCollectionId, currentPass, materialFlags, pipelineUsesConventionalVisibilityIdentity};
 		const auto pipelineIt = preparedFramePipelines.find(selection);
 
-		if (pipelineIt == preparedFramePipelines.end() || pipelineIt->second == nullptr) {
+		if (pipelineIt == preparedFramePipelines.end() || pipelineIt->second.pipeline == nullptr) {
 			return nullptr;
 		}
+		auto* const pipeline = pipelineIt->second.pipeline;
 
-		if (pipelineIt->second->pipeline == VK_NULL_HANDLE
-			|| pipelineIt->second->layout == VK_NULL_HANDLE) {
+		if (pipeline->pipeline == VK_NULL_HANDLE || pipeline->layout == VK_NULL_HANDLE) {
 			return nullptr;
 		}
 		if (pipelineUsesConventionalVisibilityIdentity
-			&& !pipelineIt->second->usesConventionalVisibilityIdentity) {
+			&& !pipeline->usesConventionalVisibilityIdentity) {
 			// A visible mesh drawn through target0-only SPIR-V would leave the
 			// integer attachment clear and turn an object hit into false zero data.
 			// Reject that command rather than letting automation misreport it.
@@ -3132,7 +3176,7 @@ void VulkanContext::RenderFrame(
 			return nullptr;
 		}
 
-		return pipelineIt->second;
+		return pipeline;
 	};
 	thread_local std::unordered_map<TerraEngine::UUID, std::shared_ptr<const Material>>
 		materialLookupCache;
@@ -4640,7 +4684,7 @@ void VulkanContext::RenderFrame(
 		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
 		const std::vector<PreparedDraw>* preparedDraws = nullptr;
 		uint32_t type = 0u;
-		uint32_t slot = VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
+		uint32_t slot = 0u; // Physical slot within this light type's allocation.
 		std::uint32_t atlasId = 0u;
 		std::uint32_t regionX = 0u;
 		std::uint32_t regionY = 0u;
@@ -4670,15 +4714,17 @@ void VulkanContext::RenderFrame(
 	};
 	std::vector<ShadowLightRecord> shadowLightRecords;
 	shadowLightRecords.reserve(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
-	auto FindShadowSlotFromTextureIndex = [](const std::array<uint32_t, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS>& textureIndices, uint32_t textureIndex) -> uint32_t {
+	auto FindShadowSlotFromTextureIndex = [](std::span<const std::uint32_t> textureIndices, std::uint32_t textureIndex) -> std::uint32_t {
+		// Bindless index zero is the fallback texture, never a shadow owner.
+		if (textureIndex == 0u) return static_cast<std::uint32_t>(textureIndices.size());
 
-		for (uint32_t slotIndex = 0u; slotIndex < VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS; ++slotIndex) {
+		for (uint32_t slotIndex = 0u; slotIndex < textureIndices.size(); ++slotIndex) {
 
 			if (textureIndices[slotIndex] == textureIndex) {
 				return slotIndex;
 			}
 		}
-		return VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
+		return static_cast<std::uint32_t>(textureIndices.size());
 	};
 
 	for (std::size_t payloadIndex = 0u; payloadIndex < lightingPayload.size(); ++payloadIndex) {
@@ -4704,7 +4750,9 @@ void VulkanContext::RenderFrame(
 			slotIndex = FindShadowSlotFromTextureIndex(impl->areaShadowTextureIndices, shadowPayloadIndex);
 		}
 
-		if (slotIndex < VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
+		const auto slotCapacity = lightType == 0u ? VulkanContext::Impl::MAX_DIRECTIONAL_SHADOW_SLOTS
+			: VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
+		if (slotIndex < slotCapacity) {
 			ShadowLightRecord record{};
 			record.light = &light;
 			record.lightId = retainedCandidate.lightId;
@@ -5753,7 +5801,8 @@ void VulkanContext::RenderFrame(
 
 		for (ShadowLightRecord& record : shadowLightRecords) {
 
-			if (record.light == nullptr || record.slot >= VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
+			// Only bounds-checked, type-specific physical slots enter this list.
+			if (record.light == nullptr) {
 				continue;
 			}
 

@@ -3,7 +3,9 @@
 The default shader set owns the mesh-shader virtual geometry path.
 
 - `Default.task.hlsl`: task shader culling, selected LOD meshlet range dispatch,
-  conservative fail-open behavior, and future Hi-Z gate consumption.
+  and conservative Hi-Z and fail-open behavior. Each workgroup checks a batch
+  of up to 32 meshlets in parallel, then compacts surviving meshlets in their
+  original order. A missing packet still ends the emitted range at that lane.
 - `Default.mesh.hlsl`: meshlet payload decode, remap/index stream reads, and
   selected virtual geometry stream layout.
 - `Default.frag.hlsl`: normal material output plus debug visualizer modes such
@@ -26,7 +28,7 @@ shader variants before running the renderer tests.
 ```powershell
 cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
 cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests install
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.(RendererEfficiency|VirtualGeometryRenderer|VirtualGeometryShadow)|Editor\.RendererEfficiency)$' --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.(RendererEfficiency|VirtualGeometryRenderer|VirtualGeometryCulling|VirtualGeometryShadow)|Editor\.RendererEfficiency)$' --output-on-failure
 ```
 
 For a dense-light GPU comparison, keep the camera, viewport size, material and

@@ -152,6 +152,28 @@ void FlushMeshletCullingCounters(const uint statsIndex, const MeshletCullingCoun
 }
 
 groupshared TaskPayload gTaskPayload;
+groupshared uint gTaskValidMask;
+groupshared uint gTaskVisibleMask;
+groupshared MeshletCullingCounters gTaskLaneCounters[kTaskBatchSize];
+static const uint kTaskCounterReducers = 4u;
+groupshared MeshletCullingCounters gTaskPartialCounters[kTaskCounterReducers];
+
+// Add a lane or reducer's counts without changing the GPU readback layout.
+void AddMeshletCullingCounters(inout MeshletCullingCounters sum, MeshletCullingCounters source)
+{
+	sum.meshletsTotal += source.meshletsTotal;
+	sum.meshletsDispatched += source.meshletsDispatched;
+	sum.meshletsCulled += source.meshletsCulled;
+	sum.meshletsCulledHiZ += source.meshletsCulledHiZ;
+	sum.hiZTests += source.hiZTests;
+	sum.hiZProjectionFailed += source.hiZProjectionFailed;
+	sum.hiZFullRectCulled += source.hiZFullRectCulled;
+	sum.hiZRectCoverageCulled += source.hiZRectCoverageCulled;
+	sum.hiZCenterCulled += source.hiZCenterCulled;
+	sum.hiZVertexCoverageCulled += source.hiZVertexCoverageCulled;
+	sum.hiZNoOcclusionProof += source.hiZNoOcclusionProof;
+	sum.hiZReserved += source.hiZReserved;
+}
 
 struct PushConstants
 {
@@ -1224,9 +1246,22 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 	return false;
 }
 
-[numthreads(1, 1, 1)]
-void main(uint3 groupId : SV_GroupID)
+[numthreads(kTaskBatchSize, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex)
 {
+	if (localIndex == 0u)
+	{
+		gTaskValidMask = 0u;
+		gTaskVisibleMask = 0u;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// Each lane examines one meshlet. Workgroup storage keeps compaction
+	// independent of the device's subgroup width.
+	const uint laneBit = 1u << localIndex;
+	MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
+	uint4 payloadEntry = uint4(0u, 0u, 0u, 0u);
+	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 	const bool groupedInstances =
 		(SceneUniforms.virtualGeometryFlags & kRenderInstanceGroupedFlag) != 0u;
 	const bool groupedSharedAnimationBuffer = groupedInstances
@@ -1270,8 +1305,7 @@ void main(uint3 groupId : SV_GroupID)
 	// Invalid grouped records emit zero children without reading deformation or
 	// page owners. Keep one final DispatchMesh call: the task stage terminates
 	// there, and all paths must reach that same compiler-supported terminator.
-	uint visibleCount = 0u;
-	if (groupedInstanceRecordValid)
+	if (groupedInstanceRecordValid && groupedRangeValid)
 	{
 		// A valid grouped record replaces every dynamic selector used by task-stage
 		// bounds and page resolution. Non-grouped work retains its ordinary push
@@ -1351,7 +1385,6 @@ void main(uint3 groupId : SV_GroupID)
 		const uint selectedMeshletCount = selectedMeshletCountForInstance == 0u
 			? (meshletCount - selectedMeshletOffset)
 			: min(selectedMeshletCountForInstance, meshletCount - selectedMeshletOffset);
-		const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 		const FrameCullingData frameData = frameCullingData[statsIndex];
 		const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
 		const float3 cameraPosition = frameData.cameraPositionAndEpsilon.xyz;
@@ -1360,8 +1393,6 @@ void main(uint3 groupId : SV_GroupID)
 		const bool debugCulledMeshlets = virtualGeometryDebugMode == 4u;
 		const bool coneCullingSafe = (SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagConeCullingSafe) != 0u;
 		const uint hiZViewIndex = HiZViewIndexFromStatsSlot(statsIndex);
-
-		MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
 
 		const bool cullingEnabled = (!groupedInstances || groupedInstanceRecordValid)
 			&& (SceneUniforms.taskCullingEnabled != 0u)
@@ -1372,8 +1403,9 @@ void main(uint3 groupId : SV_GroupID)
 			// stale, or corrupt; only legacy owner deformation disables culling.
 			&& (!gpuDeformationAvailable || canonicalDeformationAvailable);
 
-		for (uint localIndex = 0u;
-			groupedRangeValid && localIndex < kTaskBatchSize; ++localIndex)
+		// A failed lane leaves its bit clear. Keep all exits inside this block
+		// so every lane still reaches both workgroup barriers below.
+		do
 		{
 			const uint selectedLocalIndex = taskGroupWithinInstance * kTaskBatchSize + localIndex;
 			uint meshletIndex = ResolvePageLocalMeshletIndex(selectedMeshletOffset, taskGroupWithinInstance * kTaskBatchSize, localIndex, pageLocalGeometry);
@@ -1500,29 +1532,58 @@ void main(uint3 groupId : SV_GroupID)
 				}
 			}
 
-			if (culled && !debugCulledMeshlets)
+			localCounters.meshletsCulled = culled ? 1u : 0u;
+			InterlockedOr(gTaskValidMask, laneBit);
+			if (!culled || debugCulledMeshlets)
 			{
-				localCounters.meshletsCulled += 1u;
-				continue;
+				payloadEntry = uint4(meshletIndex, packetDescriptorIndex,
+					groupedInstances ? groupedInstanceIndex : 0u, selectedVirtualLodForInstance);
+				localCounters.meshletsDispatched = 1u;
+				InterlockedOr(gTaskVisibleMask, laneBit);
 			}
-			if (culled)
-			{
-				// Culled debug mode deliberately keeps rejected meshlets in the
-				// payload so the mesh/fragment stages can color them by the rejection
-				// reason. Normal rendering still drops them above.
-				localCounters.meshletsCulled += 1u;
-			}
+		} while (false);
+	}
 
-			gTaskPayload.meshletIndices[visibleCount] = meshletIndex;
-			gTaskPayload.packetDescriptorIndices[visibleCount] = packetDescriptorIndex;
-			gTaskPayload.instanceIndices[visibleCount] = groupedInstances
-				? groupedFirstInstance + groupedInstanceRelative : 0u;
-			gTaskPayload.selectedVirtualLods[visibleCount] = selectedVirtualLodForInstance;
-			visibleCount++;
-			localCounters.meshletsDispatched += 1u;
+	gTaskLaneCounters[localIndex] = localCounters;
+	GroupMemoryBarrierWithGroupSync();
+
+	// A missing packet or invalid meshlet used to stop the serial scan. Keep
+	// that same valid prefix even if another lane found a later packet.
+	const uint firstInvalidLane = firstbitlow(~gTaskValidMask);
+	const uint validPrefix = firstInvalidLane < kTaskBatchSize
+		? (1u << firstInvalidLane) - 1u : 0xffffffffu;
+	const uint visibleMask = gTaskVisibleMask & validPrefix;
+	if ((visibleMask & laneBit) != 0u)
+	{
+		// The number of earlier set bits is this lane's unique, ordered slot.
+		const uint slot = countbits(visibleMask & (laneBit - 1u));
+		gTaskPayload.meshletIndices[slot] = payloadEntry.x;
+		gTaskPayload.packetDescriptorIndices[slot] = payloadEntry.y;
+		gTaskPayload.instanceIndices[slot] = payloadEntry.z;
+		gTaskPayload.selectedVirtualLods[slot] = payloadEntry.w;
+	}
+
+	// Reduce the same accepted meshlets in parallel, then flush global
+	// counters once from lane zero. No per-meshlet global atomics are needed.
+	if (localIndex < kTaskCounterReducers)
+	{
+		MeshletCullingCounters partial = MakeEmptyMeshletCullingCounters();
+		for (uint lane = localIndex; lane < min(firstInvalidLane, kTaskBatchSize); lane += kTaskCounterReducers)
+		{
+			AddMeshletCullingCounters(partial, gTaskLaneCounters[lane]);
 		}
-
+		gTaskPartialCounters[localIndex] = partial;
+	}
+	GroupMemoryBarrierWithGroupSync();
+	if (localIndex == 0u)
+	{
+		localCounters = MakeEmptyMeshletCullingCounters();
+		[unroll]
+		for (uint reducer = 0u; reducer < kTaskCounterReducers; ++reducer)
+		{
+			AddMeshletCullingCounters(localCounters, gTaskPartialCounters[reducer]);
+		}
 		FlushMeshletCullingCounters(statsIndex, localCounters);
 	}
-	DispatchMesh(visibleCount, 1u, 1u, gTaskPayload);
+	DispatchMesh(countbits(visibleMask), 1u, 1u, gTaskPayload);
 }

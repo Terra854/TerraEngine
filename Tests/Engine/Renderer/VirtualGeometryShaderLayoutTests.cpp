@@ -7,6 +7,7 @@
 #include "Renderer/RenderTypes.h"
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -389,7 +390,9 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(taskShader, "DecodePageLocalMeshletPosition"), "Task shader Hi-Z projection should reconstruct positions from page-local vertex/remap streams.");
 			context.Expect(ShaderContains(taskShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Task shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
 			context.Expect(ShaderContains(taskShader, "TryResolvePageLocalMeshlet"), "Task shader should resolve each meshlet in a batched page-local packet run.");
-			context.Expect(ShaderContains(taskShader, "gTaskPayload.packetDescriptorIndices[visibleCount]"), "Task payloads should preserve the descriptor selected for every compacted meshlet.");
+			context.Expect(ShaderContains(taskShader, "payloadEntry = uint4(meshletIndex, packetDescriptorIndex,")
+				&& ShaderContains(taskShader, "gTaskPayload.packetDescriptorIndices[slot] = payloadEntry.y;"),
+				"Task payloads should preserve the descriptor selected for every compacted meshlet.");
 			context.Expect(ShaderContains(taskShader, "wordOffset >= elementCount"), "Task shader should fail open before a stale packet can read beyond the physical page table.");
 			context.Expect(ShaderContains(taskShader, "0xffffffffu - descriptorWord"), "Task shader should reject overflowing packet-descriptor address arithmetic.");
 			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Task shader descriptor layout should keep page-local material stream slots.");
@@ -820,15 +823,20 @@ namespace TerraEngine::Tests
 				"Pipeline creation and lookup should share one complete key builder.");
 			context.Expect(
 				ShaderContains(vulkanContext,
-					"impl->BuildPipelineKey(collectionId, material->header.flags,")
+					"impl->BuildPipelineKey(selection.collectionId, selection.materialFlags,")
 					&& ShaderContains(vulkanContext,
-						"preparationUsesConventionalVisibilityIdentity);"),
+						"selection.conventionalVisibilityIdentity);"),
 				"Prepared-resource fallback checks should use the generation-aware pipeline key and the matching identity-target variant.");
+			context.Expect(ShaderContains(vulkanContext, "prepared.ensuredGeneration == generation")
+				&& ShaderContains(vulkanContext, "if (exact == pass->second.end() || !exact->second.pipeline || !exact->second.layout) return false;")
+				&& ShaderContains(vulkanContext, "if (currentReady && prepared.ensuredGeneration == generation"),
+				"Only a complete current pipeline may suppress repeated preparation or sealing in a view.");
 			// Recording consumes a frozen real pipeline rather than reacquiring a
 			// newer shader publication that could replace already copied GPU handles.
 			context.Expect(ShaderContains(vulkanContext, "key.shaderCollectionId == collection && key.materialFlags == flags && key.usesConventionalVisibilityIdentity == identity")
 				&& ShaderContains(vulkanContext, "key.collectionGeneration > selectedGeneration")
-				&& ShaderContains(vulkanContext, "preparedFramePipelines[{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID, collection, pass, flags, identity}] = selected;")
+				&& ShaderContains(vulkanContext, "const DrawResourcePreparationKey selection{TerraEngine::EMPTY_UUID, TerraEngine::EMPTY_UUID, collection, pass, flags, identity};")
+				&& ShaderContains(vulkanContext, "prepared.pipeline = selected;")
 				&& ShaderContains(vulkanContext, "shaderCollectionId, currentPass, materialFlags, pipelineUsesConventionalVisibilityIdentity};")
 				&& ShaderContains(vulkanContext, "preparedFramePipelines.find(selection)"),
 				"Draw-time pipeline resolution must consume the frozen usable generation with the exact collection, material, pass and identity-target route.");
@@ -1091,6 +1099,61 @@ namespace TerraEngine::Tests
 			context.Expect(!ShaderContains(shader, "InterlockedAdd(meshletCounters[statsIndex].meshletsTotal, 1u"), "Per-meshlet total-count atomics should stay removed from the hot loop.");
 			context.Expect(!ShaderContains(shader, "InterlockedAdd(meshletCounters[statsIndex].meshletsDispatched, 1u"), "Per-meshlet dispatch-count atomics should stay removed from the hot loop.");
 			context.Expect(!ShaderContains(shader, "InterlockedAdd(meshletCounters[statsIndex].hiZTests, 1u"), "Per-meshlet Hi-Z-test atomics should stay removed from the hot loop.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.ParallelTaskPayloadPreservesOrderAndValidPrefix", [](TestContext& context) {
+			const std::string shader = ReadDefaultTaskShader();
+			context.Expect(ShaderContains(shader, "[numthreads(kTaskBatchSize, 1, 1)]")
+				&& ShaderContains(shader, "firstbitlow(~gTaskValidMask)")
+				&& ShaderContains(shader, "gTaskVisibleMask & validPrefix")
+				&& ShaderContains(shader, "countbits(visibleMask & (laneBit - 1u))"),
+				"Task groups must keep the original valid prefix and compact surviving lanes in input order.");
+
+			struct TaskMasks
+			{
+				std::uint32_t valid;
+				std::uint32_t visible;
+			};
+			constexpr std::array masks{
+				TaskMasks{0u, 0u},
+				TaskMasks{0xffffffffu, 0xffffffffu},
+				TaskMasks{0xffffffffu, 0u},
+				TaskMasks{0xffffffffu, 0x80010001u},
+				TaskMasks{0x00000007u, 0x00000005u},
+				TaskMasks{0xfff7ffffu, 0xffffffffu}
+			};
+			for (const TaskMasks mask : masks)
+			{
+				// The old serial scan stops at the first missing lane, even
+				// if a later packet is valid. Visibility may have any pattern.
+				std::array<std::uint32_t, 32> serial{};
+				std::uint32_t serialCount = 0u;
+				for (std::uint32_t lane = 0u; lane < serial.size(); ++lane)
+				{
+					const std::uint32_t bit = 1u << lane;
+					if ((mask.valid & bit) == 0u) break;
+					if ((mask.visible & bit) != 0u) serial[serialCount++] = lane;
+				}
+
+				const auto firstInvalid = std::countr_one(mask.valid);
+				const std::uint32_t prefix = firstInvalid < 32 ? (1u << firstInvalid) - 1u : 0xffffffffu;
+				const std::uint32_t visible = mask.visible & prefix;
+				std::array<std::uint32_t, 32> parallel{};
+				// Visit lanes in reverse to check that compaction never depends
+				// on the order in which workers claim their output slots.
+				for (std::uint32_t lane = static_cast<std::uint32_t>(parallel.size()); lane-- > 0u;)
+				{
+					const std::uint32_t bit = 1u << lane;
+					if ((visible & bit) != 0u)
+					{
+						parallel[std::popcount(visible & (bit - 1u))] = lane;
+					}
+				}
+				context.ExpectEqual(serialCount, static_cast<std::uint32_t>(std::popcount(visible)),
+					"Parallel compaction must dispatch the same number of meshlets.");
+				context.Expect(serial == parallel,
+					"Parallel compaction must emit the same ordered meshlet payload as the serial scan.");
+			}
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.HiZProjectsActualMeshletVertices", [](TestContext& context) {

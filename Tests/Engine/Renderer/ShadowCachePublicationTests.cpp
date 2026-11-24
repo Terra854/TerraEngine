@@ -2,6 +2,7 @@
 
 #include "TestHarness.h"
 #include "Renderer/ShadowWorkPlan.h"
+#include "Renderer/RenderTypes.h"
 
 namespace TerraEngine::Tests
 {
@@ -205,6 +206,42 @@ namespace TerraEngine::Tests
 			context.Expect(ledger.CanReuse(viewA, 101u), "A pending write in another region cannot invalidate A.");
 			context.Expect(ledger.ConfirmSubmission(12u, 22u, true), "The independent region can submit.");
 			context.Expect(ledger.CanReuse(viewA, 101u) && ledger.CanReuse(viewB, 102u), "Distinct physical regions retain separate submitted owners.");
+		});
+
+		registry.Add("Renderer.Efficiency.ShadowPublication.InterleavedDirectionalViewsReuseTheirOwnDepth", [](TestContext& context) {
+			ShadowCachePublicationLedger ledger(1u);
+			// Both views select logical light slot zero with different origins.
+			// The Scene View bank starts after the primary bank's full capacity.
+			auto scene = PublicationView(1u, kMaxShadowResourceSlots);
+			scene.viewType = RenderViewType::Scene;
+			auto game = PublicationView(2u, 0u);
+			game.viewType = RenderViewType::Game;
+			game.referenceOrigin.offsetMetres[2] = 10.0;
+			const auto gameMap = Candidate(game, 101u, 11u);
+			auto sceneMap = Candidate(scene, 102u, 12u);
+			context.Expect(ledger.Record(sceneMap) && ledger.Record(gameMap), "Both directional writers can record before the same queue submission.");
+			const std::array commands{sceneMap.commandSerial, gameMap.commandSerial};
+			context.Expect(ledger.ConfirmSubmissionBatch(commands, 21u), "One ordered submit publishes both physical maps.");
+			context.Expect(ledger.AliasSubmittedContent(scene, sceneMap.contentToken, sceneMap.membership)
+				&& ledger.AliasSubmittedContent(game, gameMap.contentToken, gameMap.membership),
+				"Each view can reuse its own map after the interleaved submit.");
+
+			// Moving Scene View should revoke only its old projection. Keep Game
+			// View reusable throughout the repeated recording and submit cycle.
+			for (std::uint64_t step = 0u; step < 64u; ++step)
+			{
+				const auto previous = sceneMap;
+				scene.lightProjectionStamp.viewProjection[12] = static_cast<double>(step + 1u);
+				sceneMap = Candidate(scene, 103u + step, 13u + step);
+				context.Expect(ledger.AliasSubmittedContent(game, gameMap.contentToken, gameMap.membership),
+					"A changed Scene View projection leaves Game View's exact map reusable.");
+				context.Expect(!ledger.AliasSubmittedContent(scene, previous.contentToken, previous.membership),
+					"A new Scene View projection needs a refresh.");
+				Submit(context, ledger, sceneMap, 22u + step);
+				context.Expect(ledger.CanReuse(scene, sceneMap.contentToken)
+					&& ledger.CanReuse(game, gameMap.contentToken),
+					"Both current owners survive interleaved updates.");
+			}
 		});
 
 		registry.Add("Renderer.Efficiency.ShadowPublication.FailedSubmitDiscardsReplacementAndOldClaim", [](TestContext& context) {

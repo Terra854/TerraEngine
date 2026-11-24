@@ -42,6 +42,17 @@ Build/test evidence for this repair is retained under
 `out/validation/coderabbit-fixes-20261112-round6/`; source inspection and native
 regressions do not constitute a new long soak or AAA performance qualification.
 
+## Editor directional shadow reuse
+
+Build and install as above, then run
+`ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$' --output-on-failure`.
+For an editor check, open a scene with a shadow-casting directional light and a
+Game View camera. Put Scene View and Game View in separate visible panels, then
+hold both cameras still until resources are loaded. Move only the Scene View
+camera. Its shadow map should refresh for changed shadow inputs, while Game
+View continues to reuse its submitted depth. Compare native captures from both
+viewports at matching poses and settings to check rendering parity.
+
 ## Engine correctness and failure safety
 
 The seven focused correctness entries are implemented: `Engine.SceneMutationFailureSafety`,
