@@ -18,6 +18,10 @@
 struct CameraComponent : public Component<CameraComponent>
 {
 	static constexpr std::string_view kComponentName = "CameraComponent";
+	// Durable asset identity only. The protected authoring transaction changes
+	// this value; render preparation separately acquires an immutable profile.
+	// Empty keeps legacy cameras inheriting their existing graphics settings.
+	TerraEngine::UUID PostProcessProfileId = TerraEngine::EMPTY_UUID;
 
 	float verticalFovDegrees = 45.0f;
 	float aspectRatio = 16.0f / 9.0f;
@@ -29,6 +33,7 @@ struct CameraComponent : public Component<CameraComponent>
 	// parameters at runtime while the renderer reads them in a thread-safe way.
 	static void reflect(entt::meta_factory<CameraComponent>& factory)
 	{
+		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::PostProcessProfileId>(factory, "PostProcessProfileId");
 		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::verticalFovDegrees>(factory, "verticalFovDegrees");
 		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::aspectRatio>(factory, "aspectRatio");
 		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::nearPlane>(factory, "nearPlane");

@@ -27,6 +27,7 @@ class Object;
 namespace TerraEngine::Animation { struct AnimationClipAsset; }
 
 struct ComponentAccessFunctions;
+struct PostProcessInspectorState;
 
 class InspectorWindow : public EditorWindow {
 public:
@@ -80,6 +81,11 @@ private:
 	void DrawMaterialInspector(const std::filesystem::path& path);
 	void DrawMeshInspector(const std::filesystem::path& path);
 	void DrawTextureInspector(const std::filesystem::path& path);
+	void DrawPostProcessProfileBinding(const std::string& component, const std::string& property, entt::entity object, const TerraEngine::UUID& value);
+	void DrawPostProcessVolumeInspector(entt::entity object);
+	void DrawCameraPostProcessInspector(entt::entity object);
+	void DrawPostProcessAssetInspector(const std::filesystem::path& path);
+	std::unique_ptr<PostProcessInspectorState> m_PostProcessInspector;
 	void UpdateInspectorDragState();
 
 	MainEditorSubsystem* m_Owner;

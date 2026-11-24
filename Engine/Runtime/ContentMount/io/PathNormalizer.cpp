@@ -238,7 +238,12 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".teterrain" || extension == ".tearea") {
 		return "terrain";
 	}
-	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
+	// A typed ResourceManager index binds each versioned post-processing
+	// envelope to its asset ID. The archive stores the checked bytes as data.
+	if (extension == ".tepostprofile" || extension == ".teposteffect") {
+		return "data";
+	}
+	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl" || extension == ".tspf") {
 		return "shader";
 	}
 

@@ -17,6 +17,8 @@
 
 namespace TerraEngine::Renderer {
 
+	struct RenderFramePublication;
+
 	enum class RenderResourceKind
 	{
 		Texture,
@@ -54,6 +56,57 @@ namespace TerraEngine::Renderer {
 		Lighting,
 		UI,
 		Present
+	};
+
+	// Logical stages stay backend-neutral. A graph node is executable only when
+	// the backend explicitly qualifies the complete view pipeline.
+	enum class PostProcessPassKind
+	{
+		None,
+		ScreenSpaceLighting,
+		TemporalResolve,
+		HdrCamera,
+		ToneAndGrade,
+		SpatialAA,
+		PresentationEffects,
+		OverlayComposite,
+		CustomFullscreen
+	};
+
+	enum class RenderResourceSemantic
+	{
+		Unspecified,
+		SceneColor,
+		SceneDepth,
+		ProcessedColor,
+		CompositedColor
+	};
+
+	struct PostProcessGraphSettings
+	{
+		// Capability approval is separate from requested values. Defaults retain
+		// the legacy graph until actual backend targets and recording are ready.
+		bool executionAvailable = false;
+		bool screenSpaceLighting = false;
+		bool temporalResolve = false;
+		bool hdrCamera = false;
+		bool toneAndGrade = false;
+		bool spatialAA = false;
+		bool presentationEffects = false;
+		// Dithering is owned by the final camera composite.
+		bool outputDithering = false;
+		bool motionBlur = false;
+		std::uint8_t customStages = 0u;
+		// Multisample coverage is resolved by the camera raster pass. The
+		// resulting single-sample image still needs the composition boundary.
+		bool coverageAA = false;
+		std::uint32_t antiAliasingMode = 0u;
+		std::uint32_t sampleCount = 1u;
+		float fixedExposureCompensation = 0.0f;
+		float internalResolutionScale = 1.0f;
+		glm::uvec2 internalSize{0u};
+		glm::uvec2 outputSize{0u};
+		std::uint64_t resourceFormatGeneration = 0u;
 	};
 
 	enum class RenderWorkPolicy
@@ -184,6 +237,7 @@ namespace TerraEngine::Renderer {
 		RenderAccessMode accessMode = RenderAccessMode::Read;
 		RenderStage stage = RenderStage::Unknown;
 		std::string ownerPassId;
+		RenderResourceSemantic semantic = RenderResourceSemantic::Unspecified;
 	};
 
 	struct RenderPassNode
@@ -202,6 +256,7 @@ namespace TerraEngine::Renderer {
 		bool canOverlap = true;
 		std::string fallbackReason;
 		std::string profilingLabel;
+		PostProcessPassKind postProcessKind = PostProcessPassKind::None;
 	};
 
 	struct RenderWorkPacket
@@ -268,5 +323,22 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API std::uint64_t HashPreparedDrawPacketSignature(const PreparedDrawPacketSignature& signature);
 	TERRAENGINE_API RenderGraphValidationResult ValidateRenderGraph(const std::vector<RenderPassNode>& passes);
 	TERRAENGINE_API std::vector<RenderPassNode> BuildDefaultRenderPasses(const RenderFrameSnapshot& snapshot, const BackendCapabilityProfile& capabilities);
+	// Disabled or unavailable plans are an exact no-op on the caller's existing
+	// vector, including its backing storage. Enabled plans require its draw node.
+	TERRAENGINE_API void AppendPostProcessRenderPasses(std::vector<RenderPassNode>& passes,
+		const RenderFrameViewRequest& view, const PostProcessGraphSettings& settings);
+	TERRAENGINE_API std::uint64_t BuildPostProcessGraphTopologySignature(
+		const PostProcessGraphSettings& settings) noexcept;
+	TERRAENGINE_API PostProcessGraphSettings BuildPostProcessGraphSettings(
+		const GraphicsSettings::GraphicsSettingsSnapshot& snapshot) noexcept;
+	// Bind only a current protected copied identity. First appearances deliberately
+	// have no view lifetime until the protected owner accepts a real presentation.
+	TERRAENGINE_API void BindGraphicsCameraViewProvenance(RenderFrameViewRequest&,
+		const RenderFrameSnapshot&, std::optional<GraphicsSettings::GraphicsCameraTarget>);
+	TERRAENGINE_API std::vector<PublishedGraphicsCameraView> CollectPublishedGraphicsCameraTargets(
+		const RenderFramePublication&);
+	TERRAENGINE_API std::shared_ptr<const GraphicsSettings::GraphicsSettingsSnapshot>
+		SelectGraphicsSettingsForView(const RenderFrameSnapshot& snapshot,
+			const RenderFrameViewRequest& view) noexcept;
 
 }

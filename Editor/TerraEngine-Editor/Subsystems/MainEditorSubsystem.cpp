@@ -33,6 +33,7 @@
 #include "Engine/Locomotion/LocomotionSystem.h"
 #include "LocomotionValidationHarness.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Renderer/GraphicsSettings/PostProcessDiagnostics.h"
 #include "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
@@ -66,6 +67,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
@@ -1531,6 +1533,41 @@ void MainEditorSubsystem::InitializeTerrainCopyService() {
 	m_TerrainCopies = std::make_unique<TerrainIndependentCopyService>(std::move(callbacks));
 }
 
+// Trace storage is allocated only on explicit admission. Each protected frame
+// copies bounded plain records; JSON and timing queries occur only on trace.get.
+struct MainEditorSubsystem::SceneViewTraceState
+{
+	using Content = TerraEngine::Renderer::Vulkan::SceneViewContentStamp;
+	struct Sample
+	{
+		TerraEngine::Editor::ViewportTextureRegistration registration{};
+		std::optional<Content> content;
+		std::array<float, 4> clip{};
+		std::uint32_t commandCount = 0;
+		std::uint64_t elementCount = 0;
+		bool repeatedContent = false;
+	};
+	struct Event
+	{
+		std::uint64_t sequence = 0, uiFrameId = 0, queuedPoseSequence = 0;
+		std::uint64_t sceneOwnerRevision = 0, effectiveGraphicsRevision = 0, requestedGraphicsRevision = 0;
+		std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp> lifecycle;
+		std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsViewIdentity> view;
+		TerraEngine::Renderer::Vulkan::EditorPresentResult present;
+		std::uint64_t completedUiSubmissionSerial = 0;
+		std::array<Sample, 16> samples{};
+		std::uint32_t sampleCount = 0, sceneCommandCount = 0, sampleOverflow = 0;
+		std::uint32_t framebufferWidth = 0, framebufferHeight = 0;
+		bool drawDataInspected = false;
+	};
+	std::array<Event, 1024> events{};
+	std::array<std::optional<Content>, 16> lastWsiContents{};
+	Event pending;
+	std::uint64_t session = 0, nextSequence = 1, dropped = 0;
+	std::size_t begin = 0, count = 0;
+	bool enabled = false, hasPending = false;
+};
+
 MainEditorSubsystem::MainEditorSubsystem() = default;
 MainEditorSubsystem::~MainEditorSubsystem() = default;
 
@@ -1908,6 +1945,17 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	ClearPlayModeSceneState();
 }
 
+
+void MainEditorSubsystem::RetireGraphicsPlaySession()
+{
+	if(!m_GraphicsPlaySessionActive) return;
+	m_GraphicsPlaySessionActive = false;
+	// Teardown may omit or already retire the renderer. Resolve the engine-owned
+	// system instead of reaching through a process-global renderer singleton.
+	if(ctx && ctx->engine)
+		if(auto* renderer = ctx->engine->GetSystem<RenderSystem>())
+			renderer->SetGraphicsSettingsPlaySessionGeneration(0U);
+}
 
 void MainEditorSubsystem::ClearPlayModeSceneState()
 {
@@ -2520,6 +2568,7 @@ void MainEditorSubsystem::ClosePrefabMode()
 void MainEditorSubsystem::Shutdown() {
 	if(!RetireTerrainCopies())
 		throw std::runtime_error("Editor shutdown cannot discard unresolved terrain copy ownership.");
+	RetireGraphicsPlaySession();
 	// Export work owns process trees and immutable requests. Settle it while
 	// the project, scripts, resource providers and worker pool still exist.
 	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
@@ -2560,6 +2609,8 @@ void MainEditorSubsystem::Shutdown() {
 bool MainEditorSubsystem::StartPlayMode()
 {
 	if(ScriptingSystem::Instance().IsRunning()) return false;
+	// Never reuse an old lifetime even after the counter is exhausted.
+	if(m_GraphicsPlaySessionGeneration == (std::numeric_limits<std::uint64_t>::max)()) return false;
 	// Prepare collision before creating any runtime owner. A slow cook leaves the
 	// edit frame responsive and Play pending; no simulation step can run early.
 	if(m_PlayModeEntryPending && (m_PlayModeEntrySceneRoot != SceneManager::Instance().GetSceneRoot()
@@ -2705,6 +2756,13 @@ bool MainEditorSubsystem::StartPlayMode()
 	TerraEngine::Animation::AnimationSystem::Instance()
 		.SetAuthoredComponentPlaybackAdvancing(true);
 	TerraEngine::Audio::AudioSystem::Instance().SetRuntimePlaybackEnabled(true);
+	// All entry checks succeeded. Capture the transient settings lifetime before
+	// managed callbacks can submit their first runtime graphics request.
+	++m_GraphicsPlaySessionGeneration;
+	m_GraphicsPlaySessionActive = true;
+	if(ctx && ctx->engine)
+		if(auto* renderer = ctx->engine->GetSystem<RenderSystem>())
+			renderer->SetGraphicsSettingsPlaySessionGeneration(m_GraphicsPlaySessionGeneration);
 	ScriptingSystem::Instance().SetRunning(true);
 	ScriptingSystem::Instance().SetPaused(false);
 	(void)TerraEngine::Physics::PhysicsSystem::Instance().SetPaused(false);
@@ -2742,13 +2800,15 @@ void MainEditorSubsystem::StopPlayMode()
 	++m_TerrainCopyProjectEpoch;
 	if (!ScriptingSystem::Instance().IsRunning()
 		&& !TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid()
-		&& !m_HasPlayModeSceneSnapshot)
+		&& !m_HasPlayModeSceneSnapshot
+		&& !m_GraphicsPlaySessionActive)
 	{
 		return;
 	}
 
 	if(auto terrainTools = GetWindow<TerrainWindow>())
 		terrainTools->CancelDetachedPreview("Terrain preview cancelled when Play Mode stopped.");
+	RetireGraphicsPlaySession();
 	// Route every stop request through one helper so toolbar clicks and
 	// Application.Quit() both restore the same cached pre-play scene snapshot.
 	// Retire the running-world authority before physics and scene restoration can
@@ -3009,14 +3069,287 @@ void MainEditorSubsystem::CaptureViewportDrawDataUses()
 {
 	viewportTextures.BeginDrawDataUsage();
 	const ImDrawData* drawData = ImGui::GetDrawData();
-	if (drawData == nullptr) return;
-	// CmdLists is now an ImVector; its Size field is the authoritative list count.
-	for (int listIndex = 0; listIndex < drawData->CmdLists.Size; ++listIndex) {
-		const ImDrawList* list = drawData->CmdLists[listIndex];
-		for (const ImDrawCmd& command : list->CmdBuffer) {
-			viewportTextures.MarkDrawDataUse(reinterpret_cast<void*>(command.GetTexID()));
+	SceneViewTraceState::Event* trace = nullptr;
+	VulkanContext* vulkan = nullptr;
+	if (sceneViewTrace && sceneViewTrace->enabled)
+	{
+		sceneViewTrace->pending = {};
+		sceneViewTrace->hasPending = true;
+		trace = &sceneViewTrace->pending;
+		trace->uiFrameId = static_cast<std::uint64_t>(std::max(0, ImGui::GetFrameCount()));
+		if (const auto window = GetWindow<SceneViewWindow>()) trace->queuedPoseSequence = window->GetQueuedPoseSequence();
+		if (auto* renderer = ctx && ctx->engine ? ctx->engine->GetSystem<RenderSystem>() : nullptr)
+		{
+			vulkan = dynamic_cast<VulkanContext*>(renderer->GetContext());
+			if (const auto settings = renderer->ReadSceneViewGraphicsSettings())
+			{
+				trace->lifecycle = settings->lifecycle;
+				trace->view = settings->view;
+				trace->sceneOwnerRevision = settings->revision;
+				trace->effectiveGraphicsRevision = settings->effective ? settings->effective->revision : 0;
+				trace->requestedGraphicsRevision = settings->requested ? settings->requested->revision : trace->effectiveGraphicsRevision;
+			}
 		}
 	}
+	if (drawData == nullptr) return;
+	const float framebufferWidth = trace ? drawData->DisplaySize.x * drawData->FramebufferScale.x : 0.0f;
+	const float framebufferHeight = trace ? drawData->DisplaySize.y * drawData->FramebufferScale.y : 0.0f;
+	const bool usableFramebuffer = std::isfinite(framebufferWidth) && std::isfinite(framebufferHeight)
+		&& framebufferWidth >= 1.0f && framebufferHeight >= 1.0f
+		&& framebufferWidth < static_cast<float>(std::numeric_limits<std::uint32_t>::max())
+		&& framebufferHeight < static_cast<float>(std::numeric_limits<std::uint32_t>::max());
+	if (trace)
+	{
+		trace->drawDataInspected = true;
+		if (usableFramebuffer)
+		{
+			trace->framebufferWidth = static_cast<std::uint32_t>(framebufferWidth);
+			trace->framebufferHeight = static_cast<std::uint32_t>(framebufferHeight);
+		}
+	}
+	// Preserve existing fence lifetime accounting for every descriptor mention.
+	// Provenance additionally requires an actual ordinary, nonempty raster draw.
+	for (int listIndex = 0; listIndex < drawData->CmdLists.Size; ++listIndex)
+	{
+		const ImDrawList* list = drawData->CmdLists[listIndex];
+		for (const ImDrawCmd& command : list->CmdBuffer)
+		{
+			void* descriptor = reinterpret_cast<void*>(command.GetTexID());
+			viewportTextures.MarkDrawDataUse(descriptor);
+			if (!trace || !usableFramebuffer || command.ElemCount == 0 || command.UserCallback != nullptr) continue;
+			std::array<float, 4> clip{
+				(command.ClipRect.x - drawData->DisplayPos.x) * drawData->FramebufferScale.x,
+				(command.ClipRect.y - drawData->DisplayPos.y) * drawData->FramebufferScale.y,
+				(command.ClipRect.z - drawData->DisplayPos.x) * drawData->FramebufferScale.x,
+				(command.ClipRect.w - drawData->DisplayPos.y) * drawData->FramebufferScale.y};
+			if (!std::all_of(clip.begin(), clip.end(), [](float value) { return std::isfinite(value); })) continue;
+			clip[0] = std::max(0.0f, clip[0]); clip[1] = std::max(0.0f, clip[1]);
+			clip[2] = std::min(framebufferWidth, clip[2]); clip[3] = std::min(framebufferHeight, clip[3]);
+			if (clip[2] - clip[0] < 1.0f || clip[3] - clip[1] < 1.0f) continue;
+			const auto registration = viewportTextures.FindDescriptor(descriptor);
+			if (!registration || registration->kind != TerraEngine::Editor::ViewportTextureKind::Scene) continue;
+			++trace->sceneCommandCount;
+			auto found = std::find_if(trace->samples.begin(), trace->samples.begin() + trace->sampleCount,
+				[descriptor](const auto& sample) { return sample.registration.descriptor == descriptor; });
+			if (found == trace->samples.begin() + trace->sampleCount)
+			{
+				if (trace->sampleCount == trace->samples.size()) { ++trace->sampleOverflow; continue; }
+				found = trace->samples.begin() + trace->sampleCount++;
+				found->registration = *registration;
+				found->clip = clip;
+				// This callback already owns the renderer queue boundary. No Scene
+				// writer can overtake this exact image-owner query before UI submit.
+				if (vulkan) found->content = vulkan->GetSceneViewContentStamp(registration->imageView, registration->resourceGeneration);
+			}
+			else
+			{
+				found->clip[0] = std::min(found->clip[0], clip[0]); found->clip[1] = std::min(found->clip[1], clip[1]);
+				found->clip[2] = std::max(found->clip[2], clip[2]); found->clip[3] = std::max(found->clip[3], clip[3]);
+			}
+			++found->commandCount;
+			found->elementCount += command.ElemCount;
+		}
+	}
+}
+
+void MainEditorSubsystem::StartSceneViewPresentationTrace()
+{
+	if (!sceneViewTrace) sceneViewTrace = std::make_unique<SceneViewTraceState>();
+	auto& trace = *sceneViewTrace;
+	++trace.session;
+	trace.enabled = true;
+	trace.begin = trace.count = 0;
+	trace.dropped = 0;
+	trace.hasPending = false;
+	trace.lastWsiContents = {};
+}
+
+bool MainEditorSubsystem::IsSceneViewPresentationTraceEnabled() const noexcept
+{
+	return sceneViewTrace && sceneViewTrace->enabled;
+}
+
+void MainEditorSubsystem::StopSceneViewPresentationTrace()
+{
+	if (!sceneViewTrace) return;
+	sceneViewTrace->enabled = false;
+	sceneViewTrace->hasPending = false;
+}
+
+void MainEditorSubsystem::SettleSceneViewPresentationTrace(const TerraEngine::Renderer::Vulkan::EditorPresentResult& result)
+{
+	if (!sceneViewTrace || !sceneViewTrace->enabled) return;
+	auto& trace = *sceneViewTrace;
+	if (!trace.hasPending)
+	{
+		// Acquire/minimize/recording failures can skip the prepare callback.
+		// Retain that attempt without inventing descriptor or sampled content.
+		trace.pending = {};
+		trace.pending.uiFrameId = static_cast<std::uint64_t>(std::max(0, ImGui::GetFrameCount()));
+		if (const auto window = GetWindow<SceneViewWindow>()) trace.pending.queuedPoseSequence = window->GetQueuedPoseSequence();
+	}
+	auto& event = trace.pending;
+	event.sequence = trace.nextSequence++;
+	event.present = result;
+	if (auto* renderer = ctx && ctx->engine ? ctx->engine->GetSystem<RenderSystem>() : nullptr)
+		if (auto* vulkan = dynamic_cast<VulkanContext*>(renderer->GetContext()))
+			event.completedUiSubmissionSerial = vulkan->GetEditorSubmissionProgress().completedSerial;
+	for (std::uint32_t index = 0; index < event.sampleCount; ++index)
+	{
+		auto& sample = event.samples[index];
+		if (!sample.content || result.submissionSerial == 0) continue;
+		const auto& content = *sample.content;
+		sample.repeatedContent = std::any_of(trace.lastWsiContents.begin(), trace.lastWsiContents.end(), [&](const auto& prior) {
+			return prior && prior->rendererSessionGeneration == content.rendererSessionGeneration
+				&& prior->targetGeneration == content.targetGeneration && prior->imageContentSerial == content.imageContentSerial
+				&& prior->imageStage == content.imageStage;
+		});
+	}
+	if (result.wsiEnqueued && result.submissionSerial != 0)
+	{
+		trace.lastWsiContents = {};
+		for (std::uint32_t index = 0; index < event.sampleCount; ++index) trace.lastWsiContents[index] = event.samples[index].content;
+	}
+	if (trace.count == trace.events.size())
+	{
+		trace.begin = (trace.begin + 1) % trace.events.size();
+		--trace.count;
+		++trace.dropped;
+	}
+	trace.events[(trace.begin + trace.count) % trace.events.size()] = event;
+	++trace.count;
+	trace.hasPending = false;
+}
+
+nlohmann::json MainEditorSubsystem::ReadSceneViewPresentationTrace(std::uint64_t afterSequence, std::uint32_t limit) const
+{
+	using namespace TerraEngine::Renderer;
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	const auto wide = [](std::uint64_t value) { return std::to_string(value); };
+	const auto availableWide = [&wide](std::uint64_t value) -> nlohmann::json { return value ? nlohmann::json(wide(value)) : nlohmann::json(nullptr); };
+	const auto lifecycleJson = [&wide](const GraphicsLifecycleStamp& stamp) -> nlohmann::json {
+		return {{"projectGeneration", wide(stamp.projectGeneration)}, {"playSessionGeneration", wide(stamp.playSessionGeneration)},
+			{"rendererSessionGeneration", wide(stamp.rendererSessionGeneration)}, {"backendResourceGeneration", wide(stamp.backendResourceGeneration)}};
+	};
+	const auto stageName = [](RenderCaptureImageStage stage) {
+		switch (stage) {
+		case RenderCaptureImageStage::Raw: return "raw";
+		case RenderCaptureImageStage::Processed: return "processed";
+		case RenderCaptureImageStage::Composited: return "composited";
+		default: return "legacy";
+		}
+	};
+	nlohmann::json result = {{"schemaVersion", 1}, {"affectedScope", "EditorSceneView"}, {"traceSession", "0"},
+		{"enabled", false}, {"capacity", 1024}, {"sampleCapacity", 16}, {"droppedCount", "0"},
+		{"oldestSequence", "0"}, {"latestSequence", "0"}, {"nextCursor", wide(afterSequence)},
+		{"events", nlohmann::json::array()}, {"gpuTimings", nlohmann::json::array()}, {"readObservation", nullptr}};
+	RenderSystem* renderer = ctx && ctx->engine ? ctx->engine->GetSystem<RenderSystem>() : nullptr;
+	VulkanContext* vulkan = renderer ? dynamic_cast<VulkanContext*>(renderer->GetContext()) : nullptr;
+	if (renderer)
+	{
+		nlohmann::json observation = {{"queuedPoseSequence", nullptr}, {"lifecycle", nullptr}, {"sceneOwnerRevision", nullptr}, {"effectiveGraphicsRevision", nullptr}};
+		if (const auto window = GetWindow<SceneViewWindow>()) observation["queuedPoseSequence"] = wide(window->GetQueuedPoseSequence());
+		if (const auto settings = renderer->ReadSceneViewGraphicsSettings())
+		{
+			observation["lifecycle"] = lifecycleJson(settings->lifecycle);
+			observation["sceneOwnerRevision"] = wide(settings->revision);
+			observation["effectiveGraphicsRevision"] = settings->effective ? availableWide(settings->effective->revision) : nlohmann::json(nullptr);
+		}
+		result["readObservation"] = std::move(observation);
+	}
+	if (sceneViewTrace)
+	{
+		const auto& trace = *sceneViewTrace;
+		result["traceSession"] = wide(trace.session); result["enabled"] = trace.enabled; result["droppedCount"] = wide(trace.dropped);
+		if (trace.count)
+		{
+			result["oldestSequence"] = wide(trace.events[trace.begin].sequence);
+			result["latestSequence"] = wide(trace.events[(trace.begin + trace.count - 1) % trace.events.size()].sequence);
+		}
+		limit = std::clamp(limit, 1U, 1024U);
+		for (std::size_t index = 0; index < trace.count && result["events"].size() < limit; ++index)
+		{
+			const auto& event = trace.events[(trace.begin + index) % trace.events.size()];
+			if (event.sequence <= afterSequence) continue;
+			const auto& present = event.present;
+			nlohmann::json row = {{"eventSequence", wide(event.sequence)}, {"uiFrameId", wide(event.uiFrameId)},
+				{"queuedPoseSequence", wide(event.queuedPoseSequence)}, {"sceneOwnerRevision", availableWide(event.sceneOwnerRevision)},
+				{"effectiveGraphicsRevision", availableWide(event.effectiveGraphicsRevision)}, {"requestedGraphicsRevision", availableWide(event.requestedGraphicsRevision)},
+				{"lifecycle", event.lifecycle ? lifecycleJson(*event.lifecycle) : nlohmann::json(nullptr)},
+				{"view", nullptr},
+				{"drawDataInspected", event.drawDataInspected}, {"sceneDrawCommandCount", event.sceneCommandCount}, {"sampleOverflow", event.sampleOverflow},
+				{"framebufferWidth", event.framebufferWidth}, {"framebufferHeight", event.framebufferHeight},
+				{"submissionSerial", availableWide(present.submissionSerial)}, {"presentSequence", availableWide(present.presentSequence)},
+				{"queuePresentBeginQpc", availableWide(present.queuePresentBeginQpc)}, {"queuePresentEndQpc", availableWide(present.queuePresentEndQpc)},
+				{"qpcFrequency", availableWide(present.qpcFrequency)}, {"completedUiSubmissionSerial", wide(event.completedUiSubmissionSerial)},
+				{"outcome", static_cast<std::uint32_t>(present.outcome)}, {"stage", static_cast<std::uint32_t>(present.stage)}, {"nativeResult", present.nativeResult},
+				{"presentAttempted", present.presentSequence != 0}, {"wsiEnqueued", present.wsiEnqueued},
+				{"presentationDiscarded", present.submissionSerial != 0 && !present.wsiEnqueued}, {"acquiredImage", nullptr},
+				{"windowProof", nullptr}, {"samples", nlohmann::json::array()}};
+			if (event.view)
+				row["view"] = {{"outputKind", static_cast<std::uint32_t>(event.view->outputKind)}, {"viewType", static_cast<std::uint32_t>(event.view->viewType)},
+					{"outputId", event.view->outputId}, {"lifetimeGeneration", wide(event.view->lifetimeGeneration)}};
+			if (present.acquiredImage)
+				row["acquiredImage"] = {{"frameSlot", present.acquiredImage->frameSlot}, {"imageIndex", present.acquiredImage->imageIndex},
+					{"presentationGeneration", wide(present.acquiredImage->presentationGeneration)}};
+			if (present.windowHandle != 0)
+				row["windowProof"] = {{"windowHandle", wide(present.windowHandle)}, {"monitorBefore", availableWide(present.monitorBefore)},
+					{"monitorAfter", availableWide(present.monitorAfter)}, {"foregroundWindowBefore", availableWide(present.foregroundWindowBefore)},
+					{"foregroundWindowAfter", availableWide(present.foregroundWindowAfter)}, {"windowVisibleBefore", present.windowVisibleBefore},
+					{"windowVisibleAfter", present.windowVisibleAfter}};
+			for (std::uint32_t sampleIndex = 0; sampleIndex < event.sampleCount; ++sampleIndex)
+			{
+				const auto& sample = event.samples[sampleIndex];
+				const bool submitted = present.submissionSerial != 0;
+				nlohmann::json use = {{"descriptorSessionIdentity", wide(sample.registration.sessionIdentity)},
+					{"resourceGeneration", wide(sample.registration.resourceGeneration)}, {"commandCount", sample.commandCount},
+					{"elementCount", wide(sample.elementCount)}, {"clipRectFramebuffer", sample.clip},
+					{"submittedDescriptorUse", submitted}, {"sampledByAcceptedUiSubmit", submitted && sample.content.has_value()},
+					{"content", nullptr}, {"repeatedContent", nullptr}, {"stalePose", nullptr}, {"staleGraphics", nullptr}, {"staleAaRevision", nullptr}};
+				if (sample.content)
+				{
+					const auto& content = *sample.content;
+					use["content"] = {{"frameId", wide(content.frameId)}, {"poseSequence", wide(content.poseSequence)},
+						{"settingsRevision", wide(content.settingsRevision)}, {"sceneAaRevision", wide(content.sceneAaRevision)},
+						{"targetGeneration", wide(content.targetGeneration)}, {"postProcessTargetGeneration", wide(content.postProcessTargetGeneration)},
+						{"backendResourceGeneration", wide(content.backendResourceGeneration)}, {"rendererSessionGeneration", wide(content.rendererSessionGeneration)},
+						{"projectGeneration", wide(content.projectGeneration)}, {"playSessionGeneration", wide(content.playSessionGeneration)},
+						{"imageContentSerial", wide(content.imageContentSerial)}, {"viewLifetimeGeneration", wide(content.viewLifetimeGeneration)},
+						{"viewType", content.viewType}, {"outputKind", content.outputKind}, {"outputId", content.outputId},
+						{"internalWidth", content.internalWidth}, {"internalHeight", content.internalHeight},
+						{"outputWidth", content.outputWidth}, {"outputHeight", content.outputHeight}, {"aaMode", content.aaMode}, {"imageStage", stageName(content.imageStage)}};
+					if (submitted)
+					{
+						use["repeatedContent"] = sample.repeatedContent;
+						if (event.queuedPoseSequence != 0) use["stalePose"] = content.poseSequence != event.queuedPoseSequence;
+						if (event.effectiveGraphicsRevision != 0) use["staleGraphics"] = content.settingsRevision != event.effectiveGraphicsRevision;
+						if (event.sceneOwnerRevision != 0) use["staleAaRevision"] = content.sceneAaRevision != event.sceneOwnerRevision;
+					}
+				}
+				row["samples"].push_back(std::move(use));
+			}
+			result["events"].push_back(std::move(row)); result["nextCursor"] = wide(event.sequence);
+		}
+	}
+	if (vulkan)
+	{
+		// Retain the query owner's exact identity. Only the native validator may
+		// turn completed available timestamps into a numeric duration.
+		for (const auto& sample : vulkan->GetCompletedPostProcessTimings())
+		{
+			if (sample.owner.view.outputKind != RenderOutputKind::SceneView || sample.owner.view.viewType != RenderViewType::Scene || sample.owner.view.outputId != 1U) continue;
+			result["gpuTimings"].push_back({{"effectId", sample.effect.stableId}, {"passKind", static_cast<std::uint32_t>(sample.effect.passKind)},
+				{"frameId", wide(sample.owner.frameId)}, {"settingsRevision", wide(sample.owner.settingsRevision)},
+				{"lifecycle", lifecycleJson(sample.owner.lifecycle)}, {"outputKind", static_cast<std::uint32_t>(sample.owner.view.outputKind)},
+				{"viewType", static_cast<std::uint32_t>(sample.owner.view.viewType)}, {"outputId", sample.owner.view.outputId},
+				{"viewLifetimeGeneration", wide(sample.owner.view.lifetimeGeneration)}, {"targetGeneration", wide(sample.owner.targetGeneration)},
+				{"commandSerial", wide(sample.owner.commandSerial)}, {"queryPoolGeneration", wide(sample.owner.queryPoolGeneration)},
+				{"submitSerial", wide(sample.submitSerial)}, {"completionSerial", wide(sample.completionSerial)},
+				{"availability", static_cast<std::uint32_t>(sample.availability)}, {"reason", static_cast<std::uint32_t>(sample.reason)},
+				{"durationMilliseconds", HasMeasuredPostProcessGpuDuration(sample) ? nlohmann::json(*sample.durationMilliseconds) : nlohmann::json(nullptr)}});
+		}
+	}
+	return result;
 }
 
 void MainEditorSubsystem::CommitViewportDrawDataUses(std::uint64_t submittedSerial)
@@ -4181,6 +4514,7 @@ bool MainEditorSubsystem::CloseCurrentProject() {
 	if(!RetireTerrainCopies()) return false;
 	++m_TerrainCopyProjectEpoch;
 	m_TerrainCopyAdmissionCount = m_TerrainCopyAdmissionNext = 0U;
+	RetireGraphicsPlaySession();
 	if (ctx && ctx->exportController) ctx->exportController->StopAndDrain();
 	if (ctx && ctx->editorMcpBridge) ctx->editorMcpBridge->PumpExportJobsAtProtectedFrame();
 	ScriptCompilationSubsystem::Instance().StopAdmissionsAndDrain();

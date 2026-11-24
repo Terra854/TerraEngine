@@ -195,7 +195,8 @@ namespace TerraEngine::Tests
 
 		std::string ReadRenderSystemSource()
 		{
-			// Runtime validation policy still belongs to the residual initializer.
+			// The protected initializer delegates graphics startup policy to its
+			// dedicated owner; keep this region for checking that call ordering.
 			return RequiredContractRegion(RequiredContractSource("Engine/Renderer/RenderSystem.cpp"),
 				"void RenderSystem::Initialize()", "void RenderSystem::Update(");
 		}
@@ -762,13 +763,29 @@ namespace TerraEngine::Tests
 			const std::string vulkanSource = ReadVulkanContextSource();
 			const std::string vulkanInit = ReadVulkanContextInitSource();
 			const std::string renderSystem = ReadRenderSystemSource();
+			const auto startupSource = RequiredContractSource("Engine/Renderer/RenderSystemGraphicsStartup.cpp");
+			const auto startupPreparation = RequiredContractRegion(startupSource,
+				"void RenderSystem::PrepareGraphicsStartupAtProtectedBoundary()", "void RenderSystem::InitializeConfiguredVulkan()");
+			const auto configuredVulkan = RequiredContractRegion(startupSource,
+				"void RenderSystem::InitializeConfiguredVulkan()", "void RenderSystem::FinalizeGraphicsStartupAtProtectedBoundary()");
 			const std::string resourceManager = ReadResourceManagerSource();
 
 			context.Expect(!ShaderContains(rhiDefinitions, "#ifdef NDEBUG"), "RHI validation defaults should not change only because the binary is a Release build.");
 			context.Expect(!ShaderContains(vulkanHeader, "inline const bool enableValidationLayers"), "Vulkan validation should be requested by runtime settings, not a compile-mode constant.");
 			context.Expect(ShaderContains(vulkanHeader, "bool validationLayersRequested = false;"), "The Vulkan backend should track the startup validation request explicitly.");
 			context.Expect(ShaderContains(vulkanSource, "void VulkanContext::SetValidationLayersRequested(bool enabled)"), "RenderSystem needs a pre-instance hook for validation policy.");
-			context.Expect(ShaderContains(renderSystem, "SetValidationLayersRequested(ResourceManager::Instance().IsRenderValidationEnabled())"), "Runtime render profiles and editor preferences should drive validation in every compile mode.");
+			// Settings can now include a validated next-launch transaction. Follow
+			// the actual protected startup chain instead of accepting the policy
+			// setter anywhere in an unrelated function or concatenated source.
+			const auto prepareCall = renderSystem.find("PrepareGraphicsStartupAtProtectedBoundary();");
+			const auto nativeCall = renderSystem.find("InitializeConfiguredVulkan();");
+			const auto validationCall = configuredVulkan.find("native->SetValidationLayersRequested(currentSettings.validationEnabled != 0);");
+			const auto instanceCall = configuredVulkan.find("rhi->Initialize(WindowSystem::Instance());");
+			context.Expect(prepareCall != std::string::npos && nativeCall != std::string::npos && prepareCall < nativeCall
+				&& ShaderContains(startupPreparation, "currentSettings.validationEnabled = ResourceManager::Instance().IsRenderValidationEnabled() ? 1u : 0u;")
+				&& ShaderContains(startupPreparation, "owner.authoredDefaults = currentSettings;")
+				&& validationCall != std::string::npos && instanceCall != std::string::npos && validationCall < instanceCall,
+				"Project/editor validation policy must enter protected startup settings and configure Vulkan before instance initialization in every compile mode.");
 			context.Expect(ShaderContains(resourceManager, "ApplyRenderDiagnosticFlagsFromSettingsFile"), "Project sessions should read validation/debug flags before RenderSystem initializes Vulkan.");
 			context.Expect(ShaderContains(resourceManager, "GetProjectRoot() / \"ProjectSettings\" / \"RenderSettings.json\""), "Project-level RenderSettings should remain available for runtime render profile startup flags.");
 			context.Expect(ShaderContains(vulkanInit, "validationLayersEnabled = validationLayersRequested;"), "Instance creation should consume the runtime validation request.");

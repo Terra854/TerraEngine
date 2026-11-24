@@ -1040,6 +1040,16 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		true, readbackTeardownProof);
 	CancelIdentityReadbackRequests(readbackTeardownProof);
 	DestroyReadbackValidationGate();
+	// Idle or terminal device loss has already settled native borrowers above.
+	// Release finished-image descriptors and images before allocator teardown.
+	DestroyPostProcessTargets();
+	if(indexedMsaaRenderPass)
+	{
+		RetireSkyBackgroundPipeline(indexedMsaaRenderPass);
+		indexedRasterPasses.erase(indexedMsaaRenderPass);
+		vkDestroyRenderPass(device, indexedMsaaRenderPass, nullptr);
+		indexedMsaaRenderPass = VK_NULL_HANDLE;
+	}
 
 	DestroyAmbientOcclusionResources();
 	DestroyEnvironmentLightingResources();
@@ -1092,6 +1102,8 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			mesh.descriptorSetsByLayout.clear();
 		}
 
+		DestroyBufferImmediate(mesh.indexedCornerBuffer);
+		mesh.indexedTopology.reset();
 		vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
@@ -1299,6 +1311,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	
 
 	if (device && offscreenRenderPass != VK_NULL_HANDLE) {
+		RetireSkyBackgroundPipeline(offscreenRenderPass);
 		vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
 		offscreenRenderPass = VK_NULL_HANDLE;
 	}
@@ -1317,15 +1330,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			sceneViewGridPipelineLayout = VK_NULL_HANDLE;
 		}
 
-		if (skyBackgroundPipeline != VK_NULL_HANDLE) {
-			vkDestroyPipeline(device, skyBackgroundPipeline, nullptr);
-			skyBackgroundPipeline = VK_NULL_HANDLE;
-		}
-
-		if (skyBackgroundPipelineLayout != VK_NULL_HANDLE) {
-			vkDestroyPipelineLayout(device, skyBackgroundPipelineLayout, nullptr);
-			skyBackgroundPipelineLayout = VK_NULL_HANDLE;
-		}
+		while(!skyBackgroundVariants.empty()) RetireSkyBackgroundPipeline(skyBackgroundVariants.begin()->first);
 	}
 
 
@@ -2378,8 +2383,11 @@ bool VulkanContext::Impl::CreateDepthResources() {
 // presentation passes deliberately remain target0-only.
 bool VulkanContext::Impl::UsesConventionalVisibilityAttachments(VkRenderPass pass) const
 {
+	const auto screen = indexedRasterPasses.find(pass);
 	return pass != VK_NULL_HANDLE
-		&& (pass == offscreenRenderPass || (!editorMode && pass == renderPass));
+		&& (pass == offscreenRenderPass || (!editorMode && pass == renderPass) || pass == indexedMsaaRenderPass
+			|| (screen != indexedRasterPasses.end() && screen->second.screenSpaceMask != 0u
+				&& !screen->second.screenSpaceRaster.expired()));
 }
 
 // VulkanContext::Impl::CreateConventionalVisibilityIdentityAttachment creates
@@ -2416,6 +2424,16 @@ bool VulkanContext::Impl::CreateConventionalVisibilityIdentityAttachment(
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	// Devices qualified only for the legacy attachment still keep that path.
+	// Coverage resolve additionally needs a transfer destination in this image.
+	VkImageFormatProperties identityCopySupport{};
+	const auto copyUsage = imageInfo.usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	if(vkGetPhysicalDeviceImageFormatProperties(physicalDevice, imageInfo.format, imageInfo.imageType,
+		imageInfo.tiling, copyUsage, 0, &identityCopySupport) == VK_SUCCESS
+		&& (identityCopySupport.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0u
+		&& extent.width <= identityCopySupport.maxExtent.width && extent.height <= identityCopySupport.maxExtent.height)
+		imageInfo.usage = copyUsage;
+	attachment.usage = imageInfo.usage;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -3023,6 +3041,7 @@ void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResource
 		{
 			// This bundle reached the existing completed-present/idle boundary.
 			RetireCompositeForPass(device, virtualGeometryCompositePipelines, bundle.renderPass);
+			RetireSkyBackgroundPipeline(bundle.renderPass);
 			vkDestroyRenderPass(device, bundle.renderPass, nullptr);
 		}
 		for (VkImageView view : bundle.imageViews) if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
@@ -3656,7 +3675,9 @@ void VulkanContext::Impl::CleanupSwapChain() {
 		if (renderPass)
 		{
 			// CleanupSwapChain is called only by device-idle/lost Cleanup.
+			indexedRasterPasses.erase(renderPass);
 			RetireCompositeForPass(device, virtualGeometryCompositePipelines, renderPass);
+			RetireSkyBackgroundPipeline(renderPass);
 			vkDestroyRenderPass(device, renderPass, nullptr);
 		}
 
@@ -3726,6 +3747,10 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		return;
 	}
 	editorCompletionTracker.RecordProtectedIdle();
+	// Existing device-idle proof covers all target borrowers before frame fences
+	// move into an old presentation bundle or are replaced by recovery.
+	CompletePostProcessDeviceIdle();
+	DrainRetiredPostProcessTargets();
 	if (emptyFrameAcquireDrainFence != VK_NULL_HANDLE) {
 		vkDestroyFence(device, emptyFrameAcquireDrainFence, nullptr);
 		emptyFrameAcquireDrainFence = VK_NULL_HANDLE;

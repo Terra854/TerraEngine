@@ -181,6 +181,7 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleExportStart(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleExportCancel(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleGameViewCapture(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleSceneViewCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleCameraObjectCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId);

@@ -1,4 +1,4 @@
-// VulkanContextImpl.h — Vulkan Backend Implementation Details
+// VulkanContextImpl.h â€” Vulkan Backend Implementation Details
 //
 // Defines the private implementation state for the VulkanContext, encapsulating internal handles and caches.
 // It includes definitions for descriptor layouts, pipeline keys, and frame-specific synchronization objects.
@@ -7,6 +7,7 @@
 #pragma once
 
 #include "VulkanContext.h"
+#include "VulkanIndexedGeometry.h"
 #include "VulkanReadbackLifecycle.h"
 #include "VulkanCommonIncludes.h"
 #include "VulkanHiZ.h"
@@ -27,6 +28,12 @@
 #include "VulkanLightingDepthEvidence.h"
 #include "VulkanShadowPagePreparation.h"
 #include "VulkanStaticShadowPolicy.h"
+#include "VulkanPostProcessTargets.h"
+#include "VulkanPostProcessLensHdr.h"
+
+namespace TerraEngine::Renderer::GraphicsSettings { struct PostProcessColorSettings; }
+namespace TerraEngine::Renderer::Vulkan { struct PostProcessLookupImages; struct ScreenSpaceRasterResources; }
+#include "Renderer/GraphicsSettings/PostProcessDiagnostics.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -47,6 +54,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <list>
 #include <optional>
 #include <map>
 #include <memory>
@@ -168,6 +176,12 @@ struct VulkanMesh {
 	VulkanBuffer meshMorphDeltaBuffer;
 	VulkanBuffer meshDecodeInfoBuffer;
 	VulkanBuffer indexBuffer;
+	// Optional true raster index stream. The existing indexBuffer above remains
+	// packed uint8 local topology storage for task/mesh shaders.
+	VulkanBuffer indexedCornerBuffer;
+	std::shared_ptr<const TerraEngine::Renderer::Vulkan::IndexedCornerGeometry> indexedTopology;
+	std::uint64_t indexedAllocationGeneration = 0;
+
 	VulkanBuffer meshletBuffer;
 	VulkanBuffer meshletSectionBuffer;
 	VulkanBuffer meshletBoundsBuffer;
@@ -181,8 +195,44 @@ struct VulkanMesh {
 
 // Pipeline pairing with its layout to avoid redundant lookups.
 
+enum class VulkanRasterRoute : std::uint32_t { MeshTasks, IndexedCorners };
+struct VulkanRasterPipelineConfiguration
+{
+	VulkanRasterRoute route = VulkanRasterRoute::MeshTasks;
+	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+	// Only protected preparation creates the trusted Default VS+FS snapshot.
+	std::shared_ptr<const ShaderCollection> preparedCollection;
+	VkRenderPass qualifiedPass = VK_NULL_HANDLE;
+	std::array<VkFormat, 3> attachmentFormats{};
+	// Only an explicitly registered screen MRT pass may own this immutable raw
+	// fragment override. Its generation, not file size/hash, qualifies cache reuse.
+	std::uint32_t screenSpaceMask = 0;
+	std::uint64_t screenSpaceFragmentGeneration = 0;
+	std::shared_ptr<const std::vector<std::uint32_t>> screenSpaceFragment;
+	std::weak_ptr<const TerraEngine::Renderer::Vulkan::ScreenSpaceRasterResources> screenSpaceRaster;
+};
+
+struct IndexedRasterPassCompatibility
+{
+	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+	VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+	VkFormat identityFormat = VK_FORMAT_UNDEFINED;
+	VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+	bool usesVrsAttachment = false;
+	std::uint32_t screenSpaceMask = 0;
+	std::uint64_t screenSpaceFragmentGeneration = 0;
+	std::shared_ptr<const std::vector<std::uint32_t>> screenSpaceFragment;
+	std::weak_ptr<const TerraEngine::Renderer::Vulkan::ScreenSpaceRasterResources> screenSpaceRaster;
+};
+
 struct VulkanPipeline {
 	VkPipeline pipeline;
+	VulkanRasterRoute rasterRoute = VulkanRasterRoute::MeshTasks;
+	VkSampleCountFlagBits rasterSamples = VK_SAMPLE_COUNT_1_BIT;
+	// A depth-equal auxiliary pass must use the accepted surface winding.
+	VkCullModeFlags rasterCullMode = VK_CULL_MODE_BACK_BIT;
+	VkFrontFace rasterFrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	std::shared_ptr<const ShaderCollection> sourceCollection;
 	// Identity of the immutable collection actually used to build this pipeline.
 	std::uint64_t collectionGeneration = 0;
 	VkPipelineLayout layout;
@@ -195,6 +245,9 @@ struct VulkanPipeline {
 	// Records the actual two-target fragment/color-mask pipeline choice. Command
 	// recording uses it as a bounded invariant before trusting typed picking.
 	bool usesConventionalVisibilityIdentity = false;
+	std::uint32_t screenSpaceMask = 0;
+	std::uint64_t screenSpaceFragmentGeneration = 0;
+	std::shared_ptr<const std::vector<std::uint32_t>> screenSpaceFragment;
 };
 
 // Must match shader definition
@@ -248,6 +301,11 @@ struct PipelineKey {
 	};
 	TerraEngine::UUID shaderCollectionId;
 	uint32_t materialFlags;
+	VulkanRasterRoute rasterRoute = VulkanRasterRoute::MeshTasks;
+	std::uint32_t rasterSamples = 1;
+	std::array<std::uint32_t, 3> rasterAttachmentFormats{};
+	std::uint32_t screenSpaceMask = 0;
+	std::uint64_t screenSpaceFragmentGeneration = 0;
 	std::uint64_t collectionGeneration = 0u;
 	std::uint64_t shaderModuleGeneration = 0u;
 	// Equality retains every exact ordered publication tuple. Hash collisions
@@ -262,6 +320,9 @@ struct PipelineKey {
 	bool operator==(const PipelineKey& other) const {
 		return shaderCollectionId == other.shaderCollectionId
 			&& materialFlags == other.materialFlags
+			&& rasterRoute == other.rasterRoute && rasterSamples == other.rasterSamples
+			&& rasterAttachmentFormats == other.rasterAttachmentFormats
+			&& screenSpaceMask == other.screenSpaceMask && screenSpaceFragmentGeneration == other.screenSpaceFragmentGeneration
 			&& collectionGeneration == other.collectionGeneration
 			&& shaderModuleGeneration == other.shaderModuleGeneration
 			&& stagePublications == other.stagePublications
@@ -277,6 +338,11 @@ struct PipelineKeyHash {
 		std::size_t h1 = std::hash<TerraEngine::UUID>{}(k.shaderCollectionId);
 		std::size_t h2 = std::hash<uint32_t>{}(k.materialFlags);
 		std::size_t hash = h1 ^ (h2 << 1);
+		hash ^= std::hash<std::uint32_t>{}(static_cast<std::uint32_t>(k.rasterRoute)) << 7U;
+		hash ^= std::hash<std::uint32_t>{}(k.rasterSamples) << 8U;
+		for (const auto format : k.rasterAttachmentFormats) hash ^= std::hash<std::uint32_t>{}(format) + (hash << 6U) + (hash >> 2U);
+		hash ^= std::hash<std::uint32_t>{}(k.screenSpaceMask) << 9U;
+		hash ^= std::hash<std::uint64_t>{}(k.screenSpaceFragmentGeneration) << 10U;
 		hash ^= std::hash<std::uint64_t>{}(k.collectionGeneration) << 2u;
 		hash ^= std::hash<std::uint64_t>{}(k.shaderModuleGeneration) << 3u;
 		for (const auto& stage : k.stagePublications) {
@@ -361,6 +427,8 @@ struct VulkanContext::Impl {
 	// observe a later RenderSystem construction buffer.
 	std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication>
 		activeRenderFramePublication;
+	std::uint64_t recordedGraphicsFrameId = 0;
+	std::vector<VulkanContext::RecordedGraphicsView> recordedGraphicsViews;
 	// Vulkan queue handles are externally synchronized objects. Asset uploads
 	// can submit from worker threads while the coordinator submits/presents an
 	// editor frame, so every queue operation and device-wide idle boundary must
@@ -402,6 +470,7 @@ struct VulkanContext::Impl {
 		VkImage image = VK_NULL_HANDLE;
 		VmaAllocation allocation = VK_NULL_HANDLE;
 		VkImageView view = VK_NULL_HANDLE;
+		VkImageUsageFlags usage = 0u;
 	};
 	std::vector<ConventionalVisibilityIdentityAttachment> presentationVisibilityIdentities;
 
@@ -1301,6 +1370,33 @@ struct VulkanContext::Impl {
 	float gpuTimestampPeriodNanoseconds = 0.0f;
 	bool gpuTimestampQueriesSupported = false;
 	std::uint64_t gpuTimestampQueryPoolGeneration = 0u;
+	// Exposure timing uses one physical range per actual frame/snapshot owner.
+	// The pool is created on first executed effect, never on the legacy path.
+	// One aggregate interval and a separate pair for each native stage.
+	static constexpr std::uint32_t kPostProcessStagesPerView = 23u;
+	static constexpr std::uint32_t kPostProcessTimingSlotCount =
+		MAX_FRAMES_IN_FLIGHT * MAX_RENDER_SNAPSHOTS_PER_FRAME * kPostProcessStagesPerView;
+	struct PostProcessTimestampSlot
+	{
+		TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample sample;
+		VkCommandBuffer command = VK_NULL_HANDLE;
+		VkFence fence = VK_NULL_HANDLE;
+		bool occupied = false;
+		bool ended = false;
+		bool acceptedUnfenced = false;
+	};
+	VkQueryPool postProcessTimestampQueryPool = VK_NULL_HANDLE;
+	// Shader availability belongs to the backend generation. Extent results
+	// are bounded because an editor resize can otherwise grow this indefinitely.
+	std::uint64_t spatialAAShaderGeneration = 0u;
+	std::uint32_t spatialAAInstalledModes = 1u;
+	std::vector<std::pair<glm::uvec2, std::uint32_t>> spatialAAExtentModes;
+	std::uint64_t postProcessTimestampPoolGeneration = 0;
+	std::uint64_t nextPostProcessTimestampCommandSerial = 1;
+	std::uint64_t nextPostProcessTimestampSubmitSerial = 1;
+	bool postProcessTimestampPoolAttempted = false;
+	std::array<PostProcessTimestampSlot, kPostProcessTimingSlotCount> postProcessTimestampSlots{};
+	std::array<TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample, kPostProcessTimingSlotCount> completedPostProcessTimingSamples{};
 	std::array<std::array<bool, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> pendingGpuTimestampWritesByFrame{};
 	std::array<std::array<std::uint64_t, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> pendingGpuTimestampFrameIdsByFrame{};
 	std::array<std::array<GpuTimestampViewSample, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> completedGpuTimestampSamplesByFrame{};
@@ -1401,7 +1497,7 @@ struct VulkanContext::Impl {
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage);
 			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, VkExtent2D sourceDepthExtent, uint32_t viewIndex, const glm::mat4& viewProjection);
-			bool GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
+			bool GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory, VkImageView coverageDepthSeed = VK_NULL_HANDLE);
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
@@ -1568,10 +1664,16 @@ struct VulkanContext::Impl {
 		// Published only after this target records its conventional pass. Async
 		// identity copies reject a frame/session mismatch before mapping pixels.
 		std::uint64_t identityFrameId = 0u;
+		// Color and visibility identity can be produced at different extents.
+		// Scaled Game views publish full-size color without a fake ID frame.
+		std::uint64_t colorFrameId = 0u;
 		std::uint64_t identityRendererGeneration = 0u;
 		std::uint64_t identityOriginGeneration = 0u;
 		std::uint64_t identitySpatialGeneration = 0u;
 		std::uint64_t identityResidencyGeneration = 0u;
+		// Published only by actual successful queue submission. Keeping this on
+		// the image owner also retains retired descriptor content until retirement.
+		std::optional<TerraEngine::Renderer::Vulkan::SceneViewContentStamp> sceneContentStamp;
 	};
 	OffscreenResources sceneView;
 	OffscreenResources gameView;
@@ -1585,6 +1687,37 @@ struct VulkanContext::Impl {
 		bool editorDescriptorAcknowledged = false;
 	};
 	std::deque<RetiredOffscreenResourceSet> retiredOffscreenResources;
+	// Recorded content receipts remain private until the exact command reaches
+	// a successful queue submit. No pointer to a mutable publication escapes.
+	struct PendingSceneViewContent
+	{
+		VkCommandBuffer command = VK_NULL_HANDLE;
+		VkImageView imageView = VK_NULL_HANDLE;
+		std::uint64_t targetGeneration = 0;
+		TerraEngine::Renderer::Vulkan::SceneViewContentStamp stamp;
+	};
+	std::vector<PendingSceneViewContent> pendingSceneViewContent;
+	std::uint64_t sceneViewContentSerial = 0;
+	bool RecordSceneViewContent(VkCommandBuffer command, const OffscreenResources& target,
+		const TerraEngine::Renderer::Vulkan::SceneViewContentStamp& stamp) noexcept;
+	void MarkSceneViewContentCommandsSubmitted(std::span<const VkCommandBuffer> commands) noexcept;
+	void DiscardSceneViewContentCommands(std::span<const VkCommandBuffer> commands) noexcept;
+	// Finished-image allocations are separate from raw targets. Their ownership
+	// survives viewport descriptor replacement and asynchronous image readback.
+	using PostProcessTargetKey = TerraEngine::Renderer::Vulkan::PostProcessTargetKey;
+	using PostProcessTargetBundle = TerraEngine::Renderer::Vulkan::PostProcessTargetBundle;
+	using PostProcessTargetRequest = TerraEngine::Renderer::Vulkan::PostProcessTargetRequest;
+	std::map<PostProcessTargetKey, std::unique_ptr<PostProcessTargetBundle>> postProcessTargets;
+	// Unpublished candidates never appear in capture, diagnostics or submission.
+	std::map<PostProcessTargetKey, std::unique_ptr<PostProcessTargetBundle>> preparedPostProcessTargets;
+	// Transient editor presentation choice. It never changes camera effects.
+	bool sceneViewRawPreviewRequested = false;
+	std::list<std::unique_ptr<PostProcessTargetBundle>> retiredPostProcessTargets;
+	std::uint64_t nextPostProcessTargetGeneration = 1;
+	std::array<TerraEngine::Renderer::Vulkan::PostProcessFrameCompletion, MAX_FRAMES_IN_FLIGHT> postProcessFrameCompletion{};
+#if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
+	TerraEngine::Renderer::Vulkan::PostProcessTargetFailure postProcessTargetFailure = TerraEngine::Renderer::Vulkan::PostProcessTargetFailure::None;
+#endif
 
 	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
 	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
@@ -1595,6 +1728,7 @@ struct VulkanContext::Impl {
 
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
 	std::uint64_t nextMeshAllocationGeneration = 1U;
+	std::uint64_t nextIndexedAllocationGeneration = 1U;
 	struct ShadowAuthoredPageResource {
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 		std::shared_ptr<const Mesh> retainedMesh;
@@ -1608,6 +1742,21 @@ struct VulkanContext::Impl {
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
 	// Pipelines keyed by RenderPass then PipelineKey (ShaderID + Flags)
 	std::unordered_map<VkRenderPass, std::unordered_map<PipelineKey, VulkanPipeline, PipelineKeyHash>> pipelineCache;
+	// Register only actual successfully created native passes and erase on
+	// retirement/handle reuse. Requested samples do not prove native state.
+	std::unordered_map<VkRenderPass, IndexedRasterPassCompatibility> indexedRasterPasses;
+	// A stable device-owned render pass permits reuse across view resizes.
+	VkRenderPass indexedMsaaRenderPass = VK_NULL_HANDLE;
+	std::uint64_t indexedMsaaShaderGeneration = 0u;
+	bool indexedMsaaShaderReady = false;
+	std::uint64_t lensShaderGeneration = 0u;
+	std::uint32_t installedCameraEffectMask = 0u;
+	std::uint64_t temporalShaderGeneration = 0u;
+	bool temporalShadersReady = false;
+	struct IndexedRasterPreparationState;
+	std::shared_ptr<IndexedRasterPreparationState> indexedRasterPreparation;
+	std::uint64_t indexedRasterShaderGeneration = 0;
+	bool indexedRasterShaderInstalled = false;
 
 	VulkanImage defaultTexture;
 	// This owner is uploaded and transitioned during protected initialization;
@@ -1966,6 +2115,34 @@ struct VulkanContext::Impl {
 	void CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent = {});
 	void DestroyOffscreenResourceSet(OffscreenResources& resources);
 	void DrainRetiredOffscreenResources();
+	bool HasRetiredOffscreenPostProcessBorrowers(VkImage image);
+	PostProcessTargetBundle* EnsurePostProcessTargets(const PostProcessTargetRequest& request, std::string& reason,
+		const std::function<bool(PostProcessTargetBundle&, std::string&)>& preparePasses = {});
+	PostProcessTargetBundle* FindPostProcessTargets(const PostProcessTargetKey& key) noexcept;
+	std::shared_ptr<TerraEngine::Renderer::Vulkan::PostProcessLookupImages> PreparePostProcessLookups(
+		const TerraEngine::Renderer::GraphicsSettings::PostProcessColorSettings& color, std::string& reason);
+	std::optional<TerraEngine::Renderer::Vulkan::LensHdrDirtTexture> PreparePostProcessLensDirtTexture(
+		bool active, const TerraEngine::UUID& assetId, std::string& reason);
+	bool ReleasePostProcessTargets(const PostProcessTargetKey& key, std::string& reason);
+	void RecordPostProcessTargetSubmission(const PostProcessTargetKey& key, std::uint64_t generation,
+		std::uint32_t frameSlot, VkFence fence) noexcept;
+	struct PostProcessSourceOverwrite
+	{
+		VkCommandBuffer command = VK_NULL_HANDLE;
+		VkImage image = VK_NULL_HANDLE;
+	};
+	std::vector<PostProcessSourceOverwrite> pendingPostProcessSourceOverwrites;
+	bool RecordPostProcessSourceOverwrite(VkCommandBuffer command, VkImage image) noexcept;
+	void MarkPostProcessCommandsSubmitted(std::span<const VkCommandBuffer> commands,
+		std::uint32_t frameSlot, VkFence fence) noexcept;
+	void DiscardPostProcessCommands(std::span<const VkCommandBuffer> commands) noexcept;
+	void CompletePostProcessDeviceIdle() noexcept;
+	bool ObservePostProcessFrameCompletion(std::uint32_t frameSlot, VkFence fence) noexcept;
+	void MarkPostProcessEditorDescriptorBorrowed(const PostProcessTargetKey& key, std::uint64_t generation) noexcept;
+	void AcknowledgePostProcessEditorDescriptorRetirement(const PostProcessTargetKey& key, std::uint64_t generation) noexcept;
+	void RecordPostProcessEditorSubmission(std::uint32_t frameSlot, VkFence fence) noexcept;
+	void DrainRetiredPostProcessTargets();
+	void DestroyPostProcessTargets() noexcept;
 	void RecreateOffscreenResources(); // Handle resize
 	void ClearResources();
 	bool MarkDeviceLost(VkResult result, std::string_view operation);
@@ -1982,6 +2159,9 @@ struct VulkanContext::Impl {
 	VkPipelineLayout sceneViewGridPipelineLayout = VK_NULL_HANDLE;
 	VkPipeline skyBackgroundPipeline = VK_NULL_HANDLE;
 	VkPipelineLayout skyBackgroundPipelineLayout = VK_NULL_HANDLE;
+	// Runtime geometry can use the swapchain pass or the HDR processing source.
+	// Each compatible render-pass lifetime owns its sky variant independently.
+	std::map<VkRenderPass, std::pair<VkPipeline, VkPipelineLayout>> skyBackgroundVariants;
 	
 
 	struct GridPushConstants {
@@ -1995,10 +2175,13 @@ struct VulkanContext::Impl {
 	void RenderSceneViewGrid(VkCommandBuffer cmd,
 		const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
 		VkExtent2D renderExtent);
-	void CreateSkyBackgroundPipeline(VkRenderPass renderPass);
+	void CreateSkyBackgroundPipeline(VkRenderPass renderPass, std::uint32_t colorAttachmentCount = 0u);
+	void RetireSkyBackgroundPipeline(VkRenderPass renderPass);
+	static void RetirePostProcessScreenRaster(void* owner,
+		const std::shared_ptr<TerraEngine::Renderer::Vulkan::ScreenSpaceRasterResources>& raster) noexcept;
 	void RenderSkyBackground(VkCommandBuffer cmd,
 		const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
-		VkExtent2D renderExtent);
+		VkExtent2D renderExtent, VkRenderPass renderPassOverride = VK_NULL_HANDLE);
 
 	// UI Rendering
 	VkPipeline staticUiPipeline = VK_NULL_HANDLE;
@@ -2020,15 +2203,16 @@ struct VulkanContext::Impl {
 	UIRenderer uiTextRenderer;
 
 	// Re-usable UI buffers (resized dynamically)
-	// Runtime UI vertices are rewritten by the CPU. Keep one allocation per
-	// frame-fence slot so a later CPU frame cannot overwrite memory still being
-	// consumed by an earlier GPU submission.
+	// Runtime UI vertices are rewritten by the CPU. Index by frame-fence slot
+	// and render snapshot so another view in the same frame cannot overwrite
+	// an earlier command. Empty entries allocate no GPU storage.
 	std::vector<VulkanBuffer> uiStaticVertexBuffers;
 	VulkanBuffer uiInstanceBuffer{};
 	std::vector<VulkanBuffer> uiSdfVertexBuffers;
 
-	void CreateUIPipelines(VkRenderPass renderPass);
-	void RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch);
+	// Optional pass-owned HUD variants avoid reusing incompatible legacy pipelines.
+	void CreateUIPipelines(VkRenderPass renderPass, TerraEngine::Renderer::Vulkan::PostProcessPassResources* outputs = nullptr);
+	void RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch, std::uint32_t snapshotSlotIndex, const TerraEngine::Renderer::Vulkan::PostProcessPassResources* pipelines = nullptr);
 
 	bool CreateInstance();
 	void PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo);
@@ -2067,6 +2251,18 @@ struct VulkanContext::Impl {
 	void CollectCompletedUnextendedAcquireProofs();
 	void RecordUnextendedPresent(std::uint32_t imageIndex, VkResult presentResult);
 	bool CreateGpuTimestampQueries();
+	bool BeginPostProcessTimestamp(VkCommandBuffer command, std::uint32_t frameSlot,
+		std::uint32_t snapshotSlot, const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+		std::uint64_t targetGeneration, std::uint32_t stage = 0);
+	void EndPostProcessTimestamp(VkCommandBuffer command, std::uint32_t frameSlot, std::uint32_t snapshotSlot, std::uint32_t stage = 0);
+	void MarkPostProcessTimestampCommandsSubmitted(std::span<const VkCommandBuffer> commands,
+		std::uint32_t frameSlot, VkFence fence) noexcept;
+	void DiscardPostProcessTimestampCommands(std::span<const VkCommandBuffer> commands) noexcept;
+	void CompletePostProcessTimestampFrame(std::uint32_t frameSlot, VkFence fence);
+	void CompletePostProcessTimestampDeviceIdle();
+	void ResolvePostProcessTimestampSlot(PostProcessTimestampSlot& slot);
+	void DestroyPostProcessTimestampQueries() noexcept;
+	std::vector<TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample> GetCompletedPostProcessTimings() const;
 	void DestroyGpuTimestampQueries();
 	void ResolveCompletedGpuTimestamps(uint32_t frameIndex);
 	void MarkGpuTimestampBegin(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view, std::uint64_t frameId);
@@ -2119,7 +2315,8 @@ struct VulkanContext::Impl {
 	void RetireVulkanAnimationFrameResources(VulkanAnimationFrameResources& resources);
 	void RetireVulkanCpuAnimationFrameResources(
 		VulkanCpuAnimationFrameResources& resources);
-	bool CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+	bool CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size,
+		VkAccessFlags destinationAccess = 0, VkPipelineStageFlags destinationStage = 0);
 	VkCommandBuffer BeginSingleTimeCommands();
 	bool EndSingleTimeCommands(VkCommandBuffer commandBuffer, std::string_view operation = "immediate command");
 	bool TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = VK_REMAINING_MIP_LEVELS, uint32_t arrayLayers = 1u);
@@ -2135,6 +2332,31 @@ struct VulkanContext::Impl {
 		bool preserveAliasesForReplacement = false);
 	void InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate = true);
 	void EnsureMesh(TerraEngine::UUID meshId);
+	// Protected candidate preparation only. This may upload/wait once; ordinary
+	// automatic scene draws never call it. Failure preserves the mesh owner.
+	bool EnsureIndexedCornerMesh(TerraEngine::UUID meshId,
+		std::shared_ptr<const TerraEngine::Renderer::Vulkan::IndexedCornerGeometry> prepared,
+		std::string& reason);
+	std::optional<VulkanRasterPipelineConfiguration> PrepareDefaultIndexedPipelineConfiguration(
+		VkRenderPass pass, VkSampleCountFlagBits samples, std::string& reason);
+	bool RegisterIndexedSingleSamplePass(VkRenderPass pass);
+	// Protected candidate registration only; no ordinary/default pass is changed.
+	bool RegisterIndexedScreenSpacePass(std::shared_ptr<const TerraEngine::Renderer::Vulkan::ScreenSpaceRasterResources> raster, std::string& reason);
+	// Call only after actual completion, before releasing the retained raster.
+	bool RemoveIndexedScreenSpacePass(const std::shared_ptr<const TerraEngine::Renderer::Vulkan::ScreenSpaceRasterResources>& raster, std::string& reason);
+	VkRenderPass EnsureIndexedMsaaRenderPass(std::string& reason);
+	bool SupportsIndexedMsaa4(VkFormat colorFormat);
+	bool PrepareIndexedMsaaTargets(const OffscreenResources& source,
+		TerraEngine::Renderer::Vulkan::PostProcessPassResources& passes, std::string& reason);
+	// Worker topology preparation can defer this protected device candidate
+	// until a later frame. A terminal failure never publishes a partial view.
+	bool PrepareIndexedRasterView(const TerraEngine::Renderer::RenderFramePublication& publication,
+		std::uint32_t viewIndex, VkRenderPass pass, VkSampleCountFlagBits samples,
+		VulkanRasterPipelineConfiguration& configuration, std::string& reason, bool& preparationPending);
+	bool PrepareIndexedTemporalVariants(const TerraEngine::Renderer::RenderFramePublication& publication,
+		std::uint32_t viewIndex, VkRenderPass rasterPass, const VulkanRasterPipelineConfiguration& indexed,
+		TerraEngine::Renderer::Vulkan::PostProcessPassResources& passes, std::string& reason);
+
 	// Protected native preparation publishes an all-or-owner-fallback binding
 	// set. Destruction requires the caller's existing descriptor-idle proof.
 	TerraEngine::Renderer::Vulkan::PreparedShadowPageSet EnsureShadowAuthoredPagePayload(
@@ -2143,9 +2365,11 @@ struct VulkanContext::Impl {
 	std::optional<PipelineKey> BuildPipelineKey(
 		TerraEngine::UUID shaderCollectionId,
 		uint32_t materialFlags,
-		bool usesConventionalVisibilityIdentity = false) const;
+		bool usesConventionalVisibilityIdentity = false,
+		const VulkanRasterPipelineConfiguration& raster = {}) const;
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass,
-		uint32_t materialFlags, bool usesConventionalVisibilityIdentity = false);
+		uint32_t materialFlags, bool usesConventionalVisibilityIdentity = false,
+		const VulkanRasterPipelineConfiguration& raster = {});
 	bool UsesConventionalVisibilityAttachments(VkRenderPass pass) const;
 	bool CreateConventionalVisibilityIdentityAttachment(
 		VkExtent2D extent, ConventionalVisibilityIdentityAttachment& attachment);
@@ -2156,7 +2380,8 @@ struct VulkanContext::Impl {
 	VkDescriptorType MapDescriptorType(DescriptorType type);
 	VkShaderStageFlags StageVisibilityToVulkan(StageVisibilityMask visibility);
 	void DestroyPipelines();
-	bool BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants);
+	bool BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants,
+		VkShaderStageFlags fallbackGeometryStages = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT);
 	void EnsureWorkerPools(uint32_t frameIndex, size_t workerCount);
 	VkCommandBuffer AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex);
 	VkCommandBuffer AcquirePrimaryCommandBuffer(uint32_t frameIndex);

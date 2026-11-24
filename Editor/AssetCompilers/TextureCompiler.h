@@ -28,7 +28,11 @@ enum class TextureFilterType {
 	Kaiser
 };
 
-bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality = 1, bool generateMipmaps = true, TextureFilterType filter = TextureFilterType::Lanczos, TextureCompileProgressCallback progressCallback = {});
+// The UASTC source container remains unchanged. This selects the existing
+// loader's GPU transcode target; RGBA8 data avoids BC7 block quantization.
+enum class TextureStorageFormat : std::uint32_t { BC7, RGBA8 };
+
+bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality = 1, bool generateMipmaps = true, TextureFilterType filter = TextureFilterType::Lanczos, TextureCompileProgressCallback progressCallback = {}, TextureStorageFormat storageFormat = TextureStorageFormat::BC7);
 
 // Compiles image bytes extracted from a package. The source extension tells the
 // existing stb-backed loader how to decode the staged bytes.
@@ -40,7 +44,8 @@ bool CompileTextureFromBytes(
 	std::uint32_t quality = 1,
 	bool generateMipmaps = true,
 	TextureFilterType filter = TextureFilterType::Lanczos,
-	TextureCompileProgressCallback progressCallback = {});
+	TextureCompileProgressCallback progressCallback = {},
+	TextureStorageFormat storageFormat = TextureStorageFormat::BC7);
 
 // Exposes the texture compiler's worker-count policy to focused tests so MCP
 // package imports cannot accidentally return to all-core compression bursts.

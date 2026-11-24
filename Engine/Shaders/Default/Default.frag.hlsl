@@ -1,3 +1,14 @@
+// Surface inputs always preserve the conventional typed visibility target.
+// Macro-off builds retain the original descriptor, push and output ABI.
+#if defined(TERRAENGINE_SCREEN_SPACE_OMIT_LEGACY_AO) && !defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+#error TERRAENGINE_SCREEN_SPACE_OMIT_LEGACY_AO requires TERRAENGINE_SCREEN_SPACE_INPUTS
+#endif
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS) && !defined(TERRAENGINE_VULKAN_CONVENTIONAL_VISIBILITY_IDENTITY)
+#define TERRAENGINE_VULKAN_CONVENTIONAL_VISIBILITY_IDENTITY
+#endif
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+#include "DefaultScreenSpaceInputs.hlsli"
+#endif
 [[vk::binding(0, 0)]] Texture2D globalTextures[];
 [[vk::binding(0, 0)]] SamplerState globalSamplers[];
 
@@ -635,7 +646,11 @@ float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, 
 	return float3(0.0, 0.0, 0.0);
 }
 
-float3 EvaluateIBL(FrameCullingData frame, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness, float ambientOcclusion)
+float3 EvaluateIBL(FrameCullingData frame, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness, float ambientOcclusion
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+	, inout DefaultScreenSpaceInputs screenInputs
+#endif
+)
 {
 	const float globalIndirectStrength = saturate(frame.renderSettings2.x / 8.0f) * 8.0f;
 	if (globalIndirectStrength <= 0.0f)
@@ -653,6 +668,18 @@ float3 EvaluateIBL(FrameCullingData frame, float3 normal, float3 viewDir, float3
 	const float reflectionWeight = pow(saturate(reflectDir.y * 0.5f + 0.5f), lerp(1.0f, 0.25f, saturate(roughness)));
 	const float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, saturate(metallic));
 	const float3 specular = f0 * irradiance * reflectionWeight * (1.0f - 0.65f * saturate(roughness));
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+	// Factor only this existing environment contribution. Local-light indirect
+	// remains in the HDR color and is never silently replaced a second time.
+	// Incident terms contain no receiving albedo/F0/AO; copied material weights
+	// carry those exactly once for HDR + weight*(replacement - fallback).
+	screenInputs.environmentIncident = irradiance * reflectionWeight;
+	screenInputs.diffuseIncident = irradiance;
+	screenInputs.environmentWeight = f0 * (1.0f - 0.65f * saturate(roughness))
+		* globalIndirectStrength * ambientOcclusion;
+	screenInputs.diffuseWeight = albedo * (1.0f - saturate(metallic)) / kPi
+		* globalIndirectStrength * ambientOcclusion;
+#endif
 	return (diffuse + specular) * globalIndirectStrength * ambientOcclusion;
 }
 
@@ -898,8 +925,17 @@ float4 SampleTerrainLayerBlend(MaterialData mat, float2 terrainUv)
 float4 ShadeDefaultSurface(
 	PSIn input,
 	uint stablePrimitiveId,
-	PushConstants uniforms)
+	PushConstants uniforms
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+	, out DefaultScreenSpaceInputs screenInputs
+#endif
+)
 {
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+	// Early shadow/debug/fallback paths have no replaceable lighting. Unlit
+	// geometry receives a real sampled normal below but no invented IBL terms.
+	screenInputs = (DefaultScreenSpaceInputs)0;
+#endif
 	const MaterialData mat = allMaterials[uniforms.materialIndex];
 	const float2 uv = input.uv * mat.UVTransform.xy + mat.UVTransform.zw;
 
@@ -955,6 +991,17 @@ float4 ShadeDefaultSurface(
 	}
 	const float3 emissive = emissiveSample * mat.EmissiveFactor.rgb;
 
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+	const float3 sampledWorldNormal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale, input.tangent);
+	const float3 sampledViewNormal = mul((float3x3)frame.viewMatrix, sampledWorldNormal);
+	const float viewNormalLengthSquared = dot(sampledViewNormal, sampledViewNormal);
+	if (all(isfinite(sampledViewNormal)) && viewNormalLengthSquared > 1e-8f)
+	{
+		// The exact existing frame buffer already supplies the view rotation;
+		// no approximation from screen derivatives or camera position is needed.
+		screenInputs.viewNormalRoughness = float4(sampledViewNormal * rsqrt(viewNormalLengthSquared), roughness);
+	}
+#endif
 	if (mat.ShadingModel == kShadingModel_Unlit)
 	{
 		return float4(ApplyEditorTint(finalColor.rgb + emissive, uniforms.editorTint), finalColor.a);
@@ -1051,21 +1098,67 @@ float4 ShadeDefaultSurface(
 		float screenOcclusion = 1.0f;
 		if (aoQualityEnabled > 0.5f)
 		{
+#if !defined(TERRAENGINE_SCREEN_SPACE_OMIT_LEGACY_AO)
 			screenOcclusion = SampleScreenAmbientOcclusion(input, frame);
+#endif
 		}
+		// The enhanced-AO MRT producer omits ONLY the old screen texture. Keep
+		// authored material occlusion, strength and the existing AO-quality gate
+		// unchanged in the original HDR and both factored material weights. The
+		// later composite can then apply enhanced screen visibility exactly once.
 		const float indirectOcclusion = lerp(1.0f, authoredOcclusion * screenOcclusion, saturate(aoStrength) * aoQualityEnabled);
-		finalLighting += EvaluateIBL(frame, normal, viewDir, finalColor.rgb, metallic, roughness, indirectOcclusion);
+		finalLighting += EvaluateIBL(frame, normal, viewDir, finalColor.rgb, metallic, roughness, indirectOcclusion
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+			, screenInputs
+#endif
+		);
 	}
 
 	float3 outputColor = finalLighting + emissive;
 	if (!all(isfinite(outputColor)))
 	{
 		outputColor = finalColor.rgb;
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+		// The established safe albedo fallback replaced the complete lighting;
+		// its auxiliary targets must not resurrect the discarded IBL afterward.
+		screenInputs.environmentIncident = 0;
+		screenInputs.diffuseIncident = 0;
+		screenInputs.environmentWeight = 0;
+		screenInputs.diffuseWeight = 0;
+#endif
 	}
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+	// Editor tint lerps the complete HDR result, so only its untinted fraction
+	// is replaceable. Suppress channels discarded by the existing nonnegative
+	// clamp; adding a replacement there would undo the original safety policy.
+	float3 replaceable = float3(outputColor.x >= 0 ? 1 : 0,
+		outputColor.y >= 0 ? 1 : 0, outputColor.z >= 0 ? 1 : 0);
+	float tintRemainder = 1.0f - saturate(uniforms.editorTint.a);
+	if (!all(isfinite(uniforms.editorTint)) || !isfinite(tintRemainder)) tintRemainder = 0;
+	screenInputs.environmentWeight *= replaceable * tintRemainder;
+	screenInputs.diffuseWeight *= replaceable * tintRemainder;
+#endif
 	return float4(ApplyEditorTint(max(outputColor, float3(0.0f, 0.0f, 0.0f)), uniforms.editorTint), finalColor.a);
 }
 
 #if !defined(TERRAENGINE_DEFAULT_SURFACE_LIBRARY)
+#if defined(TERRAENGINE_SCREEN_SPACE_INPUTS)
+DefaultScreenSpaceOutput main(PSIn input, nointerpolation uint stablePrimitiveId : TEXCOORD6)
+{
+	DefaultScreenSpaceInputs screenInputs;
+	const float4 shaded = ShadeDefaultSurface(input, stablePrimitiveId, SceneUniforms, screenInputs);
+	const ConventionalVisibilityOutput visible = MakeConventionalVisibilityOutput(shaded, stablePrimitiveId, input.objectIdentity);
+	DefaultScreenSpaceOutput output;
+	output.color = visible.color;
+	output.identity = visible.identity;
+	output.viewNormalRoughness = screenInputs.viewNormalRoughness;
+	output.environmentIncident = float4(screenInputs.environmentIncident, 0);
+	output.diffuseIncident = float4(screenInputs.diffuseIncident, 0);
+	output.environmentWeight = float4(screenInputs.environmentWeight, 0);
+	output.diffuseWeight = float4(screenInputs.diffuseWeight, 0);
+	return output;
+}
+#else
 TERRAENGINE_CONVENTIONAL_OUTPUT main(
 	PSIn input,
 	nointerpolation uint stablePrimitiveId : TEXCOORD6)
@@ -1075,4 +1168,5 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 		input, stablePrimitiveId, SceneUniforms);
 	TERRAENGINE_CONVENTIONAL_RETURN(shaded, stablePrimitiveId);
 }
+#endif
 #endif

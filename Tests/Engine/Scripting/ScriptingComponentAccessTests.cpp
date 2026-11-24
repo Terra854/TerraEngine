@@ -18,6 +18,8 @@
 #include "Scripting/ScriptGlue.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -317,6 +319,41 @@ namespace TerraEngine::Tests {
 				"An unknown graphics ABI must be rejected before it can enter the runtime settings queue.");
 			context.Expect(Native_Graphics_SubmitRuntimeQualityPreset(99U) == NativeGraphicsStatus::InvalidPreset,
 				"Unknown quality presets should be rejected without changing renderer state.");
+		});
+
+		registry.Add("Scripting.GraphicsAbi.LegacyRejectedHeadersPreserveCallerBufferAndGeneration", [](TestContext& context) {
+			// Existing managed assemblies allocate exactly this record. Rejected
+			// headers must never let a read or submit alter its bytes or renderer state.
+			struct BoundedPacket
+			{
+				std::uint64_t before = 0x123456789abcdef0ull;
+				NativeGraphicsRenderSettings settings{};
+				std::uint64_t after = 0x0fedcba987654321ull;
+			};
+			const auto generation = Native_Graphics_GetRuntimeSettingsGeneration();
+			for(const auto size : {0u, 119u, 121u})
+			{
+				BoundedPacket packet;
+				packet.settings.header = {kNativeGraphicsAbiVersion, size};
+				packet.settings.shadowResolution = 1234u;
+				std::array<std::uint8_t, sizeof(BoundedPacket)> original{};
+				std::memcpy(original.data(), &packet, original.size());
+				context.Expect(Native_Graphics_ReadRenderSettings(&packet.settings) == NativeGraphicsStatus::VersionMismatch
+					&& Native_Graphics_SubmitRuntimeRenderSettings(&packet.settings) == NativeGraphicsStatus::VersionMismatch,
+					"Every incorrect v1 buffer size must reject before reading or queuing payload fields.");
+				context.Expect(std::memcmp(original.data(), &packet, original.size()) == 0,
+					"Rejected v1 calls must preserve the complete caller packet and its adjacent canaries.");
+			}
+			context.Expect(Native_Graphics_ReadRenderSettings(nullptr) == NativeGraphicsStatus::InvalidArgument
+				&& Native_Graphics_SubmitRuntimeRenderSettings(nullptr) == NativeGraphicsStatus::InvalidArgument,
+				"The v1 bridge must retain its explicit null-pointer result contract.");
+			context.Expect(Native_Graphics_SubmitRuntimeQualityPreset(static_cast<std::uint32_t>(QualityPreset::Custom))
+				== NativeGraphicsStatus::InvalidPreset,
+				"The legacy Custom sentinel must retain its documented nonselectable preset behavior.");
+			context.ExpectEqual(generation, Native_Graphics_GetRuntimeSettingsGeneration(),
+				"Rejected legacy packets and preset sentinels must not advance the published renderer revision.");
+			context.ExpectEqual(std::size_t{8}, alignof(NativeGraphicsRenderSettings),
+				"The legacy 64-bit budget must continue to require the managed Pack=8 alignment.");
 		});
 
 		registry.Add("Scripting.GraphicsApi.ManagedSurfaceMatchesNativeFoundation", [](TestContext& context) {

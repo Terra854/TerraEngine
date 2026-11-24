@@ -35,6 +35,11 @@
 #endif
 
 #include "Core/MainEngine.h"
+#if defined(TERRAENGINE_POST_PROCESS_COLOR_FIXTURE) && TERRAENGINE_POST_PROCESS_COLOR_FIXTURE
+#include "PostProcessColorRuntimeFixture.h"
+#include "PostProcessAuthoringRuntimeFixture.h"
+#include "PostProcessTemporalRuntimeFixture.h"
+#endif
 
 // The launcher is always the export entry point, so it always carries the
 // path-configuration helpers needed by the export runtime.
@@ -440,6 +445,26 @@ int main(int argc, char *argv[])
 		// archive, while validation mode mounts it here and exits before creating
 		// any renderer-owned window or GPU resources.
 		ConfigureExportBootstrap(argc > 0 ? argv[0] : nullptr);
+
+#if defined(TERRAENGINE_POST_PROCESS_COLOR_FIXTURE) && TERRAENGINE_POST_PROCESS_COLOR_FIXTURE
+		// Validation uses the normal packaged mount and scheduler. It is absent
+		// from production launchers and creates no gameplay capture interface.
+		if (HasArgument(argc, argv, "--validate-postprocess-color")) {
+			if(argc != 3 || std::strcmp(argv[1], "--validate-postprocess-color") != 0)
+				throw std::runtime_error("Usage: --validate-postprocess-color <evidence-directory>");
+			return TerraEngine::Tests::RunPostProcessColorRuntimeFixture(fs::u8path(argv[2]));
+		}
+		if (HasArgument(argc, argv, "--validate-postprocess-authoring")) {
+			if(argc != 3 || std::strcmp(argv[1], "--validate-postprocess-authoring") != 0)
+				throw std::runtime_error("Usage: --validate-postprocess-authoring <evidence-directory>");
+			return TerraEngine::Tests::RunPostProcessAuthoringRuntimeFixture(fs::u8path(argv[2]));
+		}
+		if (HasArgument(argc, argv, "--observe-postprocess-temporal")) {
+			if(argc != 3 || std::strcmp(argv[1], "--observe-postprocess-temporal") != 0)
+				throw std::runtime_error("Usage: --observe-postprocess-temporal <evidence-directory>");
+			return TerraEngine::Tests::RunPostProcessTemporalRuntimeFixture(fs::u8path(argv[2]));
+		}
+#endif
 
 		if (HasArgument(argc, argv, "--validate-export-bootstrap")) {
 			ResourceManager::Instance().Initialize();

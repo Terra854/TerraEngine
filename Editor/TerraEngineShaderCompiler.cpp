@@ -50,6 +50,7 @@ namespace
 		std::string stage;
 		std::string targetProfile;
 		std::filesystem::path dxcPathOverride;
+		ShaderUse shaderUse = ShaderUse::Surface;
 	};
 
 	std::string EscapeJson(const std::string& value)
@@ -132,6 +133,14 @@ namespace
 				if(!ReadCommandText(argv[++i], args.targetProfile)) return false;
 			}
 
+			else if(flag == "--shader-use" && i + 1 < argc)
+			{
+				std::string value;
+				if(!ReadCommandText(argv[++i], value)) return false;
+				if(value == "surface") args.shaderUse = ShaderUse::Surface;
+				else if(value == "post-process") args.shaderUse = ShaderUse::PostProcess;
+				else { std::cerr << "Unsupported --shader-use; expected surface or post-process.\n"; return false; }
+			}
 			else if(flag == "--dxc" && i + 1 < argc)
 			{
 				args.dxcPathOverride = std::filesystem::path(argv[++i]);
@@ -146,7 +155,7 @@ namespace
 
 		if(args.input.empty() || args.output.empty() || args.stage.empty())
 		{
-			std::cerr << "Usage: TerraEngineShaderCompiler -i <input.hlsl> -o <output.tspf> -s <vs|ps|cs|gs|hs|ds|ms|ts>\n";
+			std::cerr << "Usage: TerraEngineShaderCompiler -i <input.hlsl> -o <output.tspf> -s <vs|ps|cs|gs|hs|ds|ms|ts> [--shader-use surface|post-process]\n";
 			return false;
 		}
 
@@ -196,7 +205,7 @@ int main(int argc, char** argv)
 
 
 	EmitProgress(0.05f, "Shader Compile", "Compiling shader source with DXC.");
-	if(CompileShader(args.input, args.output, args.stage, args.targetProfile, args.entryPoint, dxcPath))
+	if(CompileShader(args.input, args.output, args.stage, args.targetProfile, args.entryPoint, dxcPath, args.shaderUse))
 	{
 		EmitProgress(0.98f, "Shader Done", "Shader compile output is ready.");
 		std::cout << "Wrote TSPF: " << std::quoted(outputText) << "\n";

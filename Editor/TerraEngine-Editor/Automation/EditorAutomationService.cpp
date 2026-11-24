@@ -72,6 +72,7 @@
 #include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/ShaderCollection.h"
 #include "../Core/EditorSystem.h"
@@ -104,6 +105,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/geometric.hpp>
@@ -125,6 +127,119 @@ namespace TerraEngine::Editor::Automation
 	namespace
 	{
 		using AutomationOperationId = std::uint64_t;
+
+		// Scene settings use an editor-owned output lifetime, never a fabricated
+		// authored camera. Wide identities stay decimal strings across JSON clients.
+		namespace SceneGraphics = TerraEngine::Renderer::GraphicsSettings;
+		bool ParseSceneGraphicsWide(const nlohmann::json& value, std::uint64_t& output)
+		{
+			if (!value.is_string()) return false;
+			const auto& text = value.get_ref<const std::string&>();
+			if (text.empty() || (text.size() > 1 && text.front() == '0')) return false;
+			std::uint64_t candidate = 0;
+			const auto result = std::from_chars(text.data(), text.data() + text.size(), candidate);
+			if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) return false;
+			output = candidate;
+			return true;
+		}
+		bool ParseSceneGraphicsUnsigned(const nlohmann::json& value, std::uint32_t& output)
+		{
+			if (!value.is_number_integer() || (value.is_number_integer() && !value.is_number_unsigned() && value.get<std::int64_t>() < 0)) return false;
+			const auto candidate = value.get<std::uint64_t>();
+			if (candidate > std::numeric_limits<std::uint32_t>::max()) return false;
+			output = static_cast<std::uint32_t>(candidate);
+			return true;
+		}
+		nlohmann::json SerializeSceneGraphicsLifecycle(const SceneGraphics::GraphicsLifecycleStamp& stamp)
+		{
+			return {{"projectGeneration", std::to_string(stamp.projectGeneration)},
+				{"playSessionGeneration", std::to_string(stamp.playSessionGeneration)},
+				{"rendererSessionGeneration", std::to_string(stamp.rendererSessionGeneration)},
+				{"backendResourceGeneration", std::to_string(stamp.backendResourceGeneration)}};
+		}
+		nlohmann::json SerializeSceneGraphicsView(const SceneGraphics::GraphicsViewIdentity& view)
+		{
+			return {{"outputKind", static_cast<std::uint32_t>(view.outputKind)}, {"viewType", static_cast<std::uint32_t>(view.viewType)},
+				{"outputId", view.outputId}, {"lifetimeGeneration", std::to_string(view.lifetimeGeneration)}};
+		}
+		nlohmann::json SerializeSceneGraphicsSnapshot(const std::shared_ptr<const SceneGraphics::GraphicsSettingsSnapshot>& snapshot)
+		{
+			if (!snapshot) return nullptr;
+			nlohmann::json values = nlohmann::json::array();
+			for (const auto& setting : snapshot->values)
+			{
+				// Keep this projection restricted to the typed Scene View controls.
+				if (setting.id != SceneGraphics::GraphicsSettingId::AntiAliasingMode && setting.id != SceneGraphics::GraphicsSettingId::FixedExposureCompensation
+					&& setting.id != SceneGraphics::GraphicsSettingId::ExposureMode && setting.id != SceneGraphics::GraphicsSettingId::ToneMappingMode
+					&& setting.id != SceneGraphics::GraphicsSettingId::GeometryRasterMode) continue;
+				std::visit([&](const auto& value) {
+					using Value = std::decay_t<decltype(value)>;
+					if constexpr (std::is_same_v<Value, std::uint32_t> || std::is_same_v<Value, float>)
+						values.push_back({{"id", static_cast<std::uint32_t>(setting.id)}, {"value", value}});
+				}, setting.value);
+			}
+			return {{"revision", std::to_string(snapshot->revision)}, {"publishedFrameId", std::to_string(snapshot->publishedFrameId)}, {"values", std::move(values)}};
+		}
+		nlohmann::json SerializeSceneGraphicsReceipt(const SceneGraphics::GraphicsRequestReceipt& receipt)
+		{
+			nlohmann::json ids = nlohmann::json::array();
+			for (const auto id : receipt.affectedSettings) ids.push_back(static_cast<std::uint32_t>(id));
+			return {{"affectedScope", "EditorSceneView"}, {"graphicsRequestId", std::to_string(receipt.requestId)},
+				{"sequence", std::to_string(receipt.sequence)}, {"state", static_cast<std::uint32_t>(receipt.state)},
+				{"activation", static_cast<std::uint32_t>(receipt.activation)}, {"reason", static_cast<std::uint32_t>(receipt.reason)},
+				{"detail", receipt.detail}, {"affectedSettings", std::move(ids)},
+				{"requestedRevision", std::to_string(receipt.requestedRevision)}, {"effectiveRevision", std::to_string(receipt.effectiveRevision)},
+				{"appliedFrameId", std::to_string(receipt.appliedFrameId)}};
+		}
+		bool ParseSceneGraphicsRequest(const nlohmann::json& args, SceneGraphics::GraphicsLifecycleStamp& lifecycle,
+			SceneGraphics::GraphicsViewIdentity& view, SceneGraphics::GraphicsRevision& revision,
+			std::vector<SceneGraphics::GraphicsSettingValue>& values)
+		{
+			if (!args.contains("lifecycle") || !args["lifecycle"].is_object() || args["lifecycle"].size() != 4
+				|| !args.contains("view") || !args["view"].is_object() || args["view"].size() != 4
+				|| !args.contains("baseRevision") || !ParseSceneGraphicsWide(args["baseRevision"], revision)
+				|| !args.contains("values") || !args["values"].is_array() || args["values"].empty() || args["values"].size() > 5) return false;
+			const auto& stamp = args["lifecycle"];
+			const auto read = [](const nlohmann::json& object, const char* key, std::uint64_t& output) {
+				return object.contains(key) && ParseSceneGraphicsWide(object[key], output);
+			};
+			if (!read(stamp, "projectGeneration", lifecycle.projectGeneration) || !read(stamp, "playSessionGeneration", lifecycle.playSessionGeneration)
+				|| !read(stamp, "rendererSessionGeneration", lifecycle.rendererSessionGeneration) || !read(stamp, "backendResourceGeneration", lifecycle.backendResourceGeneration)) return false;
+			const auto& target = args["view"];
+			std::uint32_t kind = 0, type = 0;
+			if (!target.contains("outputKind") || !ParseSceneGraphicsUnsigned(target["outputKind"], kind)
+				|| !target.contains("viewType") || !ParseSceneGraphicsUnsigned(target["viewType"], type)
+				|| !target.contains("outputId") || !ParseSceneGraphicsUnsigned(target["outputId"], view.outputId)
+				|| !read(target, "lifetimeGeneration", view.lifetimeGeneration)
+				|| kind != static_cast<std::uint32_t>(RenderOutputKind::SceneView) || type != static_cast<std::uint32_t>(RenderViewType::Scene)) return false;
+			view.outputKind = static_cast<RenderOutputKind>(kind); view.viewType = static_cast<RenderViewType>(type);
+			std::vector<SceneGraphics::GraphicsSettingValue> candidate;
+			for (const auto& item : args["values"])
+			{
+				std::uint32_t id = 0;
+				if (!item.is_object() || item.size() != 2 || !item.contains("id") || !ParseSceneGraphicsUnsigned(item["id"], id) || !item.contains("value")) return false;
+				const auto typed = static_cast<SceneGraphics::GraphicsSettingId>(id);
+				if (std::any_of(candidate.begin(), candidate.end(), [typed](const auto& value) { return value.id == typed; })) return false;
+				if (typed == SceneGraphics::GraphicsSettingId::FixedExposureCompensation)
+				{
+					if (!item["value"].is_number()) return false;
+					const double scalar = item["value"].get<double>();
+					if (!std::isfinite(scalar) || std::abs(scalar) > std::numeric_limits<float>::max()) return false;
+					candidate.push_back({typed, static_cast<float>(scalar)});
+				}
+				else
+				{
+					if (typed != SceneGraphics::GraphicsSettingId::AntiAliasingMode && typed != SceneGraphics::GraphicsSettingId::ExposureMode
+						&& typed != SceneGraphics::GraphicsSettingId::ToneMappingMode && typed != SceneGraphics::GraphicsSettingId::GeometryRasterMode) return false;
+					std::uint32_t value = 0;
+					if (!ParseSceneGraphicsUnsigned(item["value"], value)) return false;
+					candidate.push_back({typed, value});
+				}
+			}
+			values = std::move(candidate);
+			return true;
+		}
+
 
 		bool ResolveContainedAutomationPath(const std::filesystem::path& root,
 			const std::filesystem::path& candidate, std::filesystem::path& resolved)
@@ -889,6 +1004,41 @@ namespace TerraEngine::Editor::Automation
 			return request;
 		}
 
+		std::optional<TerraEngine::Renderer::RenderCaptureImageStage> ParseCaptureImageStage(std::string_view value)
+		{
+			using Stage = TerraEngine::Renderer::RenderCaptureImageStage;
+			if(value == "legacy") return Stage::Legacy;
+			if(value == "raw") return Stage::Raw;
+			if(value == "processed") return Stage::Processed;
+			if(value == "composited") return Stage::Composited;
+			return std::nullopt;
+		}
+
+		const char* CaptureImageStageJson(TerraEngine::Renderer::RenderCaptureImageStage stage)
+		{
+			using Stage = TerraEngine::Renderer::RenderCaptureImageStage;
+			switch(stage)
+			{
+			case Stage::Legacy: return "legacy";
+			case Stage::Raw: return "raw";
+			case Stage::Processed: return "processed";
+			case Stage::Composited: return "composited";
+			default: return "unknown";
+			}
+		}
+
+		const char* CaptureColorEncodingJson(TerraEngine::Renderer::RenderCaptureColorEncoding encoding)
+		{
+			using Encoding = TerraEngine::Renderer::RenderCaptureColorEncoding;
+			switch(encoding)
+			{
+			case Encoding::Legacy: return "legacy";
+			case Encoding::Linear: return "linear";
+			case Encoding::Srgb: return "srgb";
+			default: return "unknown";
+			}
+		}
+
 		nlohmann::json BuildCaptureSuccessEnvelope(const EditorAutomationService& service, std::string_view requestId, const TerraEngine::Renderer::RenderCaptureResult& capture)
 		{
 			nlohmann::json source = {
@@ -908,6 +1058,10 @@ namespace TerraEngine::Editor::Automation
 				{"overlaysIncluded", capture.overlaysIncluded},
 				{"backendReadback", capture.backendReadback},
 				{"deterministicFallback", capture.deterministicFallback},
+				{"imageStage", CaptureImageStageJson(capture.imageStage)},
+				{"sourceEncoding", CaptureColorEncodingJson(capture.sourceColorEncoding)},
+				{"deliveredEncoding", CaptureColorEncodingJson(capture.deliveredColorEncoding)},
+				{"settingsRevision", capture.graphicsSettingsRevision},
 				{"warnings", capture.warnings}
 			};
 			// Source target identity distinguishes a genuine backend resize from
@@ -3855,6 +4009,12 @@ namespace TerraEngine::Editor::Automation
 		add("settings.editor.set", "settings", MutationMode::ProjectMutation, false, false, true, "key, value");
 		for (const std::string& name : {"scene_view.state", "scene_view.camera.set", "scene_view.frame_object", "scene_view.tool.set", "scene_view.orientation.set", "scene_view.snapping.set", "scene_view.visualization.set"})
 			add(name, "scene_view", name == "scene_view.state" ? MutationMode::ReadOnly : MutationMode::EditorSelection, false, false, false, "semantic Scene View arguments");
+		add("scene_view.trace.start", "scene_view", MutationMode::EditorSelection, true, true, false, "no arguments");
+		add("scene_view.trace.stop", "scene_view", MutationMode::EditorSelection, true, true, false, "no arguments");
+		add("scene_view.trace.get", "scene_view", MutationMode::ReadOnly, true, true, false, "afterSequence?: decimal uint64 string, limit?: 1..1024");
+		add("scene_view.graphics.get", "scene_view", MutationMode::ReadOnly, true, true, false, "no arguments");
+		add("scene_view.graphics.request", "scene_view", MutationMode::EditorSelection, true, true, false, "lifecycle, view, baseRevision: decimal uint64, values: typed controls");
+		add("scene_view.graphics.receipt", "scene_view", MutationMode::ReadOnly, true, true, false, "graphicsRequestId: decimal uint64 string");
 		add("scene_view.settings.get", "scene_view", MutationMode::ReadOnly, false, false, false, "no arguments");
 		add("scene_view.settings.set", "scene_view", MutationMode::EditorSelection, false, false, true, "settings: complete validated Scene View performance document");
 		add("profiler.window.visibility.set", "profiler", MutationMode::EditorSelection, false, false, false, "visible: bool");
@@ -3897,9 +4057,10 @@ namespace TerraEngine::Editor::Automation
 		add("export.validate", "export", MutationMode::ReadOnly, true, false, false, "profile: string");
 		add("export.start", "export", MutationMode::ExportMutation, true, false, true, "profile: string, confirmOutput?: string");
 		add("export.cancel", "export", MutationMode::ExportMutation, true, false, false, "jobId: string");
-		add("game_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, format?: image/png, freshness?: latestCompleted|nextFrame, includeOverlays?: bool, transparentBackground?: bool");
-		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
-		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "camera.position: canonical cell+offset, lookAt?: canonical cell+offset, forward?: local [x,y,z], up?: local [x,y,z], projection?: perspective|orthographic");
+		add("game_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, format?: image/png, freshness?: latestCompleted|nextFrame, imageStage?: legacy|raw|processed|composited, includeOverlays?: bool, transparentBackground?: bool");
+		add("scene_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, freshness?: latestCompleted, imageStage?: legacy|raw|processed|composited");
+		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png, imageStage?: legacy|raw|processed|composited");
+		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "camera.position: canonical cell+offset, lookAt?: canonical cell+offset, forward?: local [x,y,z], up?: local [x,y,z], projection?: perspective|orthographic, imageStage?: legacy|raw|processed|composited");
 		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene|Shadow");
 		add("renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
 		add("renderer.virtualGeometry.validationRoute.set", "renderer", MutationMode::EditorSelection, false, false, false, "route: Hardware|Compute|Indexed|Hybrid");
@@ -6541,6 +6702,7 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("export.start")) return HandleExportStart(arguments, requestId);
 		if (operation == AutomationOperation("export.cancel")) return HandleExportCancel(arguments, requestId);
 		if (operation == AutomationOperation("game_view.capture")) return HandleGameViewCapture(arguments, requestId);
+		if (operation == AutomationOperation("scene_view.capture")) return HandleSceneViewCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_object")) return HandleCameraObjectCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_custom")) return HandleCustomCameraCapture(arguments, requestId);
 		if (operation == AutomationOperation("renderer.efficiency.stats")) return HandleRendererEfficiency(0, arguments, requestId);
@@ -7626,6 +7788,52 @@ namespace TerraEngine::Editor::Automation
 			if (!projects.ReadAutomationSetting(projectScope, key, value, settingError)) return BuildError(requestId, ErrorCategory::Validation, settingError);
 			return BuildSuccess(requestId, write ? "Persisted allowlisted setting." : "Read allowlisted setting.", {{"key", key}, {"value", value}, {"allowedKeys", allowedKeys}, {"persisted", write}});
 		}
+		if (IsOperationOneOf(operation, {AutomationOperation("scene_view.trace.start"), AutomationOperation("scene_view.trace.stop"), AutomationOperation("scene_view.trace.get")}))
+		{
+			if (!mainEditor) return BuildError(requestId, ErrorCategory::Unavailable, "Scene View trace owner is unavailable.");
+			std::uint64_t after = 0;
+			std::uint32_t limit = 1024;
+			if (arguments.contains("afterSequence") && !ParseSceneGraphicsWide(arguments["afterSequence"], after))
+				return BuildError(requestId, ErrorCategory::Validation, "afterSequence must be a decimal uint64 string.");
+			if (arguments.contains("limit") && (!ParseSceneGraphicsUnsigned(arguments["limit"], limit) || limit == 0 || limit > 1024))
+				return BuildError(requestId, ErrorCategory::Validation, "Trace limit must be an integer from 1 through 1024.");
+			if (operation == AutomationOperation("scene_view.trace.start")) mainEditor->StartSceneViewPresentationTrace();
+			if (operation == AutomationOperation("scene_view.trace.stop")) mainEditor->StopSceneViewPresentationTrace();
+			return BuildSuccess(requestId, "Read bounded Scene View presentation provenance.", {{"trace", mainEditor->ReadSceneViewPresentationTrace(after, limit)}});
+		}
+		if (IsOperationOneOf(operation, {AutomationOperation("scene_view.graphics.get"), AutomationOperation("scene_view.graphics.request"), AutomationOperation("scene_view.graphics.receipt")}))
+		{
+			// Reads copy immutable publications; writes enqueue a typed candidate.
+			// No worker or automation operation mutates the effective renderer state.
+			auto& renderer = RenderSystem::Instance();
+			if (operation == AutomationOperation("scene_view.graphics.receipt"))
+			{
+				std::uint64_t id = 0;
+				if (!arguments.contains("graphicsRequestId") || !ParseSceneGraphicsWide(arguments["graphicsRequestId"], id) || id == 0)
+					return BuildError(requestId, ErrorCategory::Validation, "graphicsRequestId must be a nonzero decimal uint64 string.");
+				const auto receipt = renderer.ReadSceneViewGraphicsSettingsReceipt(id);
+				if (!receipt) return BuildError(requestId, ErrorCategory::Unavailable, "Scene View request receipt is unavailable in this owner lifetime.");
+				return BuildSuccess(requestId, "Read Scene View graphics request receipt.", {{"receipt", SerializeSceneGraphicsReceipt(*receipt)}});
+			}
+			const auto state = renderer.ReadSceneViewGraphicsSettings();
+			if (!state) return BuildError(requestId, ErrorCategory::Unavailable, "Scene View graphics owner is not initialized.");
+			if (operation == AutomationOperation("scene_view.graphics.request"))
+			{
+				SceneGraphics::GraphicsLifecycleStamp lifecycle;
+				SceneGraphics::GraphicsViewIdentity view;
+				SceneGraphics::GraphicsRevision revision = 0;
+				std::vector<SceneGraphics::GraphicsSettingValue> values;
+				if (!ParseSceneGraphicsRequest(arguments, lifecycle, view, revision, values))
+					return BuildError(requestId, ErrorCategory::Validation, "Expected exact Scene output/lifecycle/revision and unique typed controls 64,65,67,72.");
+				const auto receipt = renderer.QueueSceneViewGraphicsSettings(lifecycle, view, revision, values);
+				return BuildSuccess(requestId, "Queued Scene View graphics request; effective state changes only after native publication.", {{"receipt", SerializeSceneGraphicsReceipt(receipt)}, {"affectedScope", "EditorSceneView"}});
+			}
+			return BuildSuccess(requestId, "Read transient Scene View graphics settings.", {
+				{"affectedScope", "EditorSceneView"}, {"lifecycle", SerializeSceneGraphicsLifecycle(state->lifecycle)},
+				{"view", SerializeSceneGraphicsView(state->view)}, {"revision", std::to_string(state->revision)},
+				{"spatialModeMask", state->spatialModeMask}, {"effective", SerializeSceneGraphicsSnapshot(state->effective)},
+				{"requested", SerializeSceneGraphicsSnapshot(state->requested)}});
+		}
 		if (IsOperationOneOf(operation, {
 			AutomationOperation("scene_view.state"), AutomationOperation("scene_view.settings.get"),
 			AutomationOperation("scene_view.settings.set"), AutomationOperation("scene_view.camera.set"),
@@ -7737,7 +7945,7 @@ namespace TerraEngine::Editor::Automation
 			}
 			if (!changed)
 				return BuildError(requestId, ErrorCategory::Validation, error.empty() ? "Unsupported Scene View operation." : error);
-			return BuildSuccess(requestId, "Updated Scene View state.", {{"state", sceneView->GetAutomationState()}});
+			return BuildSuccess(requestId, operation == AutomationOperation("scene_view.camera.set") ? "Queued Scene View camera input; no rendered-frame claim." : "Updated Scene View state.", {{"state", sceneView->GetAutomationState()}});
 		}
 		if (IsOperationOneOf(operation, {
 			AutomationOperation("profiler.capture.start"), AutomationOperation("profiler.capture.stop"),
@@ -8676,6 +8884,7 @@ namespace TerraEngine::Editor::Automation
 
 		std::string format = "image/png";
 		std::string freshness = "latestCompleted";
+		std::string imageStage = "legacy";
 		bool includeOverlays = false;
 		bool transparentBackground = false;
 		bool allowBackendFallback = true;
@@ -8684,6 +8893,7 @@ namespace TerraEngine::Editor::Automation
 		{
 			format = arguments.value("format", format);
 			freshness = arguments.value("freshness", freshness);
+			imageStage = arguments.value("imageStage", imageStage);
 			includeOverlays = arguments.value("includeOverlays", includeOverlays);
 			transparentBackground = arguments.value("transparentBackground", transparentBackground);
 			allowBackendFallback = arguments.value("allowBackendFallback", allowBackendFallback);
@@ -8701,6 +8911,11 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Capture freshness must be latestCompleted or nextFrame.");
 		}
+		if(!ParseCaptureImageStage(imageStage))
+			return BuildError(requestId, ErrorCategory::Validation, "Capture imageStage must be legacy, raw, processed, or composited.");
+		// An explicit native camera stage requires a real backend publication.
+		// Synthetic fallback cannot supply that stage or its encoding provenance.
+		if(imageStage != "legacy") allowBackendFallback = false;
 		if (timeoutMs == 0u)
 		{
 			timeoutMs = limits.defaultTimeoutMs;
@@ -8712,6 +8927,7 @@ namespace TerraEngine::Editor::Automation
 			{"height", *height},
 			{"format", format},
 			{"freshness", freshness},
+			{"imageStage", imageStage},
 			{"includeOverlays", includeOverlays},
 			{"transparentBackground", transparentBackground},
 			{"allowBackendFallback", allowBackendFallback},
@@ -8729,7 +8945,7 @@ namespace TerraEngine::Editor::Automation
 		{
 			return ErrorCategory::InvalidCameraObject;
 		}
-		if (category == "unsupported_readback")
+		if (category == "unsupported_readback" || category == "capture_stage_unavailable")
 		{
 			return ErrorCategory::UnsupportedReadback;
 		}
@@ -10358,6 +10574,54 @@ namespace TerraEngine::Editor::Automation
 		return BuildError(requestId, ErrorCategory::MissingTarget, "Export job was not found.", jobId);
 	}
 
+	nlohmann::json EditorAutomationService::HandleSceneViewCapture(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		const auto preliminary = ValidateCaptureArguments(arguments, requestId);
+		if(!preliminary.value("ok", false)) return preliminary;
+		if(preliminary["freshness"] != "latestCompleted")
+			return BuildError(requestId, ErrorCategory::Validation, "Scene View capture requires latestCompleted freshness.");
+		auto& renderer = RenderSystem::Instance();
+		const auto* native = dynamic_cast<VulkanContext*>(renderer.GetContext());
+		if(!native)
+			return BuildError(requestId, ErrorCategory::Unavailable, "Scene View has no native camera output to capture.");
+		const auto preview = native->GetSceneViewPostProcessPreview();
+		if(preview.frameId == 0u || preview.extent.x == 0u || preview.extent.y == 0u)
+			return BuildError(requestId, ErrorCategory::Unavailable, "Scene View has no accepted native output to capture.");
+		// Omitted dimensions sample the exact displayed image. Explicit dimensions
+		// retain normal capture resampling and carry native source provenance.
+		auto normalized = arguments;
+		if(!normalized.contains("width")) normalized["width"] = preview.extent.x;
+		if(!normalized.contains("height")) normalized["height"] = preview.extent.y;
+		if(!normalized.contains("imageStage"))
+			normalized["imageStage"] = preview.postProcessActive ? "composited" : "legacy";
+		normalized["allowBackendFallback"] = false;
+		const auto validation = ValidateCaptureArguments(normalized, requestId);
+		if(!validation.value("ok", false)) return validation;
+		TerraEngine::Renderer::RenderCaptureRequest request;
+		request.requestId = requestId;
+		request.sourceKind = TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+		request.viewType = RenderViewType::Scene;
+		request.sourceName = "Scene View";
+		request.targetSize = {validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>()};
+		request.format = validation["format"].get<std::string>();
+		request.freshness = "latestCompleted";
+		request.imageStage = *ParseCaptureImageStage(validation["imageStage"].get<std::string>());
+		request.includeOverlays = validation["includeOverlays"].get<bool>();
+		request.transparentBackground = validation["transparentBackground"].get<bool>();
+		request.allowBackendFallback = false;
+		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
+		const auto capture = renderer.CaptureImage(request);
+		if(!capture.ok)
+			return BuildError(requestId, MapCaptureFailureCategory(capture.errorCategory), capture.message);
+		auto result = BuildCaptureSuccessEnvelope(*this, requestId, capture);
+		// The backend retains GameView as its shared camera-source convention.
+		// Expose the actual selected visible surface to automation consumers.
+		result["data"]["source"]["kind"] = "sceneView";
+		result["data"]["sourceKind"] = "scene_view";
+		result["data"]["viewType"] = "Scene";
+		return result;
+	}
+
 	nlohmann::json EditorAutomationService::HandleGameViewCapture(const nlohmann::json& arguments, const std::string& requestId)
 	{
 		const nlohmann::json validation = ValidateCaptureArguments(arguments, requestId);
@@ -10373,6 +10637,7 @@ namespace TerraEngine::Editor::Automation
 		request.targetSize = size;
 		request.format = validation["format"].get<std::string>();
 		request.freshness = validation["freshness"].get<std::string>();
+		request.imageStage = *ParseCaptureImageStage(validation["imageStage"].get<std::string>());
 		request.includeOverlays = validation["includeOverlays"].get<bool>();
 		request.transparentBackground = validation["transparentBackground"].get<bool>();
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
@@ -10406,6 +10671,7 @@ namespace TerraEngine::Editor::Automation
 			nextFrameRequest.requestId = request.requestId;
 			nextFrameRequest.format = request.format;
 			nextFrameRequest.freshness = request.freshness;
+			nextFrameRequest.imageStage = request.imageStage;
 			nextFrameRequest.includeOverlays = request.includeOverlays;
 			nextFrameRequest.allowBackendFallback = request.allowBackendFallback;
 			nextFrameRequest.timeoutMs = request.timeoutMs;
@@ -10496,6 +10762,14 @@ namespace TerraEngine::Editor::Automation
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
 		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
 		request.sourceObjectId = authoredCamera->objectId;
+		// This protected authored-camera producer owns the real object handle.
+		// Copy its full lifetime so delayed capture cannot bind a recycled camera.
+		request.graphicsCamera = TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget{
+			authoredCamera->objectId, objectManager.GetSceneGeneration(),
+			objectManager.getObjectLifetimeGeneration(object),
+			objectManager.getObjectComponentGeneration(object),
+			objectManager.getObjectBindingGeneration(object)};
+		request.imageStage = *ParseCaptureImageStage(validation["imageStage"].get<std::string>());
 		const TerraEngine::Renderer::RenderCaptureResult capture = RenderSystem::Instance().CaptureImage(request);
 		if (!capture.ok)
 		{
@@ -10654,6 +10928,7 @@ namespace TerraEngine::Editor::Automation
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
 		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
 		request.cameraCanonicalPosition = position;
+		request.imageStage = *ParseCaptureImageStage(validation["imageStage"].get<std::string>());
 		// The look-at vector still has its distance here. A direction-only
 		// request supplies no editor orbit target and stays camera-centered.
 		if (captureViewType == RenderViewType::Scene && targetValue.is_object())

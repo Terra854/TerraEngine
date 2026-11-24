@@ -3731,3 +3731,40 @@ system-owned body or character transfer rejects before callbacks and retains
 source authority. Native provider transfer, connected constraint ownership, and
 rollback require a separate typed implementation; successful callback return
 values cannot claim that those owners were released.
+## Post-processing
+
+Configure an installed Windows Vulkan test tree and run the focused CPU and
+editor tests from a developer shell. Run the installed evidence tools with
+PowerShell 7.4 or later and an unlocked desktop. The installed tools create
+their own projects and require a fresh evidence path for each invocation.
+
+```powershell
+cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build --preset RelWithDebInfo --target install
+# On a multi-adapter system, set this to the exact Vulkan device name first.
+# $env:TERRAENGINE_VULKAN_REVIEW_DEVICE = '<Vulkan device name>'
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R 'GraphicsSettings|PostProcess|IndexedGeometry' --no-tests=error --output-on-failure
+
+$install = (Resolve-Path out/build/RelWithDebInfo/Build).Path
+$tools = Join-Path $install 'Tests/Tools/PostProcessing'
+$evidence = Join-Path (Get-Location) ('out/validation/post-processing/run-' + (Get-Date -Format yyyyMMdd-HHmmss))
+& "$tools/TestInstalledGraphicsSettings.ps1" -InstallRoot $install -OutputDirectory "$evidence/settings"
+& "$tools/TestInstalledGraphicsSettings.ps1" -InstallRoot $install -OutputDirectory "$evidence/spatial" -SpatialAA
+& "$tools/TestInstalledPostProcessColor.ps1" -InstallRoot $install -OutputDirectory "$evidence/color"
+& "$tools/TestInstalledPostProcessAuthoring.ps1" -InstallRoot $install -OutputDirectory "$evidence/authoring"
+& "$tools/PostProcessFoundationFixture.exe" --install-root $install --output "$evidence/foundation.json" --run-nonce ([Guid]::NewGuid().ToString('N'))
+& "$tools/TestPostProcessImageQuality.ps1" -SelfTest -SelfTestOutput "$evidence/score-selftest.json"
+```
+
+Settings receipts, completed Vulkan render timings and image quality have
+separate acceptance checks. The numerical scorer self-test checks the scorer.
+The native color suite checks GT7 against published linear reference swatches.
+The foundation fixture compares it with Filmic at matched exposure in Scene
+View and exercises the GT7 runtime output.
+The foundation fixture checks independent fog and sun-shaft switches, the
+zero-density bypass, 8-bit dither bounds and alpha, HUD order, and runtime
+swapchain dithering alongside an unaffected dedicated float capture.
+For native moving-edge captures, use the installed capture host and the
+[fixture manifest format](../Tests/Fixtures/PostProcessing/MovingEdgesFixture.md).
+The [C# settings guide](PostProcessing.md) describes the runtime API.

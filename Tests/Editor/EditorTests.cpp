@@ -199,6 +199,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterGameViewStatsOverlayTests(TestRegistry& registry);
 	void RegisterRendererRecoveryEditorTests(TestRegistry& registry);
 	void RegisterRendererRecoveryWindowTests(TestRegistry& registry);
+	void RegisterPostProcessViewTests(TestRegistry& registry);
 	void RegisterSceneViewDisplayToggleTests(TestRegistry& registry);
 	void RegisterSceneViewMarkerOverlayTests(TestRegistry& registry);
 	void RegisterSceneViewMarkerPerformanceTests(TestRegistry& registry);
@@ -511,6 +512,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterGameViewStatsOverlayTests(registry);
 	TerraEngine::EditorTests::RegisterRendererRecoveryEditorTests(registry);
 	TerraEngine::EditorTests::RegisterRendererRecoveryWindowTests(registry);
+	TerraEngine::EditorTests::RegisterPostProcessViewTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewDisplayToggleTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewMarkerOverlayTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewMarkerPerformanceTests(registry);

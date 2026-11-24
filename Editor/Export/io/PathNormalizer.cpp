@@ -240,10 +240,14 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".teterrain" || extension == ".tearea") {
 		return "terrain";
 	}
+	// Versioned post-processing asset envelopes use the checked data class.
+	if (extension == ".tepostprofile" || extension == ".teposteffect") {
+		return "data";
+	}
 
 	// Asset classes are coarse by design. They are primarily used for summaries
 	// and future policy hooks, not as a strict runtime type system.
-	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
+	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl" || extension == ".tspf") {
 		return "shader";
 	}
 

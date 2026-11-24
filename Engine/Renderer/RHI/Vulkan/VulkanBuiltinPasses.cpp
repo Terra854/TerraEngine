@@ -1,9 +1,10 @@
-// VulkanBuiltinPasses.cpp — Built-in grid, sky, and UI rendering passes
+// VulkanBuiltinPasses.cpp â€” Built-in grid, sky, and UI rendering passes
 //
 // This file owns one focused VulkanContext responsibility. State remains in VulkanContext::Impl,
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
 #include "VulkanContextSource.h"
+#include "VulkanPostProcessPasses.h"
 
 // Create Grid Pipeline for Scene View
 
@@ -249,12 +250,40 @@ struct SkyPushConstants
 };
 
 
-void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
+void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass, std::uint32_t colorAttachmentCount)
 {
-	if (skyBackgroundPipeline != VK_NULL_HANDLE)
+	// Auxiliary variants must not replace the fallback used by an ordinary
+	// camera or capture recorded later in the same protected frame.
+	struct PreserveLegacySky
 	{
+		Impl& owner;
+		VkPipeline pipeline;
+		VkPipelineLayout layout;
+		bool restore;
+		~PreserveLegacySky()
+		{
+			if(restore) { owner.skyBackgroundPipeline = pipeline; owner.skyBackgroundPipelineLayout = layout; }
+		}
+	} skySelection{*this, skyBackgroundPipeline, skyBackgroundPipelineLayout, colorAttachmentCount == 7u};
+	// A screen-space surface keeps seven logical color locations, including
+	// unused references. The blend ABI follows those locations, not image count.
+	if(colorAttachmentCount == 0u)
+		colorAttachmentCount = UsesConventionalVisibilityAttachments(renderPass) ? 2u : 1u;
+	if(colorAttachmentCount > 7u)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Unsupported sky color attachment count: " << colorAttachmentCount);
 		return;
 	}
+	if(const auto cached = skyBackgroundVariants.find(renderPass); cached != skyBackgroundVariants.end())
+	{
+		skyBackgroundPipeline = cached->second.first;
+		skyBackgroundPipelineLayout = cached->second.second;
+		return;
+	}
+	// Retain other pass variants for their in-flight command buffers. Clearing
+	// this active selection never destroys a resource still owned by that map.
+	skyBackgroundPipeline = VK_NULL_HANDLE;
+	skyBackgroundPipelineLayout = VK_NULL_HANDLE;
 
 
 	struct LoadedSkyShader
@@ -357,7 +386,8 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	VkPipelineMultisampleStateCreateInfo multisampling{};
 	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisampling.sampleShadingEnable = VK_FALSE;
-	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisampling.rasterizationSamples = renderPass == indexedMsaaRenderPass
+		? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
 	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -370,21 +400,17 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
 	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 	colorBlendAttachment.blendEnable = VK_FALSE;
-	// The sky background remains target0-only even when the scene pass includes
-	// an identity attachment. Required independentBlend lets this second slot
-	// disable both blending and writes while preserving the render-pass ABI.
-	VkPipelineColorBlendAttachmentState identityBlendAttachment{};
-	identityBlendAttachment.colorWriteMask = 0u;
-	identityBlendAttachment.blendEnable = VK_FALSE;
-	const std::array<VkPipelineColorBlendAttachmentState, 2> blendAttachments = {
-		colorBlendAttachment, identityBlendAttachment };
+	// Only HDR location zero receives sky. Identity and all optional surface
+	// inputs retain their clear values; no shader writes or blending are enabled
+	// for those slots, including VK_ATTACHMENT_UNUSED logical references.
+	std::array<VkPipelineColorBlendAttachmentState, 7> blendAttachments{};
+	blendAttachments[0] = colorBlendAttachment;
 
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
 	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	colorBlending.logicOpEnable = VK_FALSE;
-	colorBlending.attachmentCount = UsesConventionalVisibilityAttachments(renderPass) ? 2u : 1u;
-	colorBlending.pAttachments = UsesConventionalVisibilityAttachments(renderPass)
-		? blendAttachments.data() : &colorBlendAttachment;
+	colorBlending.attachmentCount = colorAttachmentCount;
+	colorBlending.pAttachments = blendAttachments.data();
 
 	std::array<VkDynamicState, 2> dynamicStates = {
 		VK_DYNAMIC_STATE_VIEWPORT,
@@ -437,6 +463,19 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyBackgroundPipeline) != VK_SUCCESS)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create sky background pipeline!");
+		vkDestroyPipelineLayout(device, skyBackgroundPipelineLayout, nullptr);
+		skyBackgroundPipelineLayout = VK_NULL_HANDLE;
+	}
+	else
+	{
+		try { skyBackgroundVariants.emplace(renderPass, std::make_pair(skyBackgroundPipeline, skyBackgroundPipelineLayout)); }
+		catch(...)
+		{
+			vkDestroyPipeline(device, skyBackgroundPipeline, nullptr);
+			vkDestroyPipelineLayout(device, skyBackgroundPipelineLayout, nullptr);
+			skyBackgroundPipeline = VK_NULL_HANDLE;
+			skyBackgroundPipelineLayout = VK_NULL_HANDLE;
+		}
 	}
 
 	vkDestroyShaderModule(device, taskShader.module, nullptr);
@@ -444,18 +483,44 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 	vkDestroyShaderModule(device, fragShader.module, nullptr);
 }
 
+void VulkanContext::Impl::RetireSkyBackgroundPipeline(VkRenderPass renderPass)
+{
+	const auto found = skyBackgroundVariants.find(renderPass);
+	if(found == skyBackgroundVariants.end()) return;
+	// The render-pass owner calls this only after its GPU completion proof.
+	if(skyBackgroundPipeline == found->second.first)
+	{
+		skyBackgroundPipeline = VK_NULL_HANDLE;
+		skyBackgroundPipelineLayout = VK_NULL_HANDLE;
+	}
+	vkDestroyPipeline(device, found->second.first, nullptr);
+	vkDestroyPipelineLayout(device, found->second.second, nullptr);
+	skyBackgroundVariants.erase(found);
+}
+
 
 void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
 	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
-	VkExtent2D renderExtent)
+	VkExtent2D renderExtent, VkRenderPass renderPassOverride)
 {
-	if (!presentation.sky.renderBackground || skyBackgroundPipeline == VK_NULL_HANDLE || skyBackgroundPipelineLayout == VK_NULL_HANDLE)
+	// The screen pass must never accidentally bind the last legacy selection.
+	// A missing exact variant fails closed; creation belongs to preparation.
+	VkPipeline selectedPipeline = skyBackgroundPipeline;
+	VkPipelineLayout selectedLayout = skyBackgroundPipelineLayout;
+	if(renderPassOverride != VK_NULL_HANDLE)
+	{
+		const auto found = skyBackgroundVariants.find(renderPassOverride);
+		if(found == skyBackgroundVariants.end()) return;
+		selectedPipeline = found->second.first;
+		selectedLayout = found->second.second;
+	}
+	if (!presentation.sky.renderBackground || selectedPipeline == VK_NULL_HANDLE || selectedLayout == VK_NULL_HANDLE)
 	{
 		return;
 	}
 
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyBackgroundPipeline);
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyBackgroundPipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
 
 	VkViewport viewport{};
 	viewport.x = 0.0f;
@@ -516,13 +581,18 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd,
 		}
 	}
 
-	vkCmdPushConstants(cmd, skyBackgroundPipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyPushConstants), &push);
+	vkCmdPushConstants(cmd, selectedLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyPushConstants), &push);
 	vkCmdDrawMeshTasksEXT(cmd, 1u, 1u, 1u);
 }
 
 // UI Rendering Implementation
 
-void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
+void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine::Renderer::Vulkan::PostProcessPassResources* outputs) {
+	// Shared immutable layouts/descriptors remain device-owned. Only the exact
+	// overlay pipelines move into its fence-retained pass resource owner.
+	VkPipeline& staticUiPipeline = outputs ? outputs->staticUiPipeline : this->staticUiPipeline;
+	VkPipeline& sdfTextPipeline = outputs ? outputs->sdfTextPipeline : this->sdfTextPipeline;
+	const bool hasIdentity = outputs ? outputs->overlayColorAttachmentCount == 2u : UsesConventionalVisibilityAttachments(renderPass);
 	auto loadShader = [&](const std::string& path) -> VkShaderModule {
 		const std::filesystem::path shaderPath = ResourceManager::Instance().ResolveEngineAssetPath(path);
 		const std::vector<std::uint8_t> shaderBytes = ResourceManager::Instance().ReadFileBytes(shaderPath);
@@ -637,8 +707,8 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
 	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	colorBlending.logicOpEnable = VK_FALSE;
-	colorBlending.attachmentCount = UsesConventionalVisibilityAttachments(renderPass) ? 2u : 1u;
-	colorBlending.pAttachments = UsesConventionalVisibilityAttachments(renderPass)
+	colorBlending.attachmentCount = hasIdentity ? 2u : 1u;
+	colorBlending.pAttachments = hasIdentity
 		? blendAttachments.data() : &colorBlendAttachment;
 
 	VkPushConstantRange pushConstantRange{};
@@ -823,18 +893,28 @@ struct UIStaticPushConstants
 };
 
 
-void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch) {
+void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch, std::uint32_t snapshotSlotIndex, const TerraEngine::Renderer::Vulkan::PostProcessPassResources* pipelines) {
+	// An explicit owner never falls back to a legacy pipeline with a different
+	// render pass or color-attachment count. Disabled rendering uses old members.
+	const VkPipeline staticUiPipeline = pipelines ? pipelines->staticUiPipeline : this->staticUiPipeline;
+	const VkPipeline sdfTextPipeline = pipelines ? pipelines->sdfTextPipeline : this->sdfTextPipeline;
 	if (batch.staticQuads.empty() && batch.immediateQuads.empty() && batch.textRuns.empty() && batch.imageRuns.empty()) return;
-	if (uiStaticVertexBuffers.size() < MAX_FRAMES_IN_FLIGHT) {
-		uiStaticVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	if(currentFrame >= MAX_FRAMES_IN_FLIGHT || snapshotSlotIndex >= MAX_RENDER_SNAPSHOTS_PER_FRAME)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "UI upload rejected an invalid frame/render snapshot slot.");
+		return;
 	}
-	if (uiSdfVertexBuffers.size() < MAX_FRAMES_IN_FLIGHT) {
-		uiSdfVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-	}
-	// BeginFrame has waited this exact slot's fence. Writing only the slot-owned
-	// buffers prevents CPU UI generation from racing a different in-flight slot.
-	VulkanBuffer& uiStaticVertexBuffer = uiStaticVertexBuffers[currentFrame];
-	VulkanBuffer& uiSdfVertexBuffer = uiSdfVertexBuffers[currentFrame];
+	// BeginFrame waits the frame fence, while RenderFrame reserves a unique
+	// snapshot for each queued view. Its exceptional forced-serialization path
+	// reuses snapshots only after a successful queue-idle proof. Combining both
+	// identities protects earlier small captures from later full-size HUD writes.
+	const std::size_t uploadSlot = static_cast<std::size_t>(currentFrame) * MAX_RENDER_SNAPSHOTS_PER_FRAME + snapshotSlotIndex;
+	// Vector entries are plain empty buffer handles; actual GPU storage is still
+	// allocated below only when this view has quad or text vertices to upload.
+	if(uiStaticVertexBuffers.size() <= uploadSlot) uiStaticVertexBuffers.resize(uploadSlot + 1u);
+	if(uiSdfVertexBuffers.size() <= uploadSlot) uiSdfVertexBuffers.resize(uploadSlot + 1u);
+	VulkanBuffer& uiStaticVertexBuffer = uiStaticVertexBuffers[uploadSlot];
+	VulkanBuffer& uiSdfVertexBuffer = uiSdfVertexBuffers[uploadSlot];
 
 	auto appendQuadVertices = [](std::vector<float>& vertices, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, const glm::vec2& uvMin, const glm::vec2& uvMax) {
 		const float x = position.x;

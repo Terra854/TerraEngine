@@ -29,6 +29,7 @@
 #include "Utilities/UUID.h"
 #include "Renderer/LightingDepthEvidence.h"
 #include "Renderer/ShadowWorkPlan.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsTypes.h"
 
 namespace TerraEngine::Animation {
 	struct AnimationAuthorityRow;
@@ -564,6 +565,14 @@ namespace TerraEngine::Renderer {
 		}
 	}
 
+	enum class RenderCaptureImageStage : std::uint8_t
+	{
+		Legacy = 0,
+		Raw,
+		Processed,
+		Composited
+	};
+
 	struct RenderCaptureRequest
 	{
 		std::string requestId;
@@ -590,6 +599,21 @@ namespace TerraEngine::Renderer {
 		// The render coordinator stamps the frame whose output the backend copies.
 		// Callers leave this zero; it is read-only correlation metadata.
 		std::uint64_t submittedFrameId = 0u;
+		// Legacy preserves existing captures. Explicit stages request a committed
+		// camera-image output and fail when that output has not been rendered.
+		RenderCaptureImageStage imageStage = RenderCaptureImageStage::Legacy;
+		// Optional protected source lifetime copied at request admission. A UUID
+		// alone cannot authorize overrides after an object/component is recreated.
+		std::optional<GraphicsSettings::GraphicsCameraTarget> graphicsCamera;
+	};
+
+	// These describe actual pixel encoding, independent from the native format.
+	// Linear input is encoded once for PNG. Legacy retains prior conversion.
+	enum class RenderCaptureColorEncoding : std::uint8_t
+	{
+		Legacy = 0,
+		Linear,
+		Srgb
 	};
 
 	// Dedicated capture views use stable output identities so the immutable frame
@@ -641,6 +665,10 @@ namespace TerraEngine::Renderer {
 		bool pendingAsync = false;
 		std::optional<RenderCaptureBackendTargetObservation> backendTarget;
 		std::vector<std::string> warnings;
+		RenderCaptureImageStage imageStage = RenderCaptureImageStage::Legacy;
+		RenderCaptureColorEncoding sourceColorEncoding = RenderCaptureColorEncoding::Legacy;
+		RenderCaptureColorEncoding deliveredColorEncoding = RenderCaptureColorEncoding::Legacy;
+		std::uint64_t graphicsSettingsRevision = 0u;
 	};
 
 	struct RenderCaptureLimits
@@ -3832,10 +3860,16 @@ struct VirtualGeometryRetainedGpuEvidence
 
 struct RenderViewBuildState
 {
+	// Copied protected camera provenance is independent from matrices and physical
+	// output IDs, which several authored cameras may share in one frame.
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget> graphicsCamera;
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsViewIdentity> graphicsView;
 	// Every view submitted from this value shares one immutable frame identity.
 	// Vulkan stamps it beside the typed visibility attachment so direct meshes
 	// can be picked without depending on virtual-geometry packet publication.
 	std::uint64_t frameId = 0u;
+	// Exact authored interactive override counter; zero denotes no such proof.
+	std::uint64_t poseSequence = 0u;
 	glm::mat4 viewMatrix;
 	glm::mat4 projectionMatrix;
 	// This identity qualifies every derived float value submitted for the view.

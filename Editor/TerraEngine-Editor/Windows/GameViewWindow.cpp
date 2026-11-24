@@ -261,7 +261,14 @@ void GameViewWindow::OnGui() {
 			// translation-unit include order for GLM_FORCE_DEPTH_ZERO_TO_ONE.
 			glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(camera->verticalFovDegrees), aspect, camera->nearPlane, camera->farPlane);
 			proj[1][1] *= -1;
-			RenderSystem::Instance().SetGameViewCamera(view, proj, pose.position);
+			// Capture real object lifetimes at this protected UI producer. The renderer
+			// revalidates this copied identity before publishing camera-scoped settings.
+			const TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget graphicsCamera{
+				objectManager.getUUID(obj), objectManager.GetSceneGeneration(),
+				objectManager.getObjectLifetimeGeneration(obj),
+				objectManager.getObjectComponentGeneration(obj),
+				objectManager.getObjectBindingGeneration(obj)};
+			RenderSystem::Instance().SetGameViewCamera(view, proj, pose.position, graphicsCamera);
 		}
 	}
 

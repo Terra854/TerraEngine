@@ -20,6 +20,10 @@
 #include "File Formats/TerraEngineAudioFile.h"
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
+#include "Resource/PostProcessProfile.h"
+#include "Resource/PostProcessEffectAsset.h"
+#include "Resource/ShaderPackage.h"
+#include "File Formats/TerraEngineShaderFile.h"
 #include "Terrain/TerrainAssetStore.h"
 #include "Engine/Utilities/OwnedProcess.h"
 #include "Runtime/ArtifactValidation.h"
@@ -29,12 +33,15 @@
 #include <chrono>
 #include <cctype>
 #include <cstddef>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <map>
+#include <set>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -577,15 +584,18 @@ static nlohmann::json ResolveRenderProfileManifest(const BuildProfile& profile, 
 		std::ifstream file(settingsPath);
 		nlohmann::json savedSettings;
 		file >> savedSettings;
-		if (auto settingsIt = savedSettings.find("settings"); settingsIt != savedSettings.end() && settingsIt->is_object()) {
+		const nlohmann::json& settings = savedSettings.contains("settings") && savedSettings["settings"].is_object()
+			? savedSettings["settings"] : savedSettings;
+		if (settings.is_object()) {
 			// Build profiles no longer own renderer quality. The export manifest
 			// records a concise product-facing summary of the authoritative
 			// project render settings so boot logs still show what was exported.
-			renderProfile["shadows"] = ShadowQualityFromSettings(*settingsIt);
-			renderProfile["ambientOcclusion"] = AmbientOcclusionQualityFromSettings(*settingsIt);
-			renderProfile["textureBudgetMb"] = settingsIt->value("textureBudgetMb", 512u);
-			renderProfile["resolutionScale"] = settingsIt->value("resolutionScale", 1.0f);
-			renderProfile["variableRateShading"] = settingsIt->value("variableRateShading", 0u) > 0u ? "enabled" : "disabled";
+			renderProfile["shadows"] = ShadowQualityFromSettings(settings);
+			renderProfile["ambientOcclusion"] = AmbientOcclusionQualityFromSettings(settings);
+			renderProfile["textureBudgetMb"] = settings.value("textureBudgetMb", 512u);
+			const float scale = settings.value("resolutionScale", 1.0f);
+			renderProfile["resolutionScale"] = std::isfinite(scale) && scale > 0.0f ? scale : 1.0f;
+			renderProfile["variableRateShading"] = settings.value("variableRateShading", 0u) > 0u ? "enabled" : "disabled";
 		}
 	}
 	catch (...) {
@@ -744,6 +754,7 @@ static void RemoveDebugSymbolFiles(const std::filesystem::path& rootDirectory) {
 struct ProjectManifestMetadata {
 	std::string name = "TerraEngine";
 	std::string version = "1.0.0";
+	std::string gameId;
 };
 
 
@@ -767,6 +778,8 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 		}
 
 		const nlohmann::json manifest = nlohmann::json::parse(input);
+		if(const auto gameId = manifest.find("gameId"); gameId != manifest.end() && gameId->is_string())
+			metadata.gameId = gameId->get<std::string>();
 
 		if (auto nameIt = manifest.find("name"); nameIt != manifest.end() && nameIt->is_string()) {
 			const std::string manifestName = nameIt->get<std::string>();
@@ -1798,6 +1811,12 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					else if(importer == "PhysicsMaterialImporter") type = AssetType::PhysicsMaterial;
 					else if(importer == "PhysicsColliderRecipeImporter" || importer == "CookedColliderImporter") type = AssetType::CookedCollider;
 					else if(importer == "AudioClipImporter") type = AssetType::AudioClip;
+					else if(importer == "PostProcessProfileImporter" || importer == "PostProcessEffectImporter") {
+						type = importer == "PostProcessProfileImporter" ? AssetType::PostProcessProfile : static_cast<AssetType>(16u);
+						const auto parsed = TerraEngine::ParseUUID(guid);
+						if(!parsed || *parsed == TerraEngine::EMPTY_UUID) { result.errorMessage = "Post-process importer metadata has an invalid asset UUID."; return false; }
+						guid = TerraEngine::ToHexString(*parsed);
+					}
 					// Terrain has no compiled single-file replacement. Its source descriptor
 					// and immutable .data tree are runtime payloads, so register the source
 					// path under the durable UUID that TerrainComponent stores.
@@ -2016,6 +2035,220 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			return false;
 		}
 
+		// Authored camera assets identify themselves, so headless project/package
+		// staging does not invent GUIDs or require an editor session to be open.
+		// Every dependency below refers to actual staged bytes, not a source path.
+		constexpr AssetType effectAssetType = static_cast<AssetType>(16u);
+		constexpr AssetType shaderStageAssetType = static_cast<AssetType>(17u);
+		std::map<TerraEngine::UUID, std::shared_ptr<const TerraEngine::Resource::PostProcessProfile>> cameraProfiles;
+		std::map<TerraEngine::UUID, std::shared_ptr<const TerraEngine::Resource::PostProcessEffectAsset>> cameraEffects;
+		auto boundedRead = [](const std::filesystem::path& path, std::size_t maximum, std::vector<std::byte>& bytes) {
+			std::ifstream input(path, std::ios::binary | std::ios::ate);
+			if(!input) return false;
+			const auto size = input.tellg();
+			if(size <= 0 || static_cast<std::uint64_t>(size) > maximum) return false;
+			std::vector<std::byte> candidate(static_cast<std::size_t>(size));
+			input.seekg(0); input.read(reinterpret_cast<char*>(candidate.data()), static_cast<std::streamsize>(candidate.size()));
+			if(!input || input.peek() != std::char_traits<char>::eof()) return false;
+			bytes.swap(candidate); return true;
+		};
+		auto checkedPackagePath = [](const std::filesystem::path& path) {
+			if(path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory()) return false;
+			for(const auto& part : path) if(part == "..") return false;
+			return !tepak::io::NormalizeLookupPath(path.generic_string()).empty();
+		};
+		for(const auto& entry : std::filesystem::recursive_directory_iterator(stagingDir)) {
+			CheckCancellation(); if(!entry.is_regular_file()) continue;
+			std::string extension = entry.path().extension().string();
+			std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+			if(extension != ".tepostprofile" && extension != ".teposteffect") continue;
+			const auto packagePath = std::filesystem::relative(entry.path(), stagingDir);
+			std::vector<std::byte> bytes;
+			const bool isProfile = extension == ".tepostprofile";
+			const auto type = isProfile ? AssetType::PostProcessProfile : effectAssetType;
+			const auto limit = isProfile ? TerraEngine::Resource::kMaximumPostProcessProfileBytes : TerraEngine::Resource::kMaximumPostProcessEffectBytes;
+			if(!checkedPackagePath(packagePath) || !boundedRead(entry.path(), limit, bytes)) {
+				result.errorMessage = "Authored post-process asset is missing, oversized, or outside its package: " + PathToUtf8(packagePath); return false;
+			}
+			TerraEngine::UUID embedded{};
+			if(isProfile) {
+				const auto decoded = TerraEngine::Resource::DeserializePostProcessProfile(bytes);
+				if(!decoded.profile) { result.errorMessage = "Invalid staged post-process profile: " + PathToUtf8(packagePath) + ". " + decoded.detail; return false; }
+				embedded = decoded.profile->assetId;
+				if(!cameraProfiles.emplace(embedded, decoded.profile).second) { result.errorMessage = "A profile UUID names multiple staged assets: " + TerraEngine::ToHexString(embedded); return false; }
+			} else {
+				const auto decoded = TerraEngine::Resource::DeserializePostProcessEffectAsset(bytes);
+				if(!decoded.effect) { result.errorMessage = "Invalid staged post-process effect: " + PathToUtf8(packagePath) + ". " + decoded.detail; return false; }
+				embedded = decoded.effect->descriptor.assetId;
+				if(!cameraEffects.emplace(embedded, decoded.effect).second) { result.errorMessage = "An effect UUID names multiple staged assets: " + TerraEngine::ToHexString(embedded); return false; }
+			}
+			const auto guid = TerraEngine::ToHexString(embedded);
+			for(const auto& old : m_StagedAssets)
+				if(tepak::io::NormalizeLookupPath(old.path) == tepak::io::NormalizeLookupPath(packagePath.generic_string()) && (old.guid != guid || old.type != type)) {
+					result.errorMessage = "Post-process metadata identity/type disagrees with the checked staged envelope: " + PathToUtf8(packagePath); return false;
+				}
+			if(!addStagedAsset(guid, type, packagePath, HashBytesForExport(bytes), bytes.size())) {
+				result.errorMessage = stagedAssetIdentityError; return false;
+			}
+		}
+		// shaderAssetId names an authored ShaderImporter identity. TSPF stores no
+		// UUID, so only actual importer metadata can associate it with a compiled
+		// fragment payload. Filename stems and collection IDs are never substitutes.
+		std::set<TerraEngine::UUID> requiredShaders;
+		for(const auto& [id, effect] : cameraEffects) { (void)id; requiredShaders.insert(effect->descriptor.shaderAssetId); }
+		std::map<TerraEngine::UUID, std::filesystem::path> shaderPackages;
+		if(!requiredShaders.empty() && std::filesystem::exists(rawAssets))
+			for(const auto& entry : std::filesystem::recursive_directory_iterator(rawAssets)) {
+				CheckCancellation(); if(!entry.is_regular_file() || entry.path().extension() != ".meta") continue;
+				nlohmann::json metadata;
+				try { std::ifstream file(entry.path()); file >> metadata; } catch(const std::exception&) { continue; }
+				if(!metadata.is_object() || metadata.value("importerName", std::string{}) != "ShaderImporter") continue;
+				const auto id = TerraEngine::ParseUUID(metadata.value("guid", std::string{}));
+				if(!id || !requiredShaders.contains(*id)) continue;
+				const std::filesystem::path packagePath = metadata.value("compiledPath", std::string{});
+				if(!checkedPackagePath(packagePath) || packagePath.extension() != ".tspf") {
+					result.errorMessage = "Referenced ShaderImporter has no safe compiled TSPF package path: " + TerraEngine::ToHexString(*id); return false;
+				}
+				const auto inserted = shaderPackages.emplace(*id, packagePath);
+				if(!inserted.second && tepak::io::NormalizeLookupPath(inserted.first->second.generic_string()) != tepak::io::NormalizeLookupPath(packagePath.generic_string())) {
+					result.errorMessage = "A shader UUID maps to conflicting compiled package paths: " + TerraEngine::ToHexString(*id); return false;
+				}
+			}
+		std::map<TerraEngine::UUID, std::shared_ptr<const Shader>> packagedShaders;
+		std::map<std::string, TerraEngine::UUID> shaderPathIdentities;
+		for(const auto& id : requiredShaders) {
+			CheckCancellation(); const auto path = shaderPackages.find(id);
+			if(path == shaderPackages.end()) {
+				result.errorMessage = "Post-process shader dependency has no ShaderImporter GUID-to-compiledPath registration: " + TerraEngine::ToHexString(id); return false;
+			}
+			const auto canonical = tepak::io::NormalizeLookupPath(path->second.generic_string());
+			const auto pathIdentity = shaderPathIdentities.emplace(canonical, id);
+			if(!pathIdentity.second && pathIdentity.first->second != id) {
+				result.errorMessage = "Distinct shader UUIDs resolve to one compiled payload path: " + PathToUtf8(path->second); return false;
+			}
+			std::vector<std::byte> bytes;
+			if(!boundedRead(stagingDir / path->second, TerraEngine::Resource::kMaximumShaderPackageBytes, bytes)) {
+				result.errorMessage = "Referenced compiled post-process shader payload is missing or oversized: " + PathToUtf8(path->second); return false;
+			}
+			std::string error;
+			auto shader = TerraEngine::Resource::DecodeShaderPackage(
+				std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()), path->second, error);
+			if(!shader || shader->reflection.source.stage != static_cast<std::uint32_t>(ShaderStage::Fragment)
+				|| shader->binary.format != static_cast<std::uint32_t>(ShaderBinaryFormat::SPIRV)) {
+				result.errorMessage = "Post-process shader package must contain a valid compiled SPIR-V fragment stage: " + PathToUtf8(path->second) + ". " + error; return false;
+			}
+			if(!addStagedAsset(TerraEngine::ToHexString(id), shaderStageAssetType, path->second, HashBytesForExport(bytes), bytes.size())) {
+				result.errorMessage = stagedAssetIdentityError; return false;
+			}
+			packagedShaders.emplace(id, std::move(shader));
+		}
+		// Dependency checks use actual manifest rows and bytes. They do not claim
+		// that the target renderer supports a requested camera input/capability.
+		auto dependency = [&](const TerraEngine::UUID& id, std::optional<AssetType> expected) {
+			const auto guid = TerraEngine::ToHexString(id);
+			const auto found = std::find_if(m_StagedAssets.begin(), m_StagedAssets.end(), [&](const auto& asset) { return asset.guid == guid; });
+			if(id == TerraEngine::EMPTY_UUID || found == m_StagedAssets.end() || (expected && found->type != *expected)) return false;
+			const std::filesystem::path path(found->path);
+			if(!checkedPackagePath(path)) return false;
+			std::vector<std::byte> bytes;
+			if(!ReadExportBytes(stagingDir / path, bytes) || bytes.empty()) return false;
+			if(found->type == AssetType::Texture) {
+				const auto validation = TerraEngine::Runtime::ValidateArtifact({bytes, TerraEngine::Runtime::ArtifactKind::Texture,
+					TerraEngine::Runtime::NativeImageTarget::Unsupported, found->path});
+				if(!validation.IsValid()) return false;
+			}
+			const auto checksum = HashBytesForExport(bytes);
+			if(!found->checksum.empty() && (found->checksum != checksum || found->byteSize != bytes.size())) return false;
+			found->checksum = checksum; found->byteSize = bytes.size(); return true;
+		};
+		for(const auto& [id, profileAsset] : cameraProfiles) {
+			for(const auto& field : profileAsset->values)
+				if(const auto* asset = std::get_if<TerraEngine::UUID>(&field.value); asset && *asset != TerraEngine::EMPTY_UUID)
+					if(!dependency(*asset, AssetType::Texture)) {
+						result.errorMessage = "Profile texture dependency is missing or has the wrong staged type: " + TerraEngine::ToHexString(id) + " -> " + TerraEngine::ToHexString(*asset); return false;
+					}
+			for(const auto& effect : profileAsset->customEffects)
+				if(!dependency(effect, effectAssetType) || !cameraEffects.contains(effect)) {
+					result.errorMessage = "Profile fullscreen-effect dependency is missing: " + TerraEngine::ToHexString(effect); return false;
+				}
+		}
+		std::vector<TerraEngine::Renderer::PostProcessCustomPassRegistration> registrations;
+		for(const auto& [id, effect] : cameraEffects) {
+			const auto& descriptor = effect->descriptor;
+			for(const auto& asset : descriptor.assetDependencies)
+				if(!dependency(asset, std::nullopt)) { result.errorMessage = "Fullscreen-effect asset dependency is missing: " + TerraEngine::ToHexString(id) + " -> " + TerraEngine::ToHexString(asset); return false; }
+			for(const auto& input : descriptor.inputs)
+				if(input.kind == TerraEngine::Renderer::CustomPostProcessInputKind::AssetTexture && !dependency(input.assetId, AssetType::Texture)) {
+					result.errorMessage = "Fullscreen-effect texture input is missing or has the wrong staged type: " + TerraEngine::ToHexString(input.assetId); return false;
+				}
+			TerraEngine::Renderer::PostProcessCustomPassRegistration registration; std::string error;
+			if(!TerraEngine::Resource::PreparePostProcessEffectRegistration(*effect, descriptor.shaderAssetId,
+				packagedShaders.at(descriptor.shaderAssetId), false, {}, registration, error)) {
+				result.errorMessage = "Fullscreen-effect metadata differs from the packaged compiled shader: " + TerraEngine::ToHexString(id) + ". " + error; return false;
+			}
+			registrations.push_back(std::move(registration));
+		}
+		std::map<TerraEngine::UUID, std::size_t> registrationIndices;
+		std::map<std::string, std::vector<TerraEngine::UUID>> namedEffects;
+		for(std::size_t index = 0; index < registrations.size(); ++index) {
+			const auto& descriptor = registrations[index].descriptor;
+			registrationIndices.emplace(descriptor.assetId, index);
+			namedEffects[descriptor.stableId].push_back(descriptor.assetId);
+		}
+		std::set<TerraEngine::UUID> checkedEffects;
+		std::set<std::vector<TerraEngine::UUID>> checkedClosures;
+		auto validateClosure = [&](const std::vector<TerraEngine::UUID>& roots) {
+			std::set<TerraEngine::UUID> closure(roots.begin(), roots.end());
+			for(;;) {
+				// Explicit asset dependencies enter the closure before named order
+				// edges. They can uniquely select one of several project variants
+				// sharing a stableId without mixing independent camera profiles.
+				bool expanded;
+				do {
+					expanded = false; const auto current = closure;
+					for(const auto& id : current)
+						for(const auto& asset : cameraEffects.at(id)->descriptor.assetDependencies)
+							if(cameraEffects.contains(asset)) expanded |= closure.insert(asset).second;
+				} while(expanded);
+				bool namedExpansion = false; std::string unresolved;
+				const auto current = closure;
+				for(const auto& id : current) for(const auto& name : cameraEffects.at(id)->descriptor.after) {
+					const auto found = namedEffects.find(name);
+					if(found == namedEffects.end()) { unresolved = "Missing fullscreen order dependency: " + name; continue; }
+					std::size_t selected = 0u;
+					for(const auto& candidate : found->second) if(closure.contains(candidate)) ++selected;
+					if(selected > 1u) { result.errorMessage = "Ambiguous fullscreen order dependency inside one camera closure: " + name; return false; }
+					if(selected == 1u) continue;
+					if(found->second.size() == 1u) namedExpansion |= closure.insert(found->second.front()).second;
+					else unresolved = "Fullscreen order dependency has no unique asset choice in this camera closure: " + name;
+				}
+				if(namedExpansion) continue; // Other named edges may disambiguate it.
+				if(!unresolved.empty()) { result.errorMessage = unresolved; return false; }
+				break;
+			}
+			const std::vector<TerraEngine::UUID> identity(closure.begin(), closure.end());
+			checkedEffects.insert(identity.begin(), identity.end());
+			if(identity.empty() || !checkedClosures.insert(identity).second) return true;
+			std::vector<TerraEngine::Renderer::PostProcessCustomPassRegistration> selected;
+			for(const auto& id : identity) selected.push_back(registrations.at(registrationIndices.at(id)));
+			// This explicit detached API checks parameters, bindings and DAG order
+			// without asserting a cache publication or native capability. Runtime
+			// later supplies actual per-view inputs before any package pass enables.
+			TerraEngine::Renderer::CustomPostProcessDiagnostic diagnostic;
+			if(!TerraEngine::Renderer::ValidateDetachedPostProcessCustomPassAssets(selected, diagnostic)) {
+				result.errorMessage = "Invalid packaged fullscreen interface or dependency ordering: " + std::string(diagnostic.detail.data()); return false;
+			}
+			return true;
+		};
+		for(const auto& [id, profileAsset] : cameraProfiles) {
+			(void)id; if(!validateClosure(profileAsset->customEffects)) return false;
+		}
+		// Orphan assets still require a usable self/dependency closure, but they
+		// do not become one synthetic globally enabled camera configuration.
+		for(const auto& [id, effect] : cameraEffects) {
+			(void)effect; if(!checkedEffects.contains(id) && !validateClosure({id})) return false;
+		}
+
 		// Directory iteration order is platform-dependent. Sort durable records
 		// before serializing so editor/headless exports produce the same manifest.
 		auto sortPhysicsAssets = [](std::vector<PhysicsExportAssetRecord>& assets) {
@@ -2192,6 +2425,9 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		const ProjectManifestMetadata projectMetadata = LoadProjectManifestMetadata(projectRoot);
 		manifest["name"] = projectMetadata.name;
 		manifest["version"] = projectMetadata.version;
+		// Preserve an authored identity so persistent graphics choices remain
+		// associated with the same game across product and executable renames.
+		if(!projectMetadata.gameId.empty()) manifest["gameId"] = projectMetadata.gameId;
 
 		if (!profile.startupScene.empty()) {
 			manifest["startupScene"] = profile.startupScene;

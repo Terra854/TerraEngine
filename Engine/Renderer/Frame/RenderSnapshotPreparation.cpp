@@ -1027,7 +1027,19 @@ namespace TerraEngine::Renderer::Frame {
 		for (const TerraEngine::Renderer::RenderFrameViewRequest& previousRequest :
 			previousViewRequests)
 		{
-			if (previousRequest.referenceFrame.viewId
+			// Real authored cameras may share the same physical output number.
+			// Never borrow another camera/component/view lifetime's previous origin.
+			// A first/unregistered view has no prior history and safely uses current
+			// transforms. Synthetic legacy views retain their old physical matching.
+			const bool hasCameraProvenance = viewRequest.graphicsCamera || viewRequest.graphicsView
+				|| previousRequest.graphicsCamera || previousRequest.graphicsView;
+			const bool cameraLifetimeMatches = !hasCameraProvenance
+				|| (viewRequest.graphicsCamera && viewRequest.graphicsView && previousRequest.graphicsCamera && previousRequest.graphicsView
+					&& viewRequest.graphicsView->lifetimeGeneration != 0
+					&& viewRequest.graphicsCamera == previousRequest.graphicsCamera
+					&& viewRequest.graphicsView == previousRequest.graphicsView
+					&& viewRequest.outputKind == previousRequest.outputKind && viewRequest.viewType == previousRequest.viewType);
+			if (cameraLifetimeMatches && previousRequest.referenceFrame.viewId
 					== viewRequest.referenceFrame.viewId
 				&& previousRequest.referenceFrame.outputId
 					== viewRequest.referenceFrame.outputId)

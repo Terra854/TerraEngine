@@ -242,7 +242,14 @@ std::uint32_t ResolveTextureCompilerWorkerCountForTests(std::uint32_t hardwareTh
 }
 
 
-bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter, TextureCompileProgressCallback progressCallback) {
+bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter, TextureCompileProgressCallback progressCallback, TextureStorageFormat storageFormat) {
+	// An explicit data target is linear. Reject accidental color interpretation
+	// rather than silently encoding a lookup through an sRGB transfer function.
+	if ((storageFormat != TextureStorageFormat::BC7 && storageFormat != TextureStorageFormat::RGBA8)
+		|| (storageFormat == TextureStorageFormat::RGBA8 && semantic != TextureFileSemantic::Data)) {
+		std::cerr << "RGBA8 texture storage requires the data semantic, or a supported storage format.\n";
+		return false;
+	}
 	InitializeBasisu();
 
 	ReportTextureProgress(progressCallback, 0.04f, "Texture Decode", "Loading source image pixels.");
@@ -378,7 +385,10 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	desc.payloadChunkIndex = 1;
 	desc.userMetadataChunk = TETF_INVALID_CHUNK_INDEX;
 	desc.thumbnailChunk = TETF_INVALID_CHUNK_INDEX;
-	desc.vkFormat = isSRGB ? 146u : 145u; // BC7 SRGB/UNORM runtime transcode target.
+	// Payload blocks stay UASTC (4x4, 16 bytes). The existing runtime loader
+	// reads this requested format and publishes its RGBA8 or BC7 descriptor only
+	// after worker-side transcoding, keeping the file layout backward compatible.
+	desc.vkFormat = storageFormat == TextureStorageFormat::RGBA8 ? 37u : (isSRGB ? 146u : 145u);
 
 	const std::uint32_t tocSize = header.chunkCount * static_cast<std::uint32_t>(sizeof(TETFChunkEntry));
 	const std::uint32_t descFixedSize = static_cast<std::uint32_t>(sizeof(TETFDesc));
@@ -458,7 +468,8 @@ bool CompileTextureFromBytes(
 	std::uint32_t quality,
 	bool generateMipmaps,
 	TextureFilterType filter,
-	TextureCompileProgressCallback progressCallback) {
+	TextureCompileProgressCallback progressCallback,
+	TextureStorageFormat storageFormat) {
 	if (bytes.empty()) {
 		std::cerr << "Cannot compile an empty package image payload.\n";
 		return false;
@@ -495,5 +506,5 @@ bool CompileTextureFromBytes(
 		}
 	}
 
-	return CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter, progressCallback);
+	return CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter, progressCallback, storageFormat);
 }

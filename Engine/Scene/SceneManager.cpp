@@ -861,6 +861,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path,
 			std::filesystem::path sourcePath;
 			std::string name;
 			SceneRenderSettings settings;
+			TerraEngine::UUID postProcessProfileId = TerraEngine::EMPTY_UUID;
 			std::uint64_t authored, scene, component, spatial, hierarchy, membership;
 			struct ObjectRevision { TerraEngine::UUID id; std::uint64_t lifetime, metadata; };
 			std::vector<ObjectRevision> objectRevisions;
@@ -876,8 +877,12 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path,
 				return false;
 			}
 			const auto& document = *it->second;
+			const auto settings = document.parsedJson.find("sceneSettings");
+			const auto profile = settings == document.parsedJson.end() ? std::optional(TerraEngine::EMPTY_UUID)
+				: Serializer::DeserializeScenePostProcessProfileId(*settings);
+			if(!profile) { lastSaveResult.reason = "The authored scene profile identity is invalid."; return false; }
 			ticket = {activeSceneId, document.saveIdentity, document.sourcePath, document.name,
-				activeSceneRenderSettings, activeSceneAuthoredRevision, objects.GetSceneGeneration(),
+				activeSceneRenderSettings, *profile, activeSceneAuthoredRevision, objects.GetSceneGeneration(),
 				objects.GetComponentMutationRevision(), objects.GetSpatialRevision(),
 				objects.GetHierarchyRevision(), objects.GetRuntimeActiveMembershipRevision()};
 		}
@@ -924,6 +929,8 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path,
 		}
 		sceneJson["name"] = ticket.name;
 		sceneJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(ticket.settings);
+		if(ticket.postProcessProfileId != TerraEngine::EMPTY_UUID)
+			sceneJson["sceneSettings"]["postProcessProfileId"] = TerraEngine::ToHexString(ticket.postProcessProfileId);
 		sceneJson["objects"] = nlohmann::json::array();
 		const auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
 		// Metadata setters have per-object generations rather than one global
@@ -1384,6 +1391,10 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const SceneLoadSo
 	// allocation and external loader exceptions retain their exception channel.
 	if(const auto settings = parsed.find("sceneSettings"); settings != parsed.end()) {
 		if(!settings->is_object()) return nullptr;
+		if(!Serializer::DeserializeScenePostProcessProfileId(*settings)) {
+			TERRAENGINE_LOG(LogLevel::Error, "Rejected malformed authored post-process profile identity in " << path);
+			return nullptr;
+		}
 		try { (void)Serializer::DeserializeSceneRenderSettings(*settings); }
 		catch(const nlohmann::json::type_error& error) {
 			TERRAENGINE_LOG(LogLevel::Error, "Rejected malformed scene settings in " << path << ": " << error.what());

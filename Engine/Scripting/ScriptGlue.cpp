@@ -76,6 +76,7 @@ namespace {
 #include <glm/gtc/quaternion.hpp>
 
 #include "Renderer/RenderSystem.h"
+#include "Renderer/GraphicsSettings/PostProcessAuthoringController.h"
 #include "Resource/ResourceManager.h"
 
 static std::shared_mutex g_ScriptGlueMutex;
@@ -3796,6 +3797,190 @@ static nlohmann::json MarshallNativeValueToJson(void* data, ScriptType type)
 	return {};
 }
 
+namespace {
+	namespace GraphicsAbi = TerraEngine::Renderer::GraphicsSettings;
+	constexpr std::uint32_t kGraphicsCopyLimit = 1024U * 1024U;
+	constexpr std::uint32_t kGraphicsValueLimit = 1024U;
+	using GraphicsAbiStatus = NativeGraphicsSettingsStatus;
+
+	// Managed buffers are borrowed only for this call. Validate UTF-8 before
+	// creating owned strings, including overlong sequences and surrogate values.
+	bool GraphicsUtf8(std::string_view text)
+	{
+		for (std::size_t i = 0; i < text.size();) {
+			const auto lead = static_cast<unsigned char>(text[i++]);
+			if (lead < 0x80U) continue;
+			std::uint32_t scalar = 0, minimum = 0, count = 0;
+			if (lead >= 0xc2U && lead <= 0xdfU) { scalar = lead & 31U; count = 1; minimum = 0x80U; }
+			else if (lead >= 0xe0U && lead <= 0xefU) { scalar = lead & 15U; count = 2; minimum = 0x800U; }
+			else if (lead >= 0xf0U && lead <= 0xf4U) { scalar = lead & 7U; count = 3; minimum = 0x10000U; }
+			else return false;
+			if (count > text.size() - i) return false;
+			while (count--) {
+				const auto next = static_cast<unsigned char>(text[i++]);
+				if ((next & 0xc0U) != 0x80U) return false;
+				scalar = (scalar << 6U) | (next & 63U);
+			}
+			if (scalar < minimum || scalar > 0x10ffffU || (scalar >= 0xd800U && scalar <= 0xdfffU)) return false;
+		}
+		return true;
+	}
+
+	bool DecodeGraphicsTarget(const NativeGraphicsSettingsTargetPacket& packet, GraphicsAbi::GraphicsTarget& target)
+	{
+		if (packet.scope > 1U || (packet.flags & ~3U) || packet.reserved) return false;
+		if ((packet.scope == 0U && packet.flags != 0U) || (packet.scope == 1U && !(packet.flags & 1U))) return false;
+		target.scope = static_cast<GraphicsAbi::GraphicsScope>(packet.scope);
+		if (packet.flags & 1U) {
+			GraphicsAbi::GraphicsCameraTarget camera;
+			std::memcpy(camera.cameraId.data(), packet.cameraId, sizeof(packet.cameraId));
+			camera.sceneGeneration = packet.sceneGeneration;
+			camera.objectLifetimeGeneration = packet.objectLifetimeGeneration;
+			camera.componentGeneration = packet.componentGeneration;
+			camera.bindingGeneration = packet.bindingGeneration;
+			if (camera.cameraId == TerraEngine::EMPTY_UUID || !camera.sceneGeneration || !camera.objectLifetimeGeneration || !camera.componentGeneration || !camera.bindingGeneration) return false;
+			target.camera = camera;
+		}
+		if (packet.flags & 2U) {
+			if (packet.viewType > static_cast<std::uint32_t>(RenderViewType::ExportRuntime)
+				|| packet.outputKind > static_cast<std::uint32_t>(RenderOutputKind::ValidationOnly) || !packet.viewLifetimeGeneration) return false;
+			target.view = GraphicsAbi::GraphicsViewIdentity{static_cast<RenderViewType>(packet.viewType), packet.outputId,
+				packet.viewLifetimeGeneration, static_cast<RenderOutputKind>(packet.outputKind)};
+		}
+		return true;
+	}
+
+	NativeGraphicsSettingsTargetPacket EncodeGraphicsTarget(const GraphicsAbi::GraphicsTarget& target)
+	{
+		NativeGraphicsSettingsTargetPacket result{};
+		result.scope = static_cast<std::uint32_t>(target.scope);
+		if (target.camera) {
+			result.flags |= 1U;
+			std::memcpy(result.cameraId, target.camera->cameraId.data(), sizeof(result.cameraId));
+			result.sceneGeneration = target.camera->sceneGeneration;
+			result.objectLifetimeGeneration = target.camera->objectLifetimeGeneration;
+			result.componentGeneration = target.camera->componentGeneration;
+			result.bindingGeneration = target.camera->bindingGeneration;
+		}
+		if (target.view) {
+			result.flags |= 2U;
+			result.viewType = static_cast<std::uint32_t>(target.view->viewType);
+			result.outputKind = static_cast<std::uint32_t>(target.view->outputKind);
+			result.outputId = target.view->outputId;
+			result.viewLifetimeGeneration = target.view->lifetimeGeneration;
+		}
+		return result;
+	}
+
+	bool DecodeGraphicsValue(const NativeGraphicsSettingsValuePacket& packet, std::string_view text, GraphicsAbi::GraphicsValue& result)
+	{
+		switch (static_cast<GraphicsAbi::GraphicsValueKind>(packet.valueKind)) {
+		case GraphicsAbi::GraphicsValueKind::Boolean: if (packet.scalarBits > 1U) return false; result = packet.scalarBits != 0; return true;
+		case GraphicsAbi::GraphicsValueKind::Unsigned32: if (packet.scalarBits > UINT32_MAX) return false; result = static_cast<std::uint32_t>(packet.scalarBits); return true;
+		case GraphicsAbi::GraphicsValueKind::Unsigned64: result = packet.scalarBits; return true;
+		case GraphicsAbi::GraphicsValueKind::Scalar: {
+			if (packet.scalarBits > UINT32_MAX) return false;
+			const auto bits = static_cast<std::uint32_t>(packet.scalarBits);
+			float scalar; std::memcpy(&scalar, &bits, sizeof(scalar));
+			if (!std::isfinite(scalar)) return false;
+			result = scalar; return true;
+		}
+		case GraphicsAbi::GraphicsValueKind::String:
+			if (packet.textOffset > text.size() || packet.textLength > text.size() - packet.textOffset) return false;
+			if (!GraphicsUtf8(text.substr(packet.textOffset, packet.textLength))) return false;
+			result = std::string(text.substr(packet.textOffset, packet.textLength)); return true;
+		case GraphicsAbi::GraphicsValueKind::Asset: {
+			TerraEngine::UUID asset{}; std::memcpy(asset.data(), packet.assetId, sizeof(packet.assetId)); result = asset; return true;
+		}
+		}
+		return false;
+	}
+
+	GraphicsAbiStatus PrepareGraphicsReceipt(NativeGraphicsSettingsReceiptPacket* receipt)
+	{
+		if (!receipt) return GraphicsAbiStatus::InvalidArgument;
+		if (receipt->header.abiVersion != kNativeGraphicsSettingsAbiVersion || receipt->header.structSize != sizeof(*receipt)) return GraphicsAbiStatus::VersionMismatch;
+		*receipt = {};
+		receipt->header = {kNativeGraphicsSettingsAbiVersion, sizeof(*receipt)};
+		return GraphicsAbiStatus::Success;
+	}
+
+	GraphicsAbiStatus CopyGraphicsReceipt(const GraphicsAbi::GraphicsRequestReceipt& source, NativeGraphicsSettingsReceiptPacket& destination)
+	{
+		destination.state = static_cast<std::uint32_t>(source.state);
+		destination.activation = static_cast<std::uint32_t>(source.activation);
+		destination.reason = static_cast<std::uint32_t>(source.reason);
+		destination.affectedCount = static_cast<std::uint32_t>(source.affectedSettings.size());
+		destination.detailBytes = static_cast<std::uint32_t>(source.detail.size());
+		destination.requestId = source.requestId; destination.sequence = source.sequence;
+		destination.requestedRevision = source.requestedRevision; destination.effectiveRevision = source.effectiveRevision;
+		destination.appliedFrameId = source.appliedFrameId;
+		if (source.state == GraphicsAbi::GraphicsRequestState::Rejected || source.state == GraphicsAbi::GraphicsRequestState::RestartRequired) return GraphicsAbiStatus::Rejected;
+		if (source.state == GraphicsAbi::GraphicsRequestState::Applied || source.state == GraphicsAbi::GraphicsRequestState::Cancelled) return GraphicsAbiStatus::Success;
+		return GraphicsAbiStatus::Accepted;
+	}
+
+	nlohmann::json GraphicsValueJson(const GraphicsAbi::GraphicsValue& value)
+	{
+		return std::visit([](const auto& item) -> nlohmann::json {
+			if constexpr (std::is_same_v<std::decay_t<decltype(item)>, TerraEngine::UUID>) return TerraEngine::ToHexString(item);
+			else return item;
+		}, value);
+	}
+
+	nlohmann::json GraphicsCatalogJson(const std::vector<GraphicsAbi::GraphicsSettingDescriptor>& descriptors)
+	{
+		// Both discovery entry points preserve one exact copied descriptor schema.
+		// Target-specific availability is resolved by the protected native owner.
+		nlohmann::json settings = nlohmann::json::array();
+		for (const auto& descriptor : descriptors) {
+			nlohmann::json options = nlohmann::json::array();
+			for (const auto& value : descriptor.options) options.push_back(GraphicsValueJson(value));
+			settings.push_back({{"id", descriptor.id}, {"name", descriptor.name}, {"units", descriptor.units},
+				{"kind", descriptor.valueKind}, {"defaultValue", GraphicsValueJson(descriptor.defaultValue)},
+				{"minimum", descriptor.minimum ? GraphicsValueJson(*descriptor.minimum) : nlohmann::json(nullptr)},
+				{"maximum", descriptor.maximum ? GraphicsValueJson(*descriptor.maximum) : nlohmann::json(nullptr)},
+				{"options", std::move(options)}, {"gameScope", descriptor.gameScope}, {"cameraScope", descriptor.cameraScope},
+				{"authoringScope", descriptor.authoringScope}, {"activation", descriptor.activation},
+				{"available", descriptor.available}, {"unavailableReason", descriptor.unavailableReason}, {"detail", descriptor.detail}});
+		}
+		return {{"abiVersion", kNativeGraphicsSettingsAbiVersion}, {"settings", std::move(settings)}};
+	}
+
+	nlohmann::json GraphicsTargetJson(const GraphicsAbi::GraphicsTarget& target)
+	{
+		nlohmann::json result{{"scope", target.scope}, {"camera", nullptr}, {"view", nullptr}};
+		if (target.camera) { const auto& c = *target.camera; result["camera"] = {{"cameraId", TerraEngine::ToHexString(c.cameraId)}, {"sceneGeneration", c.sceneGeneration}, {"objectLifetimeGeneration", c.objectLifetimeGeneration}, {"componentGeneration", c.componentGeneration}, {"bindingGeneration", c.bindingGeneration}}; }
+		if (target.view) { const auto& v = *target.view; result["view"] = {{"viewType", v.viewType}, {"outputKind", v.outputKind}, {"outputId", v.outputId}, {"lifetimeGeneration", v.lifetimeGeneration}}; }
+		return result;
+	}
+
+	nlohmann::json GraphicsSnapshotJson(const std::shared_ptr<const GraphicsAbi::GraphicsSettingsSnapshot>& snapshot)
+	{
+		if (!snapshot) return nullptr;
+		const auto& s = *snapshot;
+		nlohmann::json values = nlohmann::json::array();
+		for (const auto& item : s.values) values.push_back({{"id", item.id}, {"kind", item.value.index()}, {"value", GraphicsValueJson(item.value)}});
+		return {{"target", GraphicsTargetJson(s.target)}, {"lifecycle", {{"projectGeneration", s.lifecycle.projectGeneration}, {"playSessionGeneration", s.lifecycle.playSessionGeneration}, {"rendererSessionGeneration", s.lifecycle.rendererSessionGeneration}, {"backendResourceGeneration", s.lifecycle.backendResourceGeneration}}},
+			{"revision", s.revision}, {"publishedFrameId", s.publishedFrameId}, {"preset", s.preset ? nlohmann::json(*s.preset) : nlohmann::json(nullptr)}, {"values", std::move(values)},
+			{"internalWidth", s.internalWidth}, {"internalHeight", s.internalHeight}, {"outputWidth", s.outputWidth}, {"outputHeight", s.outputHeight}, {"sampleCount", s.sampleCount}, {"postProcessResourceGeneration", s.postProcessResourceGeneration}};
+	}
+
+	// Each query serializes one owning snapshot, then copies atomically. Size
+	// retries never submit work and never return a pointer into renderer storage.
+	GraphicsAbiStatus CopyGraphicsJson(const nlohmann::json& value, char* destination, std::uint32_t capacity, std::uint32_t* required)
+	{
+		if (!required || (!destination && capacity) || capacity > kGraphicsCopyLimit) return GraphicsAbiStatus::InvalidArgument;
+		*required = 0;
+		const auto text = value.dump();
+		if (text.size() >= kGraphicsCopyLimit) return GraphicsAbiStatus::Unavailable;
+		*required = static_cast<std::uint32_t>(text.size() + 1U);
+		if (capacity < *required) return GraphicsAbiStatus::BufferTooSmall;
+		std::memcpy(destination, text.c_str(), *required);
+		return GraphicsAbiStatus::Success;
+	}
+}
+
 static bool HasValidGraphicsHeader(const NativeGraphicsAbiHeader& header)
 {
 	return header.abiVersion == kNativeGraphicsAbiVersion
@@ -5723,6 +5908,199 @@ extern "C" {
 				objects.notifyObjectStructureChanged(*object);
 			}
 		}
+	}
+
+	std::uint32_t Native_GraphicsSettings_GetAbiVersion() { return kNativeGraphicsSettingsAbiVersion; }
+
+	std::uint32_t Native_PostProcessAuthoring_GetAbiVersion()
+	{
+		return TerraEngine::Scripting::PostProcessAuthoringWire::kAbiVersion;
+	}
+
+	NativeGraphicsSettingsStatus Native_PostProcessAuthoring_Read(const NativeGraphicsSettingsTargetPacket* packet,
+		char* output, std::uint32_t capacity, std::uint32_t* required)
+	{
+		namespace Wire = TerraEngine::Scripting::PostProcessAuthoringWire;
+		try
+		{
+			Wire::Diagnostic diagnostic;
+			GraphicsAbi::GraphicsTarget target;
+			if(!Wire::DecodeTarget(packet, target, diagnostic)) return diagnostic.status;
+			auto result = RenderSystem::Instance().GetPostProcessAuthoringController().Read(target);
+			if(!result.snapshot) return GraphicsAbiStatus::Unavailable;
+			std::string json;
+			if(!Wire::SerializeSnapshot(*result.snapshot, json, diagnostic)) return diagnostic.status;
+			return Wire::CopyJson(json, output, capacity, required);
+		}
+		catch(const std::exception&) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_PostProcessAuthoring_ReadReceipt(std::uint64_t requestId,
+		char* output, std::uint32_t capacity, std::uint32_t* required)
+	{
+		namespace Wire = TerraEngine::Scripting::PostProcessAuthoringWire;
+		try
+		{
+			if(!requestId) return GraphicsAbiStatus::InvalidArgument;
+			const auto receipt = RenderSystem::Instance().GetPostProcessAuthoringController().ReadReceipt(requestId);
+			if(!receipt) return GraphicsAbiStatus::Unavailable;
+			Wire::Diagnostic diagnostic;
+			std::string json;
+			if(!Wire::SerializeReceipt(*receipt, json, diagnostic)) return diagnostic.status;
+			return Wire::CopyJson(json, output, capacity, required);
+		}
+		catch(const std::exception&) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_PostProcessAuthoring_Submit(const NativeGraphicsSettingsTargetPacket* packet,
+		const std::uint8_t* payload, std::uint32_t size, NativeGraphicsSettingsReceiptPacket* receipt)
+	{
+		namespace Wire = TerraEngine::Scripting::PostProcessAuthoringWire;
+		const auto valid = Wire::ValidateReceiptOutput(receipt);
+		if(valid != GraphicsAbiStatus::Success) return valid;
+		if(!payload || !size || size > Wire::kMaximumBytes) return GraphicsAbiStatus::InvalidArgument;
+		try
+		{
+			Wire::Request request;
+			Wire::Diagnostic diagnostic;
+			if(!Wire::DecodeRequest(packet, std::as_bytes(std::span(payload, size)), request, diagnostic)) return diagnostic.status;
+			// Copy only the actual queue receipt. Scene visibility and accepted
+			// native output can appear later through the independent read API.
+			const auto admission = RenderSystem::Instance().SubmitPostProcessAuthoring(request);
+			return Wire::WriteReceipt(admission.receipt.request, receipt);
+		}
+		catch(const std::exception&) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_Submit(const NativeGraphicsSettingsRequestPacket* packet,
+		const NativeGraphicsSettingsValuePacket* values, const char* utf8Values, NativeGraphicsSettingsReceiptPacket* receipt)
+	{
+		const auto prepared = PrepareGraphicsReceipt(receipt);
+		if (prepared != GraphicsAbiStatus::Success) return prepared;
+		if (!packet) return GraphicsAbiStatus::InvalidArgument;
+		if (packet->header.abiVersion != kNativeGraphicsSettingsAbiVersion || packet->header.structSize != sizeof(*packet)) return GraphicsAbiStatus::VersionMismatch;
+		if (packet->operation > 3U || packet->valueCount > kGraphicsValueLimit || packet->textBytes > kGraphicsCopyLimit
+			|| (packet->valueCount && !values) || (packet->textBytes && !utf8Values)) return GraphicsAbiStatus::InvalidArgument;
+		try {
+			GraphicsAbi::GraphicsSettingsRequest request;
+			if (!DecodeGraphicsTarget(packet->target, request.target)) return GraphicsAbiStatus::InvalidArgument;
+			request.operation = static_cast<GraphicsAbi::GraphicsRequestOperation>(packet->operation);
+			request.baseRevision = packet->expectedRevision;
+			const std::string_view text = packet->textBytes ? std::string_view(utf8Values, packet->textBytes) : std::string_view{};
+			if (!GraphicsUtf8(text)) return GraphicsAbiStatus::InvalidArgument;
+			if (request.operation == GraphicsAbi::GraphicsRequestOperation::Preset) {
+				if (packet->preset > static_cast<std::uint32_t>(QualityPreset::Ultra) || packet->valueCount || packet->textBytes) return GraphicsAbiStatus::InvalidArgument;
+				request.preset = static_cast<QualityPreset>(packet->preset);
+			}
+			for (std::uint32_t i = 0; i < packet->valueCount; ++i) {
+				GraphicsAbi::GraphicsValue value;
+				if (!DecodeGraphicsValue(values[i], text, value)) return GraphicsAbiStatus::InvalidArgument;
+				const auto id = static_cast<GraphicsAbi::GraphicsSettingId>(values[i].settingId);
+				if (request.operation == GraphicsAbi::GraphicsRequestOperation::Reset) request.resetSettings.push_back(id);
+				else request.patches.push_back({id, std::move(value)});
+			}
+			// Admission copies the complete typed request. The protected render
+			// boundary owns validation, publication, resources and durable staging.
+			auto& renderer = RenderSystem::Instance();
+			request.lifecycle = renderer.GetGraphicsSettingsLifecycleSnapshot();
+			return CopyGraphicsReceipt(renderer.QueueGraphicsSettingsRequest(std::move(request)), *receipt);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_Discover(char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes)
+	{
+		try {
+			return CopyGraphicsJson(GraphicsCatalogJson(RenderSystem::Instance().GetGraphicsSettingsCatalogSnapshot()),
+				destination, capacity, requiredBytes);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_DiscoverScoped(const NativeGraphicsSettingsTargetPacket* packet,
+		char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes)
+	{
+		if (requiredBytes) *requiredBytes = 0;
+		try {
+			GraphicsAbi::GraphicsTarget target;
+			if (!packet || !DecodeGraphicsTarget(*packet, target)) return GraphicsAbiStatus::InvalidArgument;
+			return CopyGraphicsJson(GraphicsCatalogJson(RenderSystem::Instance().GetGraphicsSettingsCatalogSnapshot(target)),
+				destination, capacity, requiredBytes);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_Read(const NativeGraphicsSettingsTargetPacket* packet,
+		char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes)
+	{
+		try {
+			GraphicsAbi::GraphicsTarget target;
+			if (!packet || !DecodeGraphicsTarget(*packet, target)) return GraphicsAbiStatus::InvalidArgument;
+			auto& renderer = RenderSystem::Instance();
+			const auto effective = renderer.GetGraphicsSettingsSnapshot(target);
+			const auto requested = renderer.GetRequestedGraphicsSettingsSnapshot(target);
+			if (!effective && !requested) return GraphicsAbiStatus::Unavailable;
+			return CopyGraphicsJson({{"effective", GraphicsSnapshotJson(effective)}, {"requested", GraphicsSnapshotJson(requested)}}, destination, capacity, requiredBytes);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_ReadReceipt(std::uint64_t requestId,
+		char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes)
+	{
+		if (!requestId) return GraphicsAbiStatus::InvalidArgument;
+		try {
+			const auto result = RenderSystem::Instance().GetGraphicsSettingsReceipt(requestId);
+			if (!result) return GraphicsAbiStatus::Unavailable;
+			const auto& r = *result;
+			return CopyGraphicsJson({{"requestId", r.requestId}, {"sequence", r.sequence}, {"state", r.state}, {"activation", r.activation}, {"reason", r.reason},
+				{"affectedSettings", r.affectedSettings}, {"detail", r.detail}, {"requestedRevision", r.requestedRevision}, {"effectiveRevision", r.effectiveRevision}, {"appliedFrameId", r.appliedFrameId}}, destination, capacity, requiredBytes);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_ResolveCamera(std::uint32_t objectId, NativeGraphicsSettingsTargetPacket* target)
+	{
+		if (!target) return GraphicsAbiStatus::InvalidArgument;
+		*target = {};
+		try {
+			const auto resolved = RenderSystem::Instance().ResolveGraphicsSettingsCameraTarget(objectId);
+			if (!resolved) return GraphicsAbiStatus::Unavailable;
+			*target = EncodeGraphicsTarget(*resolved);
+			return GraphicsAbiStatus::Success;
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_SavePreferences(const char* name, std::uint32_t nameBytes,
+		const NativeGraphicsSettingsTargetPacket* packet, std::uint64_t expectedStoreRevision, NativeGraphicsSettingsReceiptPacket* receipt)
+	{
+		const auto prepared = PrepareGraphicsReceipt(receipt);
+		if (prepared != GraphicsAbiStatus::Success) return prepared;
+		try {
+			GraphicsAbi::GraphicsTarget target;
+			if (!packet || !DecodeGraphicsTarget(*packet, target) || !name || !nameBytes || nameBytes > 256U) return GraphicsAbiStatus::InvalidArgument;
+			const std::string_view text(name, nameBytes);
+			if (!GraphicsUtf8(text) || text.find('\0') != std::string_view::npos) return GraphicsAbiStatus::InvalidArgument;
+			return CopyGraphicsReceipt(RenderSystem::Instance().QueueGraphicsPreferencesSave(std::string(text), std::move(target), expectedStoreRevision), *receipt);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_RestorePreferences(const char* name, std::uint32_t nameBytes,
+		const NativeGraphicsSettingsTargetPacket* packet, NativeGraphicsSettingsReceiptPacket* receipt)
+	{
+		const auto prepared = PrepareGraphicsReceipt(receipt);
+		if (prepared != GraphicsAbiStatus::Success) return prepared;
+		try {
+			GraphicsAbi::GraphicsTarget target;
+			if (!packet || !DecodeGraphicsTarget(*packet, target) || !name || !nameBytes || nameBytes > 256U) return GraphicsAbiStatus::InvalidArgument;
+			const std::string_view text(name, nameBytes);
+			if (!GraphicsUtf8(text) || text.find('\0') != std::string_view::npos) return GraphicsAbiStatus::InvalidArgument;
+			return CopyGraphicsReceipt(RenderSystem::Instance().QueueGraphicsPreferencesRestore(std::string(text), std::move(target)), *receipt);
+		} catch (...) { return GraphicsAbiStatus::Unavailable; }
+	}
+
+	NativeGraphicsSettingsStatus Native_GraphicsSettings_CancelStaged(std::uint64_t requestId, NativeGraphicsSettingsReceiptPacket* receipt)
+	{
+		const auto prepared = PrepareGraphicsReceipt(receipt);
+		if (prepared != GraphicsAbiStatus::Success) return prepared;
+		if (!requestId) return GraphicsAbiStatus::InvalidArgument;
+		try { return CopyGraphicsReceipt(RenderSystem::Instance().CancelStagedGraphicsSettingsRequest(requestId), *receipt); }
+		catch (...) { return GraphicsAbiStatus::Unavailable; }
 	}
 
 	std::uint32_t Native_Graphics_GetAbiVersion() {

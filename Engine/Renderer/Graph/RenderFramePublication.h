@@ -12,6 +12,7 @@
 #include "Renderer/Backend/RenderBackendWork.h"
 #include "Renderer/Deformation/GpuDeformationPlan.h"
 #include "Core/Export.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsTypes.h"
 
 #include <atomic>
 #include <array>
@@ -374,6 +375,10 @@ namespace TerraEngine::Renderer
 	{
 		RenderOutputRequest output{};
 		RenderReferenceFrame referenceFrame{};
+		// Immutable authored pose and separate Scene owner revision. Neither is
+		// inferred later from matrices, statistics, or request admission.
+		std::uint64_t poseSequence = 0u;
+		std::uint64_t sceneAaRevision = 0u;
 		glm::mat4 viewMatrix = glm::mat4(1.0f);
 		glm::mat4 projectionMatrix = glm::mat4(1.0f);
 		glm::vec3 cameraLocalPosition = glm::vec3(0.0f);
@@ -385,6 +390,14 @@ namespace TerraEngine::Renderer
 		QualityPreset activePreset = QualityPreset::High;
 		bool customOverrideActive = false;
 		RenderSettings settings{};
+		// View preparation carries the selected frame-captured owner through lowering.
+		// The backend can consume this publication without querying mutable state.
+		std::shared_ptr<const GraphicsSettings::GraphicsSettingsSnapshot> graphicsSettings;
+		std::shared_ptr<const GraphicsSettings::PostProcessAuthoringFrame> graphicsAuthoring;
+		// Retained source camera and accepted prior view lifetime disambiguate
+		// shared physical outputs without any backend scene lookup.
+		std::optional<GraphicsSettings::GraphicsCameraTarget> graphicsCamera;
+		std::optional<GraphicsSettings::GraphicsViewIdentity> graphicsView;
 		RendererEfficiencyOptionsSnapshot efficiencyOptions{};
 		RendererEfficiencyFixtureIntent efficiencyFixtureIntent{};
 		// Workers materialize isolated oracle input from captured typed recipes.

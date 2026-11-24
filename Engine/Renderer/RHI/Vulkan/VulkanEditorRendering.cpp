@@ -3,12 +3,90 @@
 // This file owns one focused VulkanContext responsibility. State remains in VulkanContext::Impl,
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 #include "VulkanContextSource.h"
+#include "VulkanPostProcessPasses.h"
+#ifdef _WIN32
+#include <Windows.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
+
+namespace
+{
+	// Windows foreground evidence can join these raw ticks to the OS trace
+	// without guessing a conversion between two process-local time origins.
+	std::uint64_t PresentClockTick() noexcept
+	{
+#ifdef _WIN32
+		LARGE_INTEGER tick{};
+		return QueryPerformanceCounter(&tick) ? static_cast<std::uint64_t>(tick.QuadPart) : 0u;
+#else
+		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+	}
+
+	std::uint64_t PresentClockFrequency() noexcept
+	{
+#ifdef _WIN32
+		static const auto frequency = [] {
+			LARGE_INTEGER ticksPerSecond{};
+			return QueryPerformanceFrequency(&ticksPerSecond) ? static_cast<std::uint64_t>(ticksPerSecond.QuadPart) : 0u;
+		}();
+		return frequency;
+#else
+		return 1000000000u;
+#endif
+	}
+
+	void SamplePresentWindow(const WindowSystem* windows,
+		TerraEngine::Renderer::Vulkan::EditorPresentResult& result, bool before) noexcept
+	{
+#ifdef _WIN32
+		if(!windows || !windows->GetNativeHandle()) return;
+		const auto window = glfwGetWin32Window(static_cast<GLFWwindow*>(windows->GetNativeHandle()));
+		if(!window) return;
+		const auto windowId = reinterpret_cast<std::uintptr_t>(window);
+		if(!before && result.windowHandle != windowId) return;
+		const auto monitor = reinterpret_cast<std::uintptr_t>(MonitorFromWindow(window, MONITOR_DEFAULTTONULL));
+		const auto foreground = reinterpret_cast<std::uintptr_t>(GetForegroundWindow());
+		const bool visible = IsWindowVisible(window) && !IsIconic(window);
+		result.windowHandle = windowId;
+		(before ? result.monitorBefore : result.monitorAfter) = monitor;
+		(before ? result.foregroundWindowBefore : result.foregroundWindowAfter) = foreground;
+		(before ? result.windowVisibleBefore : result.windowVisibleAfter) = visible;
+#else
+		(void)windows;
+		(void)result;
+		(void)before;
+#endif
+	}
+}
+
+VkFormat TerraEngine::Renderer::Vulkan::SelectOffscreenCameraColorFormat(VkPhysicalDevice device) noexcept
+{
+	// The editor samples camera color and reads it back. Keep the established
+	// format preference so this discovery query leaves legacy pixels unchanged.
+	constexpr VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+		| VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+	for(const auto candidate : {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM})
+	{
+		VkFormatProperties properties{};
+		vkGetPhysicalDeviceFormatProperties(device, candidate, &properties);
+		if((properties.optimalTilingFeatures & required) == required) return candidate;
+	}
+	return VK_FORMAT_UNDEFINED;
+}
 
 
 TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	std::function<void()> prepareUI,
-	std::function<void(void*)> renderUI) {
+	std::function<void(void*)> renderUI, bool captureWindowProof) {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	using namespace TerraEngine::Renderer::Vulkan;
 	EditorPresentResult result{};
@@ -39,6 +117,12 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		result.stage = EditorUiFrameStage::AllocateCommandBuffer;
 		result.nativeResult = static_cast<std::int32_t>(uiFenceWaitResult);
 		return result;
+	}
+	// The project hub can present without BeginFrame. Settle this slot before
+	// its reset even on that path so a skipped acquisition cannot strand owners.
+	if (!impl->postProcessTargets.empty() || !impl->retiredPostProcessTargets.empty()) {
+		impl->ObservePostProcessFrameCompletion(impl->currentFrame, impl->inFlightFences[impl->currentFrame]);
+		impl->DrainRetiredPostProcessTargets();
 	}
 	const VkResult uiPoolResetResult = vkResetCommandPool(
 		impl->device, impl->editorCommandPools[impl->currentFrame], 0);
@@ -86,7 +170,10 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		drain.pWaitDstStageMask = stages.data();
 		VkResult drainResult = impl->SubmitGraphicsQueue(1, &drain, VK_NULL_HANDLE);
 		if (drainResult == VK_SUCCESS) drainResult = impl->WaitGraphicsQueueIdle();
-		if (drainResult == VK_SUCCESS) impl->editorRenderSubmitted = false;
+		if (drainResult == VK_SUCCESS) {
+			impl->CompletePostProcessDeviceIdle();
+			impl->editorRenderSubmitted = false;
+		}
 		return drainResult;
 	};
 
@@ -145,6 +232,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		// The queued wait now owns the render-finished signal and the slot fence
 		// proves when its command buffers are reusable. No UI submission serial is
 		// published because skipped ImGui draw data did not reach the GPU.
+		impl->MarkPostProcessCommandsSubmitted({}, frameSlot, impl->inFlightFences[frameSlot]);
 		impl->editorRenderSubmitted = false;
 		impl->currentFrame = (frameSlot + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 		return VK_SUCCESS;
@@ -370,6 +458,11 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	}
 
 	result.submissionSerial = impl->editorCompletionTracker.RecordSubmission(impl->currentFrame);
+	// UI submission fences the accepted offscreen scene commands in queue order.
+	impl->MarkPostProcessCommandsSubmitted({}, impl->currentFrame, impl->inFlightFences[impl->currentFrame]);
+	// Finished-image UI descriptors can outlive the target replacement. Record
+	// their actual successful submit against the same frame-slot fence.
+	impl->RecordPostProcessEditorSubmission(impl->currentFrame, impl->inFlightFences[impl->currentFrame]);
 	result.outcome = EditorPresentOutcome::Submitted;
 	result.stage = EditorUiFrameStage::Submit;
 	impl->editorRenderSubmitted = false;
@@ -392,7 +485,14 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		// FIFO presentation may apply back-pressure independently of image acquire;
 		// record it separately so responsiveness gates can diagnose the exact wait.
 		TERRAENGINE_PROFILE_SCOPE("Editor Present: Queue Present", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		result.presentSequence = result.submissionSerial;
+		result.qpcFrequency = PresentClockFrequency();
+		if(captureWindowProof) SamplePresentWindow(impl->windowSystem, result, true);
+		result.queuePresentBeginQpc = PresentClockTick();
 		presentResult = impl->PresentSwapchain(&present);
+		result.queuePresentEndQpc = PresentClockTick();
+		if(captureWindowProof) SamplePresentWindow(impl->windowSystem, result, false);
+		result.wsiEnqueued = presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR;
 	}
 	impl->ResolveUnenqueuedPresentationFence(presentCompletionFencePrepared, presentResult);
 	impl->RecordUnextendedPresent(imageIndex, presentResult);
@@ -453,6 +553,36 @@ void VulkanContext::AcknowledgeViewportTextureGeneration(
 	impl->DrainRetiredOffscreenResources();
 }
 
+void VulkanContext::SetSceneViewRawPreview(bool raw)
+{
+	if(!impl) return;
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if(impl->editorMode) impl->sceneViewRawPreviewRequested = raw;
+}
+
+VulkanContext::SceneViewPostProcessPreview VulkanContext::GetSceneViewPostProcessPreview() const
+{
+	SceneViewPostProcessPreview preview;
+	if(!impl) return preview;
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if(!impl->editorMode || impl->deviceLost) return preview;
+	const auto& scene = impl->sceneView;
+	preview.requestedRaw = impl->sceneViewRawPreviewRequested;
+	preview.frameId = scene.colorFrameId;
+	preview.extent = {scene.extent.width, scene.extent.height};
+	for(const auto& [key, target] : impl->postProcessTargets)
+	{
+		if(!target || !target->passes || key.rendererGeneration != impl->renderSessionGeneration) continue;
+		const auto& output = target->passes->output;
+		if(!TerraEngine::Renderer::Vulkan::IsPostProcessOutputCurrent(output, scene.image,
+			scene.generation, preview.frameId)) continue;
+		preview.postProcessActive = true;
+		preview.effectiveRaw = output.rawPreview;
+		break;
+	}
+	return preview;
+}
+
 // Impl Extensions
 
 void VulkanContext::Impl::InitEditorMode() {
@@ -492,13 +622,15 @@ void VulkanContext::Impl::DestroyOffscreenResourceSet(OffscreenResources& resour
 
 void VulkanContext::Impl::DrainRetiredOffscreenResources()
 {
+	DrainRetiredPostProcessTargets();
 	const std::uint64_t completedSerial = editorCompletionTracker.Snapshot().completedSerial;
 	auto iterator = retiredOffscreenResources.begin();
 	while (iterator != retiredOffscreenResources.end()) {
 		const bool readbackComplete = !HasInFlightReadbackForImage(iterator->resources.image)
 			&& !HasInFlightReadbackForImage(iterator->resources.visibilityIdentity.image);
 		if (!iterator->editorDescriptorAcknowledged
-			|| iterator->retireAfterSerial > completedSerial || !readbackComplete) {
+			|| iterator->retireAfterSerial > completedSerial || !readbackComplete
+			|| HasRetiredOffscreenPostProcessBorrowers(iterator->resources.image)) {
 			++iterator;
 			continue;
 		}
@@ -539,33 +671,12 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 
 
 	if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
-			// Scene and game views are sampled by the editor after rendering and may
-			// be copied into MCP capture staging buffers. The selected format must
-			// support all three operations or readback would rely on undefined driver
-			// behavior.
-			const VkFormatFeatureFlags requiredFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
-		const std::array<VkFormat, 3> candidates = {
-			VK_FORMAT_R16G16B16A16_SFLOAT,
-			VK_FORMAT_R8G8B8A8_SRGB,
-			VK_FORMAT_R8G8B8A8_UNORM
-		};
-
-
-		for (VkFormat candidate : candidates) {
-			VkFormatProperties properties{};
-			vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &properties);
-
-			if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
-				offscreenColorFormat = candidate;
-				break;
-			}
+		offscreenColorFormat = TerraEngine::Renderer::Vulkan::SelectOffscreenCameraColorFormat(physicalDevice);
+		if(offscreenColorFormat == VK_FORMAT_UNDEFINED)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "No sampled, copyable color-attachment format reported for editor offscreen rendering; falling back to R8G8B8A8_UNORM.");
+			offscreenColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
 		}
-
-
-		if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
-				TERRAENGINE_LOG(LogLevel::Warning, "No sampled, copyable color-attachment format reported for editor offscreen rendering; falling back to R8G8B8A8_UNORM.");
-				offscreenColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
-			}
 	}
 
 

@@ -17,6 +17,7 @@
 #include "Components/MeshRenderComponent.h"
 #include "Components/NavigationAgentComponent.h"
 #include "Components/CharacterLocomotionComponent.h"
+#include "Scene/PostProcessVolumeComponent.h"
 #include "Components/SkyComponent.h"
 #include "Components/PrefabLinkComponent.h"
 #include "Components/UIComponent.h"
@@ -92,6 +93,9 @@ void ComponentRegistry::RegisterAllComponents() {
 	// owned by NavigationAgentSystem and therefore is never registered here.
 	NavigationAgentComponent::registerType();
 	CharacterLocomotionComponent::registerType();
+	// Volumes must be available to the inspector and mutation codec before
+	// the first authored scene is opened.
+	PostProcessVolumeComponent::registerType();
 	SkyComponent::registerType();
 	PrefabLinkComponent::registerType();
 	UIComponent::registerType();

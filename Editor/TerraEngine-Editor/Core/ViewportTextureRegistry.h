@@ -33,6 +33,8 @@ namespace TerraEngine::Editor
 			std::uint64_t generation, std::uint64_t lastSubmittedSerial,
 			const RegisterCallback& registerTexture);
 		[[nodiscard]] void* ActiveDescriptor(ViewportTextureKind kind) const noexcept;
+		// A recorded draw may still borrow a retired descriptor until its UI fence.
+		[[nodiscard]] std::optional<ViewportTextureRegistration> FindDescriptor(void* descriptor) const noexcept;
 		void BeginDrawDataUsage();
 		void MarkDrawDataUse(void* descriptor);
 		void CommitDrawDataUsage(std::uint64_t submittedSerial);

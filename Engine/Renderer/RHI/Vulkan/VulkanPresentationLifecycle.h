@@ -15,8 +15,33 @@
 #include <string_view>
 #include <vector>
 
+namespace TerraEngine::Renderer { enum class RenderCaptureImageStage : std::uint8_t; }
+
 namespace TerraEngine::Renderer::Vulkan
 {
+	// Exact content of one retained Scene attachment after its writing command
+	// was accepted by the real graphics queue. This is not completion/present proof.
+	struct SceneViewContentStamp
+	{
+		std::uint64_t frameId = 0;
+		std::uint64_t poseSequence = 0;
+		std::uint64_t settingsRevision = 0;
+		std::uint64_t projectGeneration = 0;
+		std::uint64_t playSessionGeneration = 0;
+		std::uint64_t sceneAaRevision = 0;
+		std::uint64_t targetGeneration = 0;
+		std::uint64_t postProcessTargetGeneration = 0;
+		std::uint64_t backendResourceGeneration = 0;
+		std::uint64_t rendererSessionGeneration = 0;
+		std::uint64_t imageContentSerial = 0;
+		std::uint64_t viewLifetimeGeneration = 0;
+		std::uint32_t internalWidth = 0, internalHeight = 0;
+		std::uint32_t outputWidth = 0, outputHeight = 0;
+		std::uint32_t aaMode = 0;
+		std::uint32_t viewType = 0, outputKind = 0, outputId = 0;
+		RenderCaptureImageStage imageStage = static_cast<RenderCaptureImageStage>(0); // Legacy.
+	};
+
 	// MaintenanceExtensionLineage identifies which spelling of the promoted
 	// surface/swapchain maintenance contract should be enabled together.
 	enum class MaintenanceExtensionLineage
@@ -104,6 +129,18 @@ namespace TerraEngine::Renderer::Vulkan
 		std::int32_t nativeResult = 0;
 		std::uint64_t submissionSerial = 0;
 		std::optional<AcquiredPresentationImage> acquiredImage;
+		// These ticks bracket the real WSI call. They identify queue handoff,
+		// while GPU completion remains owned by the editor submission tracker.
+		std::uint64_t presentSequence = 0;
+		std::uint64_t queuePresentBeginQpc = 0;
+		std::uint64_t queuePresentEndQpc = 0;
+		std::uint64_t qpcFrequency = 0;
+		bool wsiEnqueued = false;
+		// Optional Windows proof taken on both sides of the actual queue call.
+		std::uint64_t windowHandle = 0;
+		std::uint64_t monitorBefore = 0, monitorAfter = 0;
+		std::uint64_t foregroundWindowBefore = 0, foregroundWindowAfter = 0;
+		bool windowVisibleBefore = false, windowVisibleAfter = false;
 
 		[[nodiscard]] bool Submitted() const noexcept
 		{

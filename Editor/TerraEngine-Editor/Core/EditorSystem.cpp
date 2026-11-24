@@ -1096,7 +1096,7 @@ void EditorSystem::Update(float deltaTime) {
 				throw std::runtime_error("Dear ImGui Vulkan draw recording failed with result "
 					+ std::to_string(bridgeResult.nativeResult));
 			}
-			});
+			}, mainEditor && mainEditor->IsSceneViewPresentationTraceEnabled());
 			if (context.editorProfiler)
 			{
 				// PresentEditor includes the UI fence/acquire, command recording,
@@ -1115,6 +1115,7 @@ void EditorSystem::Update(float deltaTime) {
 				<< " with result " << presentResult.nativeResult);
 		}
 		if (mainEditor) {
+			mainEditor->SettleSceneViewPresentationTrace(presentResult);
 			if (presentResult.submissionSerial != 0) {
 				mainEditor->CommitViewportDrawDataUses(presentResult.submissionSerial);
 			} else {

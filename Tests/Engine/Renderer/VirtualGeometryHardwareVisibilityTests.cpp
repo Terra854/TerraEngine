@@ -80,8 +80,12 @@ namespace TerraEngine::Tests
 					&& renderPassSource.find("DestroyConventionalVisibilityIdentityAttachment") != std::string::npos,
 					"Swapchain and offscreen identity images must participate in create/destroy/recreation ownership.");
 				context.Expect(pipelineSource.find("conventionalBlendAttachments") != std::string::npos
-					&& pipelineSource.find("colorBlending.attachmentCount = conventionalVisibilityPass ? 2u : 1u") != std::string::npos,
-					"Conventional pipelines must match two color attachments while target0-only passes retain one.");
+					&& pipelineSource.find("colorBlending.attachmentCount = screenSpaceMrt ? 7u : conventionalVisibilityPass ? 2u : 1u") != std::string::npos
+					&& pipelineSource.find("colorBlending.pAttachments = screenSpaceMrt ? screenBlendAttachments.data() : conventionalVisibilityPass") != std::string::npos
+					&& pipelineSource.find("? conventionalBlendAttachments.data() : &colorBlendAttachment") != std::string::npos
+					&& pipelineSource.find("screenRasterOwner->colorReferences[i].attachment == VK_ATTACHMENT_UNUSED ? 0u") != std::string::npos
+					&& pipelineSource.find("screenBlendAttachments[i].blendEnable = VK_FALSE;") != std::string::npos,
+					"Registered MRT pipelines need seven slots with unused writes disabled; conventional and target0-only passes must retain their exact two/one-slot states.");
 				context.Expect(offscreenSource.find("identityBlendAttachment.colorWriteMask = 0u") != std::string::npos
 					&& offscreenSource.find("shadowRenderPass") != std::string::npos,
 					"Grid, sky, UI, and shadow paths must keep the identity target disabled or absent.");

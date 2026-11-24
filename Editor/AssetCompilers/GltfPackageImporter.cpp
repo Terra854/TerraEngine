@@ -3340,7 +3340,10 @@ namespace TerraEngine::AssetPipeline
 			return result;
 		}
 
+		// Decode HDR emissive strength before lowering material factors. The
+		// vendor default remains one for sources that do not use the extension.
 		fastgltf::Parser parser(
+			fastgltf::Extensions::KHR_materials_emissive_strength |
 			fastgltf::Extensions::KHR_materials_unlit |
 			fastgltf::Extensions::KHR_texture_transform |
 			fastgltf::Extensions::KHR_lights_punctual);
@@ -3742,7 +3745,10 @@ namespace TerraEngine::AssetPipeline
 			return result;
 		}
 
+		// Decode HDR emissive strength before lowering material factors. The
+		// vendor default remains one for sources that do not use the extension.
 		fastgltf::Parser parser(
+			fastgltf::Extensions::KHR_materials_emissive_strength |
 			fastgltf::Extensions::KHR_materials_unlit |
 			fastgltf::Extensions::KHR_texture_transform |
 			fastgltf::Extensions::KHR_lights_punctual);

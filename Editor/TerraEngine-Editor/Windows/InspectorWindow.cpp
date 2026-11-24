@@ -29,6 +29,10 @@ namespace TerraEngine::EditorTests {
 #include "Engine/Components/TerrainComponent.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/VirtualGeometryCodec.h"
+#include "Engine/Resource/PostProcessProfile.h"
+#include "Engine/Resource/PostProcessEffectAsset.h"
+#include "Engine/Scene/PostProcessVolumeComponent.h"
+#include "Engine/Renderer/GraphicsSettings/PostProcessAuthoringController.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneMutationQueue.h"
@@ -83,6 +87,17 @@ namespace TerraEngine::EditorTests {
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+// Inspector drafts are UI-owned copies. They never retain live component pointers.
+struct PostProcessInspectorState
+{
+	std::string message;
+	std::string resourceKey;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsTarget cameraTarget;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp cameraLifecycle;
+	std::uint64_t cameraRevision = 0, requestId = 0;
+	std::vector<TerraEngine::Scripting::PostProcessAuthoringWire::EffectState> effects;
+};
 
 using ReflectionProperty = TerraEngine::Reflection::Property;
 using ReflectionType = TerraEngine::Reflection::Type;
@@ -827,6 +842,7 @@ void DrawAnimatorPropertyGuidance(std::string_view propertyName, bool labelHover
 
 std::vector<AssetType> CandidateAssetTypesForProperty(std::string_view propertyName)
 {
+	if(propertyName == "PostProcessProfileId" || propertyName == "profileAssetId") return {AssetType::PostProcessProfile};
 	if(propertyName == "clipAssetId") return {AssetType::AudioClip};
 	if(propertyName == "controllerAssetId") return {AssetType::AnimationController};
 	if(propertyName == "defaultClipAssetId") return {AssetType::AnimationClip};
@@ -1819,6 +1835,220 @@ private:
 	ReflectionVariant m_NewValue;
 };
 
+namespace
+{
+// Inspector is a protected editor producer. Reads capture stable observations;
+// the existing queue owns later all-or-nothing visibility and undo history.
+void QueuePostProcessProperty(entt::entity entity, const std::string& component,
+	const std::string& property, ReflectionVariant value)
+{
+	auto& objects = ObjectManager::instance(); const auto object = objects.getObject(entity);
+	if (!object) return;
+	const auto id = objects.getUUID(*object);
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"inspector-postprocess-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()),
+		TerraEngine::Scene::TransactionOrigin::Editor, "InspectorPostProcess");
+	builder.ObserveScene(objects).ObserveObject(objects, id).SetUndoGroup("Edit Post Processing")
+		.UpdateComponentProperty(id, component, property, std::move(value));
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+}
+
+void DrawCustomParameterValue(const char* label, TerraEngine::Renderer::CustomPostProcessValue& value)
+{
+	// These widgets edit only a detached draft. Native admission rechecks every
+	// field and range together when Apply is pressed; invalid input keeps output.
+	std::visit([&](auto& v) {
+		using T = std::decay_t<decltype(v)>;
+		if constexpr (std::is_same_v<T, bool>) ImGui::Checkbox(label, &v);
+		else if constexpr (std::is_same_v<T, std::int32_t>) ImGui::InputScalar(label, ImGuiDataType_S32, &v);
+		else if constexpr (std::is_same_v<T, std::uint32_t>) ImGui::InputScalar(label, ImGuiDataType_U32, &v);
+		else if constexpr (std::is_same_v<T, float>) ImGui::InputFloat(label, &v);
+		else ImGui::InputScalarN(label, ImGuiDataType_Float, v.data(), static_cast<int>(v.size()));
+	}, value);
+}
+}
+
+void InspectorWindow::DrawPostProcessProfileBinding(const std::string& component,
+	const std::string& property, entt::entity entity, const TerraEngine::UUID& value)
+{
+	if (!m_PostProcessInspector) m_PostProcessInspector = std::make_unique<PostProcessInspectorState>();
+	auto& state = *m_PostProcessInspector;
+	std::string label; ResolveInspectorAssetLabel(value, property, label);
+	auto assign = [&](const TerraEngine::UUID& id) {
+		if (id != TerraEngine::EMPTY_UUID) {
+			const auto* metadata = AssetDatabase::Instance().FindAssetByGuid(id);
+			if (!metadata || metadata->importerName != "PostProcessProfileImporter") { state.message = "Choose an imported post-process profile."; return; }
+			const auto owner = ResourceManager::Instance().TryAcquirePostProcessProfileSnapshot(id);
+			if (!owner || !*owner || (*owner)->assetId != id) {
+				(void)ResourceManager::Instance().LoadPostProcessProfileAsync(id);
+				state.message = "Profile is loading. Select it again when its resource is ready."; return;
+			}
+		}
+		QueuePostProcessProperty(entity, component, property, ReflectionVariant{id});
+		state.message = "Profile change queued for the protected scene boundary.";
+	};
+	ImGui::SetNextItemWidth(-1.0f);
+	if (ImGui::BeginCombo(("##Profile-" + property).c_str(), label.c_str())) {
+		if (ImGui::Selectable("None", value == TerraEngine::EMPTY_UUID)) assign(TerraEngine::EMPTY_UUID);
+		for (const auto& [path, metadata] : AssetDatabase::Instance().GetAssets()) {
+			if (metadata.importerName != "PostProcessProfileImporter") continue;
+			ImGui::PushID(TerraEngine::ToHexString(metadata.guid).c_str());
+			if (ImGui::Selectable(metadata.sourcePath.filename().string().c_str(), metadata.guid == value)) assign(metadata.guid);
+			ImGui::PopID();
+		} ImGui::EndCombo();
+	}
+	if (ImGui::BeginDragDropTarget()) {
+		if (const auto* payload = ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+			if (payload->Data && payload->DataSize == sizeof(TerraEngine::UUID)) { TerraEngine::UUID id{}; std::memcpy(id.data(), payload->Data, sizeof(id)); assign(id); }
+			else state.message = "Invalid profile asset payload; the current profile is unchanged.";
+		} ImGui::EndDragDropTarget();
+	}
+	if (value != TerraEngine::EMPTY_UUID && ImGui::BeginPopupContextItem()) {
+		if (ImGui::MenuItem("Clear Profile")) assign(TerraEngine::EMPTY_UUID);
+		ImGui::EndPopup();
+	}
+	if (!state.message.empty()) ImGui::TextWrapped("%s", state.message.c_str());
+}
+
+void InspectorWindow::DrawPostProcessVolumeInspector(entt::entity entity)
+{
+	auto& objects = ObjectManager::instance(); const auto object = objects.getObject(entity);
+	auto* live = object ? objects.GetComponent<PostProcessVolumeComponent>(*object) : nullptr;
+	if (!live) return;
+	PostProcessVolumeComponent value;
+	{ auto lock = live->acquireReadLock(); value = *live; }
+	const auto oldMinimum = value.boundsMinimum; const auto oldMaximum = value.boundsMaximum;
+	if (ImGui::BeginTable("PostProcessVolumeProfile", 2)) {
+		ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Profile"); ImGui::TableSetColumnIndex(1);
+		DrawPostProcessProfileBinding("PostProcessVolumeComponent", "profileAssetId", entity, value.profileAssetId);
+		ImGui::EndTable();
+	}
+	const bool globalChanged = ImGui::Checkbox("Global", &value.global);
+	ImGui::BeginDisabled(value.global);
+	const bool minimumChanged = ImGui::InputScalarN("Local minimum", ImGuiDataType_Double, value.boundsMinimum.data(), 3);
+	const bool maximumChanged = ImGui::InputScalarN("Local maximum", ImGuiDataType_Double, value.boundsMaximum.data(), 3);
+	const bool blendChanged = ImGui::InputFloat("Blend distance", &value.blendDistance);
+	ImGui::EndDisabled();
+	const bool layersChanged = ImGui::InputScalar("Camera layer mask", ImGuiDataType_U64, &value.layerMask);
+	const bool priorityChanged = ImGui::InputInt("Priority", &value.priority);
+	const bool weightChanged = ImGui::SliderFloat("Weight", &value.weight, 0.0f, 1.0f);
+	ImGui::TextWrapped("Bounds follow this object's transform. Expand the opposite bound first when moving outside the old box. Higher priority blends last; equal priorities use stable object identity. Layer mask selects camera layers.");
+	if (globalChanged || minimumChanged || maximumChanged || blendChanged || layersChanged || priorityChanged || weightChanged) {
+		bool boundsValid = true;
+		for (std::size_t i = 0; i < 3; ++i)
+			boundsValid &= (!minimumChanged || value.boundsMinimum[i] <= oldMaximum[i]) && (!maximumChanged || value.boundsMaximum[i] >= oldMinimum[i]);
+		if (!value.ValidateAuthoredValues() || !boundsValid) { m_PostProcessInspector->message = "Keep bounds finite and ordered; expand the opposite bound first. Blend distance must be nonnegative and weight must be in 0..1."; return; }
+		const auto id = objects.getUUID(*object);
+		TerraEngine::Scene::TransactionalMutationBuilder builder("inspector-volume-" + TerraEngine::ToHexString(TerraEngine::GenerateUUID()), TerraEngine::Scene::TransactionOrigin::Editor, "InspectorPostProcessVolume");
+		builder.ObserveScene(objects).ObserveObject(objects, id).SetUndoGroup("Edit Post Process Volume");
+		// Checked setters prepare independent detached candidates. Submit only
+		// changed fields and require bounds valid against the retained opposite
+		// bound, rather than relying on temporary same-batch intermediate boxes.
+		const std::string component = "PostProcessVolumeComponent";
+		if (minimumChanged) builder.UpdateComponentProperty(id, component, "boundsMinimum", ReflectionVariant{value.boundsMinimum});
+		if (maximumChanged) builder.UpdateComponentProperty(id, component, "boundsMaximum", ReflectionVariant{value.boundsMaximum});
+		if (globalChanged) builder.UpdateComponentProperty(id, component, "global", ReflectionVariant{value.global});
+		if (layersChanged) builder.UpdateComponentProperty(id, component, "layerMask", ReflectionVariant{value.layerMask});
+		if (priorityChanged) builder.UpdateComponentProperty(id, component, "priority", ReflectionVariant{value.priority});
+		if (blendChanged) builder.UpdateComponentProperty(id, component, "blendDistance", ReflectionVariant{value.blendDistance});
+		if (weightChanged) builder.UpdateComponentProperty(id, component, "weight", ReflectionVariant{value.weight});
+		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+		m_PostProcessInspector->message = "Volume changes queued for the protected scene boundary.";
+	}
+}
+
+void InspectorWindow::DrawCameraPostProcessInspector(entt::entity entity)
+{
+	namespace Settings = TerraEngine::Renderer::GraphicsSettings;
+	namespace Wire = TerraEngine::Scripting::PostProcessAuthoringWire;
+	if (!m_PostProcessInspector) m_PostProcessInspector = std::make_unique<PostProcessInspectorState>();
+	auto& state = *m_PostProcessInspector; auto& renderer = RenderSystem::Instance();
+	ImGui::SeparatorText("Post Processing Output");
+	const auto target = renderer.ResolveGraphicsSettingsCameraTarget(static_cast<std::uint32_t>(entity));
+	if (!target) { ImGui::TextWrapped("This camera has no published render output yet."); return; }
+	const auto read = renderer.GetPostProcessAuthoringController().Read(*target);
+	if (!read.snapshot) { ImGui::TextWrapped("%s", read.detail.c_str()); return; }
+	const auto& snapshot = *read.snapshot;
+	if (state.cameraTarget != snapshot.target || state.cameraLifecycle != snapshot.lifecycle || state.cameraRevision != snapshot.revision) {
+		if (state.cameraTarget != snapshot.target || state.cameraLifecycle != snapshot.lifecycle) state.requestId = 0;
+		state.cameraTarget = snapshot.target; state.cameraLifecycle = snapshot.lifecycle; state.cameraRevision = snapshot.revision;
+		state.effects = snapshot.requestedEffects;
+	}
+	ImGui::Text("Scene visible frame: %llu", static_cast<unsigned long long>(snapshot.sceneVisibleFrameId));
+	ImGui::Text("Accepted output frame: %llu", static_cast<unsigned long long>(snapshot.effectiveFrameId));
+	ImGui::TextWrapped("Inspect this camera's rendered view for the image. Controls become effective after native recording accepts this exact view.");
+	bool pending = false;
+	if (state.requestId) {
+		const auto receipt = renderer.GetPostProcessAuthoringController().ReadReceipt(state.requestId);
+		if (receipt) {
+			pending = receipt->request.state == Settings::GraphicsRequestState::Accepted || receipt->request.state == Settings::GraphicsRequestState::Submitted;
+			ImGui::TextWrapped("Request %llu: %s%s", static_cast<unsigned long long>(state.requestId), pending ? "Pending" : receipt->request.state == Settings::GraphicsRequestState::Applied ? "Applied" : "Rejected", receipt->request.detail.empty() ? "" : (" - " + receipt->request.detail).c_str());
+		}
+	}
+	auto submit = [&](Wire::Request request) {
+		request.target = snapshot.target; request.lifecycle = snapshot.lifecycle; request.baseRevision = snapshot.revision;
+		const auto result = renderer.SubmitPostProcessAuthoring(request); state.requestId = result.receipt.request.requestId;
+		state.message = result.receipt.request.detail;
+	};
+	ImGui::BeginDisabled(pending);
+	for (const auto& descriptor : snapshot.descriptors) {
+		if (!descriptor.effect) continue;
+		const auto& d = descriptor.effect->descriptor;
+		const auto draft = std::find_if(state.effects.begin(), state.effects.end(), [&](const auto& e) { return e.assetId == d.assetId; });
+		if (draft == state.effects.end()) continue;
+		ImGui::PushID(TerraEngine::ToHexString(d.assetId).c_str());
+		if (ImGui::TreeNode(d.stableId.c_str())) {
+			ImGui::TextWrapped("%s", descriptor.available ? "Available for this output" : descriptor.detail.c_str());
+			ImGui::Checkbox("Enabled", &draft->enabled);
+			for (auto& parameter : draft->parameters) DrawCustomParameterValue(parameter.name.c_str(), parameter.value);
+			if (ImGui::Button("Apply Effect")) { Wire::Request request; request.operation = Wire::Operation::PatchCustomEffects; request.effects.push_back({d.assetId, draft->enabled, draft->parameters, {}}); submit(std::move(request)); }
+			ImGui::SameLine();
+			if (ImGui::Button("Use Profile Values")) { Wire::Request request; request.operation = Wire::Operation::ResetCustomEffects; request.resetEffectAssetIds.push_back(d.assetId); submit(std::move(request)); }
+			ImGui::TreePop();
+		} ImGui::PopID();
+	}
+	ImGui::EndDisabled();
+	if (!state.message.empty()) ImGui::TextWrapped("%s", state.message.c_str());
+}
+
+void InspectorWindow::DrawPostProcessAssetInspector(const std::filesystem::path& path)
+{
+	if (!m_PostProcessInspector) m_PostProcessInspector = std::make_unique<PostProcessInspectorState>();
+	const auto& assets = AssetDatabase::Instance().GetAssets();
+	const auto found = assets.find(std::filesystem::absolute(path));
+	const AssetMetadata* metadata = found == assets.end() ? nullptr : &found->second;
+	if (!metadata) { ImGui::TextWrapped("Asset metadata is not available."); return; }
+	const auto key = TerraEngine::ToHexString(metadata->guid);
+	ImGui::TextUnformatted(path.filename().string().c_str());
+	ImGui::TextWrapped("Asset ID: %s", key.c_str());
+	auto& resources = ResourceManager::Instance(); auto& state = *m_PostProcessInspector;
+	if (state.resourceKey != key) {
+		state.resourceKey = key;
+		if (metadata->importerName == "PostProcessProfileImporter") (void)resources.LoadPostProcessProfileAsync(metadata->guid);
+		else (void)resources.LoadPostProcessEffectAsync(metadata->guid);
+	}
+	if (metadata->importerName == "PostProcessProfileImporter") {
+		const auto root = resources.TryAcquirePostProcessProfileSnapshot(metadata->guid);
+		if (!root || !*root) { ImGui::TextWrapped("Profile resource is pending or unavailable. The last usable camera output is retained."); return; }
+		const auto& profile = **root;
+		ImGui::Text("Schema: %u  Revision: %llu", profile.schemaVersion, static_cast<unsigned long long>(profile.revision));
+		ImGui::TextWrapped("Name: %s", profile.name.c_str());
+		ImGui::Text("Explicit settings: %zu  Custom effects: %zu", profile.overrideMask.size(), profile.customEffects.size());
+		ImGui::TextWrapped("Assign this profile to a Camera or Post Process Volume to view its resolved output.");
+		for (const auto& id : profile.customEffects) ImGui::BulletText("Effect %s", TerraEngine::ToHexString(id).c_str());
+	} else {
+		const auto root = resources.AcquirePostProcessEffectSnapshot(metadata->guid);
+		if (!root) { ImGui::TextWrapped("Effect resource is pending or unavailable. Its native availability is checked per camera output."); return; }
+		const auto& d = root->descriptor;
+		ImGui::TextWrapped("Effect: %s", d.stableId.c_str());
+		ImGui::Text("Revision: %llu  Stage: %u", static_cast<unsigned long long>(d.revision), static_cast<unsigned>(d.stage));
+		ImGui::TextWrapped("Shader asset: %s", TerraEngine::ToHexString(d.shaderAssetId).c_str());
+		ImGui::Text("Declared inputs: %zu  Parameters: %zu", d.inputs.size(), d.parameters.size());
+		for (const auto& parameter : d.parameters) ImGui::BulletText("%s (type %u, offset %u)", parameter.layout.name.c_str(), static_cast<unsigned>(parameter.layout.kind), parameter.layout.offsetBytes);
+		ImGui::TextWrapped("Select a camera with this registered effect to inspect availability and edit transient parameter values.");
+	}
+}
+
 InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
 
 	: EditorWindow("Inspector", true, "General"), m_Owner(owner) {
@@ -2110,7 +2340,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	// contents can replace ImGui's current item while the menu is visible.
 	const bool propertyLabelHovered =
 		ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal);
-	if (ImGui::BeginPopupContextItem(("PrefabPropertyReset_" + compName + "_" + name).c_str())) {
+	if (!(compName == "CameraComponent" && name == "PostProcessProfileId")
+		&& ImGui::BeginPopupContextItem(("PrefabPropertyReset_" + compName + "_" + name).c_str())) {
 		if (ImGui::MenuItem("Reset To Prefab Default")) {
 			ResetPrefabOverride(obj, compName, name);
 		}
@@ -2476,6 +2707,11 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 
 	else if (IsMetaType<TerraEngine::UUID>(type)) {
 		TerraEngine::UUID val = MetaValue<TerraEngine::UUID>(var);
+		if ((compName == "CameraComponent" && name == "PostProcessProfileId")
+			|| (compName == "PostProcessVolumeComponent" && name == "profileAssetId")) {
+			DrawPostProcessProfileBinding(compName, name, obj, val);
+			return;
+		}
 		std::string label;
 		const bool found = ResolveInspectorAssetLabel(val, name, label);
 
@@ -5132,7 +5368,9 @@ void InspectorWindow::OnGui() {
 		std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
 
-		if (ext == ".tmat") {
+		if (ext == ".tepostprofile" || ext == ".teposteffect") {
+			DrawPostProcessAssetInspector(*selectedAsset);
+		} else if (ext == ".tmat") {
 			DrawMaterialInspector(*selectedAsset);
 		} else if (TerraEngine::AssetPipeline::IsModelPackageSourceExtension(*selectedAsset)) {
 			DrawModelPackageInspector(*selectedAsset);
@@ -5536,6 +5774,10 @@ void InspectorWindow::OnGui() {
 							(void)SubmitLocomotionBatch(candidates, "Set Character Locomotion Active", &m_LocomotionValidationMessage);
 						}
 					}
+					else if (compName == "PostProcessVolumeComponent") {
+						if (ImGui::Checkbox("##compActive", &compActive))
+							QueuePostProcessProperty(obj, compName, "active", ReflectionVariant{compActive});
+					}
 					else if (ImGui::Checkbox("##compActive", &compActive)) {
 
 						if (IsValid(activeProp)) {
@@ -5567,6 +5809,10 @@ void InspectorWindow::OnGui() {
 						// Developers author the familiar Transform surface regardless of
 						// how far from the origin the object is stored internally.
 						DrawTransformInspector(*object);
+					}
+					else if (compName == "PostProcessVolumeComponent")
+					{
+						DrawPostProcessVolumeInspector(obj);
 					}
 					else if (compName == "LightComponent")
 					{
@@ -5804,6 +6050,7 @@ void InspectorWindow::OnGui() {
 							ImGui::EndTable();
 						}
 					}
+					if (compName == "CameraComponent") DrawCameraPostProcessInspector(obj);
 					ImGui::Unindent();
 				}
 				ImGui::Separator();

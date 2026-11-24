@@ -4,6 +4,453 @@
 // still flow through VulkanContext::Impl so frame-fence lifetime rules remain unchanged.
 
 #include "VulkanResourceSource.h"
+#include "VulkanPostProcessPasses.h"
+#include <cmath>
+
+namespace
+{
+	using namespace TerraEngine::Renderer;
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+
+	PostProcessEffectIdentity ColorTimingEffect(const RenderViewPresentationInput& view, std::uint32_t stage)
+	{
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::SpatialAA))
+			return {"spatial-aa", PostProcessPassKind::SpatialAA};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::Presentation))
+			return {"presentation-lens", PostProcessPassKind::PresentationEffects};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::Temporal))
+			return {"temporal-resolve", PostProcessPassKind::TemporalResolve};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::Atmosphere))
+			return {"volumetric-fog-and-shafts", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::OutputDither))
+			return {"output-dither", PostProcessPassKind::OverlayComposite};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::DepthOfField))
+			return {"depth-of-field", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::LensRadiance))
+			return {"lens-radiance", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::LensDirt))
+			return {"lens-dirt", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::LensFlare))
+			return {"lens-flare", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::MotionBlur))
+			return {"motion-blur", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::MotionDepthHistory))
+			return {"motion-depth-history", PostProcessPassKind::HdrCamera};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::ScreenAO))
+			return {"gtao", PostProcessPassKind::ScreenSpaceLighting};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::ScreenReflections))
+			return {"ssr", PostProcessPassKind::ScreenSpaceLighting};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::ScreenIndirect))
+			return {"ssgi", PostProcessPassKind::ScreenSpaceLighting};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::ScreenComposite))
+			return {"screen-space-composite", PostProcessPassKind::ScreenSpaceLighting};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::ScreenDepthHierarchy))
+			return {"screen-depth-hierarchy", PostProcessPassKind::ScreenSpaceLighting};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::CustomHdr))
+			return {"custom-hdr", PostProcessPassKind::CustomFullscreen};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::CustomDisplay))
+			return {"custom-display", PostProcessPassKind::CustomFullscreen};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::CustomBeforeUI))
+			return {"custom-before-ui", PostProcessPassKind::CustomFullscreen};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::ToneAndGrade))
+			return {"tone-and-grade", PostProcessPassKind::ToneAndGrade};
+		if(stage == static_cast<std::uint32_t>(Vulkan::PostProcessStage::Bloom))
+			return {"bloom", PostProcessPassKind::HdrCamera};
+		const auto color = view.graphicsSettings
+			? ResolvePostProcessColorSettings(view.graphicsSettings->values) : PostProcessColorSettings{};
+		if(stage == 0 && view.graphicsSettings && BuildPostProcessGraphSettings(*view.graphicsSettings).spatialAA)
+			return {"post-process-chain", PostProcessPassKind::SpatialAA};
+		return {stage == 0 && (color.HasBloom() || color.HasToneAndGrading() || color.exposure == ExposureMode::Automatic)
+			? "color-chain" : "exposure", PostProcessPassKind::HdrCamera};
+	}
+}
+
+TerraEngine::Renderer::GraphicsSettings::PostProcessDiagnosticsSnapshot
+VulkanContext::GetPostProcessDiagnostics(
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	const TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt* correlatedRequest) const
+{
+	using namespace TerraEngine::Renderer;
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	PostProcessDiagnosticsSnapshot snapshot;
+	snapshot.view.viewType = presentation.output.diagnosticsView;
+	snapshot.view.outputKind = presentation.output.kind;
+	snapshot.view.outputId = presentation.output.outputId;
+	snapshot.frameId = presentation.referenceFrame.frameId;
+	if(presentation.graphicsSettings)
+	{
+		snapshot.lifecycle = presentation.graphicsSettings->lifecycle;
+		snapshot.settingsRevision = presentation.graphicsSettings->revision;
+		if(presentation.graphicsSettings->target.view)
+			snapshot.view.lifetimeGeneration = presentation.graphicsSettings->target.view->lifetimeGeneration;
+	}
+	if(presentation.graphicsView) snapshot.view = *presentation.graphicsView;
+	PostProcessEffectDiagnostic diagnostic;
+	diagnostic.effect = ColorTimingEffect(presentation, 0u);
+	diagnostic.timing.effect = diagnostic.effect;
+	diagnostic.timing.owner.lifecycle = snapshot.lifecycle;
+	diagnostic.timing.owner.view = snapshot.view;
+	diagnostic.timing.owner.settingsRevision = snapshot.settingsRevision;
+	diagnostic.timing.owner.frameId = snapshot.frameId;
+	const auto finish = [&]() {
+		snapshot.effects.push_back(std::move(diagnostic));
+		return snapshot;
+	};
+	// Rejection describes the requested operation. Its current view can still
+	// have an active prior setting, whose GPU duration belongs to that setting.
+	if(correlatedRequest && correlatedRequest->state == GraphicsRequestState::Rejected
+		&& std::any_of(correlatedRequest->affectedSettings.begin(), correlatedRequest->affectedSettings.end(),
+			[](const auto id) { return id >= GraphicsSettingId::AntiAliasingMode; }))
+	{
+		diagnostic.state = PostProcessEffectState::Rejected;
+		diagnostic.reason = correlatedRequest->reason == GraphicsRequestReason::Unsupported
+			? PostProcessDiagnosticReason::UnsupportedDevice : PostProcessDiagnosticReason::InvalidConfiguration;
+		diagnostic.requestId = correlatedRequest->requestId;
+		diagnostic.detail = correlatedRequest->detail;
+		diagnostic.timing.reason = diagnostic.reason;
+		return finish();
+	}
+	const auto plan = presentation.graphicsSettings
+		? BuildPostProcessGraphSettings(*presentation.graphicsSettings) : PostProcessGraphSettings{};
+	if(!plan.hdrCamera && !plan.toneAndGrade && !plan.spatialAA && !plan.coverageAA
+		&& !plan.temporalResolve && !plan.screenSpaceLighting && !plan.presentationEffects && !plan.customStages && !plan.outputDithering)
+	{
+		diagnostic.detail = "Color processing is disabled in this view's effective settings.";
+		diagnostic.timing.reason = PostProcessDiagnosticReason::Disabled;
+		return finish();
+	}
+	diagnostic.state = PostProcessEffectState::Unavailable;
+	diagnostic.reason = PostProcessDiagnosticReason::MissingResources;
+	diagnostic.timing.availability = PostProcessTimingAvailability::Unavailable;
+	const auto unavailable = [&](PostProcessDiagnosticReason reason, const char* detail) {
+		diagnostic.reason = reason;
+		diagnostic.detail = detail;
+		diagnostic.timing.reason = reason;
+		return finish();
+	};
+	if(!impl) return unavailable(PostProcessDiagnosticReason::MissingResources, "The native renderer owner is unavailable.");
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if(!impl->initialized || impl->deviceLost
+		|| snapshot.lifecycle.rendererSessionGeneration != impl->renderSessionGeneration
+		|| snapshot.lifecycle.backendResourceGeneration != impl->backendResourceGeneration)
+		return unavailable(PostProcessDiagnosticReason::StaleLifetime, "This effective view belongs to an unavailable renderer lifetime.");
+	if(!std::isfinite(plan.fixedExposureCompensation) || !Vulkan::SupportsPostProcessPlan(plan))
+		return unavailable(PostProcessDiagnosticReason::InvalidConfiguration, "This view requests an unsupported color configuration.");
+	if(!plan.executionAvailable)
+		return unavailable(PostProcessDiagnosticReason::MissingResources, "This effective setting has no certified native resource generation.");
+	const auto key = Vulkan::MakePostProcessTargetKey(presentation, snapshot.lifecycle.rendererSessionGeneration);
+	const auto* target = impl->FindPostProcessTargets(key);
+	if(!target || !target->passes)
+		return unavailable(PostProcessDiagnosticReason::MissingResources, "This view has no prepared native image pipeline.");
+	const auto& source = presentation.output.kind == RenderOutputKind::OffscreenTexture
+		? impl->captureView : (presentation.output.diagnosticsView == RenderViewType::Scene
+			? impl->sceneView : impl->gameView);
+	const auto& output = target->passes->output;
+	if(!Vulkan::IsPostProcessOutputCurrent(output, source.image, source.generation, source.colorFrameId)
+		|| output.publicationFrameId != snapshot.frameId || output.settingsRevision != snapshot.settingsRevision)
+		return unavailable(PostProcessDiagnosticReason::MissingResources, "This view has no matching accepted output for its effective frame and revision.");
+	diagnostic.state = PostProcessEffectState::Active;
+	diagnostic.reason = PostProcessDiagnosticReason::None;
+	diagnostic.detail = "The configured color stages executed in the accepted native view.";
+	diagnostic.timing.owner.targetGeneration = target->generation;
+	diagnostic.timing.availability = PostProcessTimingAvailability::Unavailable;
+	diagnostic.timing.reason = PostProcessDiagnosticReason::MissingMarkers;
+	const auto matches = [&](const PostProcessTimingSample& sample) {
+		return !sample.effect.stableId.empty() && sample.owner.lifecycle == snapshot.lifecycle
+			&& sample.owner.view == snapshot.view && sample.owner.settingsRevision == snapshot.settingsRevision
+			&& sample.owner.frameId == snapshot.frameId && sample.owner.targetGeneration == target->generation;
+	};
+	// An on-demand query may expose pending evidence but never a numeric duration
+	// before the exact submitted command's completion and query availability.
+	std::vector<PostProcessEffectDiagnostic> stages;
+	const auto keepTiming = [&](const PostProcessTimingSample& sample) {
+		if(!matches(sample)) return;
+		if(sample.effect == diagnostic.effect)
+		{
+			diagnostic.timing = sample;
+			return;
+		}
+		const auto previous = std::find_if(stages.begin(), stages.end(), [&](const auto& stage) { return stage.effect == sample.effect; });
+		if(previous != stages.end())
+		{
+			previous->timing = sample;
+			return;
+		}
+		PostProcessEffectDiagnostic effect;
+		effect.effect = sample.effect;
+		effect.state = PostProcessEffectState::Active;
+		effect.timing = sample;
+		stages.push_back(std::move(effect));
+	};
+	for(const auto& slot : impl->postProcessTimestampSlots)
+		if(slot.occupied) keepTiming(slot.sample);
+	{
+		std::lock_guard timingLock(impl->statsMutex);
+		for(const auto& sample : impl->completedPostProcessTimingSamples)
+			keepTiming(sample);
+	}
+	snapshot.effects.push_back(std::move(diagnostic));
+	for(auto& stage : stages) snapshot.effects.push_back(std::move(stage));
+	return snapshot;
+}
+
+bool VulkanContext::Impl::BeginPostProcessTimestamp(VkCommandBuffer command,
+	std::uint32_t frameSlot, std::uint32_t snapshotSlot,
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	std::uint64_t targetGeneration, std::uint32_t stage)
+{
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	if(!command || frameSlot >= MAX_FRAMES_IN_FLIGHT || snapshotSlot >= MAX_RENDER_SNAPSHOTS_PER_FRAME
+		|| stage >= kPostProcessStagesPerView || !presentation.graphicsSettings || !targetGeneration) return false;
+	const auto index = (frameSlot * MAX_RENDER_SNAPSHOTS_PER_FRAME + snapshotSlot) * kPostProcessStagesPerView + stage;
+	PostProcessTimingSample sample;
+	sample.effect = ColorTimingEffect(presentation, stage);
+	sample.owner.lifecycle = presentation.graphicsSettings->lifecycle;
+	sample.owner.view.viewType = presentation.output.diagnosticsView;
+	sample.owner.view.outputId = presentation.output.outputId;
+	sample.owner.view.outputKind = presentation.output.kind;
+	// Camera/view and executable image lifetimes advance independently. Keep an
+	// unknown game-root view lifetime explicit while retaining the actual target.
+	if(presentation.graphicsSettings->target.view)
+		sample.owner.view.lifetimeGeneration = presentation.graphicsSettings->target.view->lifetimeGeneration;
+	if(presentation.graphicsView) sample.owner.view = *presentation.graphicsView;
+	sample.owner.targetGeneration = targetGeneration;
+	sample.owner.settingsRevision = presentation.graphicsSettings->revision;
+	sample.owner.frameId = presentation.referenceFrame.frameId;
+	sample.owner.commandSerial = nextPostProcessTimestampCommandSerial++;
+	sample.owner.frameSlot = frameSlot;
+	sample.owner.snapshotSlot = snapshotSlot;
+	sample.queries = {index * 2, 2};
+	sample.nonemptyWork = true;
+	const auto unavailable = [&](PostProcessDiagnosticReason reason) {
+		sample.availability = PostProcessTimingAvailability::Unavailable;
+		sample.reason = reason;
+		std::lock_guard lock(statsMutex);
+		completedPostProcessTimingSamples[index] = std::move(sample);
+		return false;
+	};
+	if(deviceLost || sample.owner.lifecycle.rendererSessionGeneration != renderSessionGeneration
+		|| sample.owner.lifecycle.backendResourceGeneration != backendResourceGeneration)
+		return unavailable(PostProcessDiagnosticReason::StaleLifetime);
+	if(postProcessTimestampSlots[index].occupied)
+		return unavailable(PostProcessDiagnosticReason::QueryCapacityExceeded);
+	if(!postProcessTimestampPoolAttempted)
+	{
+		postProcessTimestampPoolAttempted = true;
+		// Format and resource preparation already qualified the executed pass.
+		// Timing additionally requires the selected queue's actual timestamp bits.
+		if(device && lightingDepthTimestampValidBits > 0 && lightingDepthTimestampValidBits <= 64
+			&& std::isfinite(gpuTimestampPeriodNanoseconds) && gpuTimestampPeriodNanoseconds > 0)
+		{
+			VkQueryPoolCreateInfo info{};
+			info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+			info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+			info.queryCount = kPostProcessTimingSlotCount * 2;
+			if(vkCreateQueryPool(device, &info, nullptr, &postProcessTimestampQueryPool) == VK_SUCCESS)
+				++postProcessTimestampPoolGeneration;
+		}
+	}
+	if(!postProcessTimestampQueryPool)
+	{
+		const bool supported = device && lightingDepthTimestampValidBits > 0 && lightingDepthTimestampValidBits <= 64
+			&& std::isfinite(gpuTimestampPeriodNanoseconds) && gpuTimestampPeriodNanoseconds > 0;
+		return unavailable(supported ? PostProcessDiagnosticReason::MissingResources
+			: PostProcessDiagnosticReason::UnsupportedDevice);
+	}
+	sample.owner.queryPoolGeneration = postProcessTimestampPoolGeneration;
+	sample.timestampValidBits = lightingDepthTimestampValidBits;
+	sample.timestampPeriodNanoseconds = gpuTimestampPeriodNanoseconds;
+	sample.availability = PostProcessTimingAvailability::Pending;
+	auto& slot = postProcessTimestampSlots[index];
+	slot.sample = std::move(sample);
+	slot.command = command;
+	slot.fence = VK_NULL_HANDLE;
+	slot.occupied = true;
+	slot.ended = false;
+	slot.acceptedUnfenced = false;
+	// Reset only this admitted pair. A pending accepted range cannot be recycled.
+	vkCmdResetQueryPool(command, postProcessTimestampQueryPool, slot.sample.queries.firstQuery, 2);
+	// The preceding geometry must reach completion before the timed copy and
+	// fullscreen draws. Top-of-pipe would include geometry still in flight.
+	vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+		postProcessTimestampQueryPool, slot.sample.queries.firstQuery);
+	return true;
+}
+
+void VulkanContext::Impl::EndPostProcessTimestamp(VkCommandBuffer command,
+	std::uint32_t frameSlot, std::uint32_t snapshotSlot, std::uint32_t stage)
+{
+	if(frameSlot >= MAX_FRAMES_IN_FLIGHT || snapshotSlot >= MAX_RENDER_SNAPSHOTS_PER_FRAME || stage >= kPostProcessStagesPerView) return;
+	auto& slot = postProcessTimestampSlots[(frameSlot * MAX_RENDER_SNAPSHOTS_PER_FRAME + snapshotSlot) * kPostProcessStagesPerView + stage];
+	if(!slot.occupied || slot.command != command || slot.ended || slot.sample.submitSerial) return;
+	vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+		postProcessTimestampQueryPool, slot.sample.queries.firstQuery + 1);
+	slot.ended = true;
+}
+
+void VulkanContext::Impl::MarkPostProcessTimestampCommandsSubmitted(
+	std::span<const VkCommandBuffer> commands, std::uint32_t frameSlot, VkFence fence) noexcept
+{
+	if(!postProcessTimestampQueryPool || frameSlot >= MAX_FRAMES_IN_FLIGHT) return;
+	std::uint64_t submitSerial = 0;
+	for(auto& slot : postProcessTimestampSlots)
+	{
+		if(!slot.occupied || slot.sample.owner.frameSlot != frameSlot) continue;
+		const bool included = std::find(commands.begin(), commands.end(), slot.command) != commands.end();
+		if(included && !slot.sample.submitSerial)
+		{
+			if(!submitSerial) submitSerial = nextPostProcessTimestampSubmitSerial++;
+			slot.sample.submitSerial = submitSerial;
+			slot.acceptedUnfenced = true;
+		}
+		// The later fence-bearing UI submit covers an accepted offscreen prefix
+		// on the same queue. A previously signaled slot fence never grants proof.
+		if(fence && slot.acceptedUnfenced)
+		{
+			slot.fence = fence;
+			slot.acceptedUnfenced = false;
+		}
+	}
+}
+
+void VulkanContext::Impl::DiscardPostProcessTimestampCommands(std::span<const VkCommandBuffer> commands) noexcept
+{
+	if(!postProcessTimestampQueryPool) return;
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	for(auto& slot : postProcessTimestampSlots)
+	{
+		if(!slot.occupied || slot.sample.submitSerial
+			|| std::find(commands.begin(), commands.end(), slot.command) == commands.end()) continue;
+		slot.sample.availability = PostProcessTimingAvailability::Abandoned;
+		slot.sample.reason = PostProcessDiagnosticReason::DiscardedCommand;
+		slot.sample.durationMilliseconds.reset();
+		{
+			std::lock_guard lock(statsMutex);
+			completedPostProcessTimingSamples[slot.sample.queries.firstQuery / 2u] = std::move(slot.sample);
+		}
+		slot.occupied = false;
+	}
+}
+
+void VulkanContext::Impl::ResolvePostProcessTimestampSlot(PostProcessTimestampSlot& slot)
+{
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	if(!slot.occupied || !slot.sample.submitSerial || !slot.sample.completionSerial) return;
+	auto& sample = slot.sample;
+	sample.durationMilliseconds.reset();
+	if(deviceLost || sample.owner.lifecycle.rendererSessionGeneration != renderSessionGeneration
+		|| sample.owner.lifecycle.backendResourceGeneration != backendResourceGeneration
+		|| sample.owner.queryPoolGeneration != postProcessTimestampPoolGeneration)
+	{
+		sample.availability = PostProcessTimingAvailability::Cancelled;
+		sample.reason = PostProcessDiagnosticReason::StaleLifetime;
+	}
+	else if(!slot.ended)
+	{
+		sample.availability = PostProcessTimingAvailability::Unavailable;
+		sample.reason = PostProcessDiagnosticReason::MissingMarkers;
+	}
+	else
+	{
+		struct Query { std::uint64_t ticks = 0; std::uint64_t available = 0; };
+		std::array<Query, 2> result{};
+		const auto read = vkGetQueryPoolResults(device, postProcessTimestampQueryPool,
+			sample.queries.firstQuery, 2, sizeof(result), result.data(), sizeof(Query),
+			VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+		sample.beginTicks = result[0].ticks;
+		sample.endTicks = result[1].ticks;
+		sample.beginAvailable = result[0].available != 0;
+		sample.endAvailable = result[1].available != 0;
+		if(read != VK_SUCCESS || !sample.beginAvailable || !sample.endAvailable)
+		{
+			sample.availability = PostProcessTimingAvailability::Unavailable;
+			sample.reason = read == VK_SUCCESS || read == VK_NOT_READY
+				? PostProcessDiagnosticReason::MissingAvailability : PostProcessDiagnosticReason::QueryReadFailed;
+		}
+		else
+		{
+			const auto bits = sample.timestampValidBits;
+			const auto mask = bits == 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << bits) - 1;
+			sample.elapsedTicks = (sample.endTicks - sample.beginTicks) & mask;
+			const double milliseconds = static_cast<double>(sample.elapsedTicks)
+				* sample.timestampPeriodNanoseconds / 1000000.0;
+			if(sample.elapsedTicks && std::isfinite(milliseconds) && milliseconds > 0)
+			{
+				sample.availability = PostProcessTimingAvailability::Measured;
+				sample.reason = PostProcessDiagnosticReason::None;
+				sample.durationMilliseconds = milliseconds;
+			}
+			else
+			{
+				sample.availability = PostProcessTimingAvailability::Invalid;
+				sample.reason = PostProcessDiagnosticReason::InvalidDuration;
+			}
+		}
+	}
+	{
+		std::lock_guard lock(statsMutex);
+		completedPostProcessTimingSamples[sample.queries.firstQuery / 2u] = std::move(sample);
+	}
+	// The accepted command's completion proof releases the physical query pair,
+	// including unavailable readbacks. A new range starts with its own reset.
+	slot.occupied = false;
+}
+
+void VulkanContext::Impl::CompletePostProcessTimestampFrame(std::uint32_t frameSlot, VkFence fence)
+{
+	if(!postProcessTimestampQueryPool || !device || deviceLost || !fence
+		|| frameSlot >= MAX_FRAMES_IN_FLIGHT || vkGetFenceStatus(device, fence) != VK_SUCCESS) return;
+	for(auto& slot : postProcessTimestampSlots)
+	{
+		if(!slot.occupied || slot.sample.owner.frameSlot != frameSlot || slot.fence != fence
+			|| !slot.sample.submitSerial) continue;
+		slot.sample.completionSerial = slot.sample.submitSerial;
+		ResolvePostProcessTimestampSlot(slot);
+	}
+}
+
+void VulkanContext::Impl::CompletePostProcessTimestampDeviceIdle()
+{
+	if(!postProcessTimestampQueryPool || !device || deviceLost) return;
+	for(auto& slot : postProcessTimestampSlots)
+	{
+		if(!slot.occupied || !slot.sample.submitSerial) continue;
+		slot.sample.completionSerial = slot.sample.submitSerial;
+		ResolvePostProcessTimestampSlot(slot);
+	}
+}
+
+void VulkanContext::Impl::DestroyPostProcessTimestampQueries() noexcept
+{
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	// Existing teardown has already established idle or terminal device loss.
+	// Preserve explicit cancellation for outstanding ranges before pool release.
+	for(auto& slot : postProcessTimestampSlots)
+	{
+		if(!slot.occupied) continue;
+		slot.sample.availability = PostProcessTimingAvailability::Cancelled;
+		slot.sample.reason = PostProcessDiagnosticReason::StaleLifetime;
+		slot.sample.durationMilliseconds.reset();
+		{
+			std::lock_guard lock(statsMutex);
+			completedPostProcessTimingSamples[slot.sample.queries.firstQuery / 2u] = std::move(slot.sample);
+		}
+		slot.occupied = false;
+	}
+	if(device && postProcessTimestampQueryPool)
+		vkDestroyQueryPool(device, postProcessTimestampQueryPool, nullptr);
+	postProcessTimestampQueryPool = VK_NULL_HANDLE;
+	postProcessTimestampPoolAttempted = false;
+}
+
+std::vector<TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample> VulkanContext::Impl::GetCompletedPostProcessTimings() const
+{
+	std::vector<TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample> result;
+	std::lock_guard lock(statsMutex);
+	for(const auto& sample : completedPostProcessTimingSamples)
+		if(!sample.effect.stableId.empty()) result.push_back(sample);
+	return result;
+}
 
 
 bool VulkanContext::Impl::CreateGpuTimestampQueries() {
@@ -118,6 +565,7 @@ bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 
 
 void VulkanContext::Impl::DestroyGpuTimestampQueries() {
+	DestroyPostProcessTimestampQueries();
 	if (device != VK_NULL_HANDLE && gpuTimestampQueryPool != VK_NULL_HANDLE) {
 		vkDestroyQueryPool(device, gpuTimestampQueryPool, nullptr);
 	}

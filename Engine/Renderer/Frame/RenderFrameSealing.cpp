@@ -21,9 +21,12 @@ TerraEngine::Renderer::RenderViewPresentationInput RenderSystem::MakeFramePresen
 		TerraEngine::Renderer::RenderViewPresentationInput input{};
 		input.output = output;
 		input.referenceFrame = frame.referenceFrame;
+		input.poseSequence = frame.poseSequence;
 		input.viewMatrix = frame.viewMatrix;
 		input.projectionMatrix = frame.projectionMatrix;
 		input.cameraLocalPosition = frame.cameraLocalPosition;
+		input.graphicsCamera = frame.graphicsCamera;
+		input.graphicsView = frame.graphicsView;
 		input.directionalShadowAnchor = frame.directionalShadowAnchor;
 		input.deltaTimeSeconds = frame.deltaTimeSeconds;
 		input.globalTaskShaderCullingEnabled = frame.globalTaskShaderCullingEnabled;
@@ -108,6 +111,42 @@ void RenderSystem::QueueFramePreparedSubmission(const FrameVisibilityInputs& inp
 			1u, activeRenderFrameId);
 		prepared.presentation = MakeFramePresentationInput(
 			std::move(preparedFrame), prepared.output);
+		// Pin the same captured settings root used by graph preparation. Workers
+		// resolve explicit output identities and never consult the live controller.
+		TerraEngine::Renderer::RenderFrameViewRequest settingsView;
+		settingsView.outputKind = prepared.output.kind;
+		settingsView.viewType = prepared.output.diagnosticsView;
+		settingsView.outputId = prepared.output.outputId;
+		settingsView.targetSize = prepared.output.targetSize;
+		settingsView.graphicsCamera = prepared.presentation.graphicsCamera;
+		settingsView.graphicsView = prepared.presentation.graphicsView;
+		prepared.presentation.graphicsSettings =
+			TerraEngine::Renderer::SelectGraphicsSettingsForView(
+				inputs.renderFrameSnapshot, settingsView);
+		if(settingsView.graphicsCamera && settingsView.graphicsView)
+		{
+			const auto& authoring = inputs.renderFrameSnapshot.cameraPostProcessAuthoring;
+			const auto exact = std::find_if(authoring.begin(), authoring.end(), [&](const auto& state) {
+				return state->target.camera == settingsView.graphicsCamera && state->target.view == settingsView.graphicsView
+					&& state->lifecycle == inputs.renderFrameSnapshot.graphicsSettingsLifecycle;
+			});
+			if(exact != authoring.end())
+			{
+				prepared.presentation.graphicsAuthoring = *exact;
+				prepared.presentation.graphicsSettings = (*exact)->settings;
+			}
+		}
+		if(prepared.output.kind == RenderOutputKind::SceneView)
+		{
+			prepared.presentation.sceneAaRevision = inputs.renderFrameSnapshot.sceneAaRevision;
+			prepared.presentation.graphicsView.reset();
+			const auto& scene = inputs.renderFrameSnapshot.sceneGraphicsSettings;
+			// Resize registration and captured settings must agree before assigning
+			// a Scene view lifetime. A first mismatched-size frame has no such proof.
+			if(scene && prepared.output.targetSize.x == scene->outputWidth
+				&& prepared.output.targetSize.y == scene->outputHeight)
+				prepared.presentation.graphicsView = inputs.renderFrameSnapshot.sceneGraphicsView;
+		}
 		const bool reuseCachedViewLanes = cachedRecord != nullptr
 			&& prepared.presentation.editorContextTint == glm::vec4(0.0f)
 			&& cachedRecord->stableOrdinals.size() == commands.size()

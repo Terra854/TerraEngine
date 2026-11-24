@@ -1,4 +1,4 @@
-// VulkanFrameRendering.cpp — Per-view render command recording and scene submission preparation
+// VulkanFrameRendering.cpp â€” Per-view render command recording and scene submission preparation
 //
 // This file owns one focused VulkanContext responsibility. State remains in VulkanContext::Impl,
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
@@ -8,6 +8,15 @@
 #include "Tests/Support/ReviewRemediation/DiscardedPrimaryReviewHooks.h"
 #include "ThreadPool/ScopedTaskSettlement.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/Graph/RenderGraph.h"
+#include "VulkanPostProcessPasses.h"
+#include "VulkanPostProcessMsaa.h"
+#include "VulkanPostProcessTemporalView.h"
+#include "VulkanPostProcessScaledCamera.h"
+#include "VulkanPostProcessScreenSpaceRaster.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsCatalog.h"
+
+#include <atomic>
 
 
 namespace TerraEngine::Tests::Review
@@ -79,6 +88,227 @@ namespace TerraEngine::Tests::Review
 #endif
 		return false;
 	}
+}
+
+bool VulkanContext::PrepareFixedExposureView(
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot& candidate, std::string& reason)
+{
+	return PreparePostProcessView(presentation, candidate, false, reason);
+}
+
+bool VulkanContext::PreparePostProcessCandidate(
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot& candidate, std::string& reason)
+{
+	return PreparePostProcessView(presentation, candidate, true, reason);
+}
+
+bool VulkanContext::PreparePostProcessView(
+	const TerraEngine::Renderer::RenderViewPresentationInput& presentation,
+	const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot& candidate,
+	bool prepareOnly, std::string& reason)
+{
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	if(!impl->initialized || impl->deviceLost)
+	{
+		reason = "The protected Vulkan receiver or typed settings candidate is unavailable.";
+		return false;
+	}
+	const auto plan = TerraEngine::Renderer::BuildPostProcessGraphSettings(candidate);
+	if(candidate.lifecycle.rendererSessionGeneration != impl->renderSessionGeneration
+		|| candidate.lifecycle.backendResourceGeneration != impl->backendResourceGeneration
+		|| !TerraEngine::Renderer::Vulkan::SupportsPostProcessPlan(plan))
+	{
+		reason = "The candidate lifetime or requested post-processing configuration is unsupported.";
+		return false;
+	}
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	PostProcessEffectSettings effects;
+	const auto effectReason = ResolvePostProcessEffectSettings(candidate.values, effects);
+	if(effectReason != GraphicsRequestReason::None || (effects.RequestedCapabilities() != PostProcessEffectCapability::None
+		&& ValidatePostProcessEffectCapabilities(effects, static_cast<PostProcessEffectCapability>(
+			ReadGraphicsCatalogCapabilities(!impl->editorMode).postProcessEffectMask)) != GraphicsRequestReason::None))
+	{
+		reason = "The renderer cannot prepare the requested settings for this camera effect.";
+		return false;
+	}
+	if(!plan.hdrCamera && !plan.toneAndGrade && !plan.spatialAA && !plan.coverageAA && !plan.presentationEffects && !plan.temporalResolve && !plan.screenSpaceLighting && !plan.customStages && !plan.outputDithering)
+	{
+		// Disabling the color chain needs no image allocation or processing pass.
+		reason.clear();
+		return true;
+	}
+	const auto& output = presentation.output;
+	if(output.diagnosticsView != RenderViewType::Scene && output.diagnosticsView != RenderViewType::Game)
+	{
+		reason = "Color processing is available only for camera-like outputs.";
+		return false;
+	}
+	const bool dedicated = output.kind == RenderOutputKind::OffscreenTexture;
+	const bool runtime = !impl->editorMode && !dedicated;
+	VkExtent2D extent = impl->swapchainExtent;
+	extent.width = output.targetSize.x != 0u ? output.targetSize.x : extent.width;
+	extent.height = output.targetSize.y != 0u ? output.targetSize.y : extent.height;
+	if(runtime && (extent.width != impl->swapchainExtent.width || extent.height != impl->swapchainExtent.height))
+	{
+		reason = "The fixed-exposure runtime source must match the native presentation extent.";
+		return false;
+	}
+	auto& source = dedicated ? impl->captureView
+		: (output.diagnosticsView == RenderViewType::Scene ? impl->sceneView : impl->gameView);
+	if(!source.image || !source.framebuffer || source.extent.width != extent.width || source.extent.height != extent.height)
+	{
+		// This explicit rebuild path runs after normal submission at the protected
+		// owner boundary. It never modifies values in a published settings snapshot.
+		impl->CreateOffscreenResources(source, extent);
+	}
+	if(!source.image || !source.framebuffer || source.extent.width != extent.width || source.extent.height != extent.height)
+	{
+		reason = "The actual HDR source target could not be prepared.";
+		return false;
+	}
+	using namespace TerraEngine::Renderer::Vulkan;
+	PreparedPostProcessViewResources resources;
+	resources.rendererGeneration = impl->renderSessionGeneration;
+	resources.backendResourceGeneration = impl->backendResourceGeneration;
+	resources.sourceExtent = source.extent;
+	resources.sourceFormat = impl->offscreenColorFormat;
+	resources.sourceTargetGeneration = source.generation;
+	resources.passes.physicalDevice = impl->physicalDevice;
+	resources.passes.destinationRenderPass = runtime ? impl->renderPass : impl->offscreenRenderPass;
+	resources.passes.cameraRasterPass = impl->offscreenRenderPass;
+	resources.passes.destinationFormat = runtime ? impl->swapchainImageFormat : impl->offscreenColorFormat;
+	resources.passes.depthFormat = impl->depthFormat != VK_FORMAT_UNDEFINED ? impl->depthFormat : impl->FindDepthFormat();
+	resources.passes.runtimeDestination = runtime;
+	resources.passes.ditherCameraOutput = SupportsOutputDithering(impl->swapchainImageFormat);
+	resources.passes.usesVrs = impl->UsesVrsAttachment();
+	resources.passes.vrsTexelSize = impl->vrs.texelSize;
+	resources.passes.destinationViews = {source.view, source.visibilityIdentity.view, source.depthView, impl->vrs.view};
+	resources.passes.sceneDepth.image = source.depthImage;
+	resources.passes.sceneDepth.view = source.depthView;
+	resources.passes.sceneDepth.extent = source.extent;
+	resources.passes.sceneDepth.format = impl->FindDepthFormat();
+	resources.passes.sceneDepth.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	if(plan.screenSpaceLighting)
+	{
+		resources.passes.retireScreenRaster = &Impl::RetirePostProcessScreenRaster;
+		resources.passes.screenRasterContext = impl.get();
+		resources.passes.sceneColorSource = {source.image, source.allocation, source.view, {}, source.extent,
+			impl->offscreenColorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+		resources.passes.sceneIdentity = {source.visibilityIdentity.image, source.visibilityIdentity.allocation, source.visibilityIdentity.view,
+			{}, source.extent, VK_FORMAT_R32G32B32A32_UINT, source.visibilityIdentity.usage};
+	}
+	PostProcessTargetRequest request;
+	PostProcessPassConfiguration configuration;
+	if(!BuildPostProcessViewRequest(presentation, candidate, resources, request, configuration, reason)) return false;
+	request.prepareOnly = prepareOnly;
+	return impl->EnsurePostProcessTargets(request, reason,
+		[&](PostProcessTargetBundle& targetCandidate, std::string& failure) {
+			if(targetCandidate.sceneColor.format != resources.sourceFormat)
+			{
+				failure = "Raw scene and processing target formats are not copy compatible.";
+				return false;
+			}
+			configuration.lookups = impl->PreparePostProcessLookups(configuration.color, failure);
+			if(!failure.empty()) return false;
+			if(configuration.effects.lensDirt.Active())
+			{
+				auto dirt = impl->PreparePostProcessLensDirtTexture(true, configuration.effects.lensDirt.texture, failure);
+				if(!dirt || dirt->sourceOwner != configuration.dirtTexture.sourceOwner) return false;
+				configuration.dirtTexture = std::move(*dirt);
+			}
+			targetCandidate.borrowedOffscreenImage = source.image;
+			if(!failure.empty() || !PreparePostProcessPasses(targetCandidate, configuration, failure)) return false;
+			if(plan.coverageAA && !impl->PrepareIndexedMsaaTargets(source, *targetCandidate.passes, failure))
+				return false;
+			if(presentation.output.diagnosticsView == RenderViewType::Game)
+			{
+				impl->CreateUIPipelines(targetCandidate.passes->overlayPass, targetCandidate.passes.get());
+				if(!targetCandidate.passes->staticUiPipeline || !targetCandidate.passes->sdfTextPipeline)
+				{ failure = "Overlay HUD pipeline preparation failed."; return false; }
+			}
+			return true;
+		}) != nullptr;
+}
+
+bool VulkanContext::PrepareIndexedRasterCandidate(const TerraEngine::Renderer::RenderFramePublication& publication,
+	std::uint32_t viewIndex, const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot& candidate,
+	std::string& reason, bool& preparationPending)
+{
+	using namespace TerraEngine::Renderer;
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	std::lock_guard lock(impl->deviceStateMutex);
+	preparationPending = false;
+	GraphicsAAConfiguration raster;
+	if (!impl->initialized || impl->deviceLost || viewIndex >= publication.presentationInputs.size()
+		|| candidate.lifecycle.rendererSessionGeneration != impl->renderSessionGeneration
+		|| candidate.lifecycle.backendResourceGeneration != impl->backendResourceGeneration
+		|| ResolveGraphicsAAConfiguration(candidate.values, raster) != GraphicsRequestReason::None
+		|| raster.raster != GraphicsGeometryRasterMode::Indexed)
+	{
+		reason = "The indexed candidate does not match a supported view lifetime.";
+		return false;
+	}
+	const auto& output = publication.presentationInputs[viewIndex].output;
+	const auto processing = BuildPostProcessGraphSettings(candidate);
+	if(processing.screenSpaceLighting)
+	{
+		const auto& presentation = publication.presentationInputs[viewIndex];
+		if(!PreparePostProcessView(presentation, candidate, true, reason)) return false;
+		const auto key = Vulkan::MakePostProcessTargetKey(presentation, impl->renderSessionGeneration);
+		const auto staged = impl->preparedPostProcessTargets.find(key);
+		const auto* target = staged != impl->preparedPostProcessTargets.end() ? staged->second.get() : impl->FindPostProcessTargets(key);
+		if(!target || !target->passes || !target->passes->screenRaster) return false;
+		const auto& raster = target->passes->screenRaster;
+		if(!impl->RegisterIndexedScreenSpacePass(raster, reason)) return false;
+		if(presentation.sky.renderBackground)
+		{
+			impl->CreateSkyBackgroundPipeline(raster->renderPass, 7u);
+			if(!impl->skyBackgroundVariants.contains(raster->renderPass))
+			{ reason = "Could not prepare the matching sky pipeline for screen lighting."; return false; }
+		}
+		VulkanRasterPipelineConfiguration prepared;
+		return impl->PrepareIndexedRasterView(publication, viewIndex, raster->renderPass,
+			VK_SAMPLE_COUNT_1_BIT, prepared, reason, preparationPending);
+	}
+	const bool dedicated = output.kind == RenderOutputKind::OffscreenTexture;
+	const bool offscreen = impl->editorMode || dedicated || processing.hdrCamera || processing.toneAndGrade
+		|| processing.spatialAA || processing.coverageAA || processing.presentationEffects || processing.temporalResolve || processing.outputDithering;
+	if (offscreen && !impl->offscreenRenderPass)
+	{
+		auto& source = dedicated ? impl->captureView
+			: (output.diagnosticsView == RenderViewType::Scene ? impl->sceneView : impl->gameView);
+		impl->CreateOffscreenResources(source, {output.targetSize.x, output.targetSize.y});
+	}
+	auto pass = offscreen ? impl->offscreenRenderPass : impl->renderPass;
+	auto samples = VK_SAMPLE_COUNT_1_BIT;
+	if(processing.coverageAA)
+	{
+		samples = VK_SAMPLE_COUNT_4_BIT;
+		pass = impl->EnsureIndexedMsaaRenderPass(reason);
+		if(!pass) return false;
+	}
+	else if (!impl->RegisterIndexedSingleSamplePass(pass))
+	{
+		reason = "The active camera pass does not qualify indexed raster without variable-rate shading.";
+		return false;
+	}
+	VulkanRasterPipelineConfiguration prepared;
+	if(!impl->PrepareIndexedRasterView(publication, viewIndex, pass, samples, prepared, reason, preparationPending))
+		return false;
+	if(!processing.temporalResolve && !processing.motionBlur) return true;
+	const auto& presentation = publication.presentationInputs[viewIndex];
+	if(!presentation.graphicsView || !presentation.graphicsView->lifetimeGeneration)
+	{
+		reason = "Temporal reconstruction needs an actual registered camera view.";
+		return false;
+	}
+	if(!PreparePostProcessView(presentation, candidate, true, reason)) return false;
+	const auto key = TerraEngine::Renderer::Vulkan::MakePostProcessTargetKey(presentation, impl->renderSessionGeneration);
+	const auto staged = impl->preparedPostProcessTargets.find(key);
+	auto* target = staged != impl->preparedPostProcessTargets.end() ? staged->second.get() : impl->FindPostProcessTargets(key);
+	return target && target->passes && impl->PrepareIndexedTemporalVariants(publication, viewIndex, pass, prepared, *target->passes, reason);
 }
 
 void VulkanContext::RenderFrame(
@@ -200,6 +430,7 @@ void VulkanContext::RenderFrame(
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers after snapshot budget exhaustion: " << submitResult);
 			return;
 		}
+		impl->MarkPostProcessCommandsSubmitted(pendingCmdsForSnapshot, currentFrame, VK_NULL_HANDLE);
 		if (impl->animationComputeRecordedForCurrentFrame
 			&& !impl->animationComputeSubmissionMarkedForCurrentFrame) {
 			// This exceptional editor prefix contains the first primary command
@@ -231,6 +462,7 @@ void VulkanContext::RenderFrame(
 			TERRAENGINE_LOG(LogLevel::Error, "failed to wait for intermediate editor view command buffers after snapshot budget exhaustion: " << forcedIdleResult);
 			return;
 		}
+		impl->CompletePostProcessDeviceIdle(); // Actual queue-idle proof above.
 		impl->CompleteShadowWrites(currentFrame); // Existing queue-idle proof above.
 		impl->lightingUploadFrameSlotSafe[currentFrame] = true;
 		impl->renderSnapshotSlotsUsed[currentFrame].fill(false);
@@ -255,6 +487,42 @@ void VulkanContext::RenderFrame(
 		outputRequest.kind == RenderOutputKind::OffscreenTexture
 		&& (outputRequest.diagnosticsView == RenderViewType::Game
 			|| outputRequest.diagnosticsView == RenderViewType::Scene);
+	// Graph declaration and command recording consume the same captured plan.
+	// Only protected resource preparation can supply its readiness generation.
+	const auto postProcessPlan = presentation.graphicsSettings
+		? TerraEngine::Renderer::BuildPostProcessGraphSettings(*presentation.graphicsSettings)
+		: TerraEngine::Renderer::PostProcessGraphSettings{};
+	const bool currentProcessingOwner = presentation.graphicsSettings
+		&& presentation.graphicsSettings->lifecycle.backendResourceGeneration == impl->backendResourceGeneration
+		&& presentation.graphicsSettings->lifecycle.rendererSessionGeneration == impl->renderSessionGeneration;
+	const bool viewRegistered = !presentation.graphicsCamera
+		|| (presentation.graphicsView && presentation.graphicsView->lifetimeGeneration != 0);
+	const bool processingEnabled = currentProcessingOwner && viewRegistered
+		&& postProcessPlan.executionAvailable
+		&& (postProcessPlan.hdrCamera || postProcessPlan.toneAndGrade || postProcessPlan.spatialAA
+			|| postProcessPlan.coverageAA || postProcessPlan.presentationEffects || postProcessPlan.temporalResolve
+			|| postProcessPlan.screenSpaceLighting || postProcessPlan.customStages || postProcessPlan.outputDithering);
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	GraphicsAAConfiguration rasterSettings;
+	const bool indexedRequested = currentProcessingOwner && viewRegistered
+		&& ResolveGraphicsAAConfiguration(presentation.graphicsSettings->values, rasterSettings) == GraphicsRequestReason::None
+		&& rasterSettings.raster == GraphicsGeometryRasterMode::Indexed;
+	const bool processingRuntimeOutput = processingEnabled && !impl->editorMode && !renderingDedicatedCaptureTarget;
+	const bool renderingOffscreenScene = impl->editorMode || renderingDedicatedCaptureTarget || processingEnabled;
+	if(!processingEnabled && !impl->postProcessTargets.empty())
+	{
+		// The legacy route owns its original attachments. Retire intermediates
+		// from a previous active revision through the existing completion gates.
+		const auto key = TerraEngine::Renderer::Vulkan::MakePostProcessTargetKey(presentation, impl->renderSessionGeneration);
+		std::string retirementReason;
+		if(!impl->ReleasePostProcessTargets(key, retirementReason))
+			TERRAENGINE_LOG(LogLevel::Warning, retirementReason);
+	}
+	if(processingEnabled && !TerraEngine::Renderer::Vulkan::SupportsPostProcessPlan(postProcessPlan))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Color processing rejected an unsupported AA or scaled reconstruction combination.");
+		return;
+	}
 	// Normal runtime views require an acquired swapchain image. A dedicated
 	// capture owns a separate offscreen image and can therefore remain valid
 	// independently of the presentation target.
@@ -292,7 +560,7 @@ void VulkanContext::RenderFrame(
 	// offscreen targets. Runtime captures intentionally allocate only captureView;
 	// Scene/Game editor targets remain editor-owned.
 
-	if (impl->editorMode || renderingDedicatedCaptureTarget) {
+	if (renderingOffscreenScene) {
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Ensure Offscreen Targets", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto ensureOffscreenResources = [&](VulkanContext::Impl::OffscreenResources& resources, VkExtent2D targetExtent) {
 			const bool extentMismatch = resources.extent.width != targetExtent.width
@@ -557,17 +825,42 @@ void VulkanContext::RenderFrame(
 	const bool defaultTaskPipelineAvailable = impl->taskShaderSupported
 		&& (ResourceManager::Instance().GetShaderCollection(defaultTaskCollectionId) != nullptr);
 
-	VkRenderPass currentPass = (impl->editorMode || renderingDedicatedCaptureTarget)
+	VkRenderPass currentPass = renderingOffscreenScene
 		? impl->offscreenRenderPass
 		: impl->renderPass;
+	const bool coverageAA = indexedRequested && postProcessPlan.coverageAA;
+	if(coverageAA)
+	{
+		std::string reason;
+		currentPass = impl->EnsureIndexedMsaaRenderPass(reason);
+	}
 	if (currentPass == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the active render pass is not ready.");
 		return;
 	}
+	VkRenderPass cameraRasterPass = currentPass;
+	const bool screenLightingRequested = processingEnabled && postProcessPlan.screenSpaceLighting;
+	std::optional<VulkanRasterPipelineConfiguration> indexedRaster;
+	if (indexedRequested && !screenLightingRequested)
+	{
+		// The explicit route requires one complete accepted view. On a later
+		// recook, an unfinished candidate leaves the previous image usable.
+		if (!coverageAA && (rasterSettings.sampleCount != 1u || !impl->RegisterIndexedSingleSamplePass(cameraRasterPass))) return;
+		indexedRaster.emplace();
+		std::string reason;
+		bool preparationPending = false;
+		if (!impl->PrepareIndexedRasterView(*publication, publicationIndex, cameraRasterPass,
+			coverageAA ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT, *indexedRaster, reason, preparationPending))
+		{
+			if (!preparationPending)
+				TERRAENGINE_LOG(LogLevel::Warning, "Indexed view preparation failed: " << reason);
+			return;
+		}
+	}
 	VkImage activeDepthImage = impl->depthImage;
 	VkImageView activeDepthView = impl->depthImageView;
 	VkExtent2D activeRenderExtent = impl->swapchainExtent;
-	if (impl->editorMode || renderingDedicatedCaptureTarget) {
+	if (renderingOffscreenScene) {
 		const VulkanContext::Impl::OffscreenResources* activeOffscreenView = renderingDedicatedCaptureTarget
 			? &impl->captureView
 			: ((view == ViewType::Scene) ? &impl->sceneView : &impl->gameView);
@@ -583,6 +876,136 @@ void VulkanContext::RenderFrame(
 		}
 		if (activeDepthImage == VK_NULL_HANDLE || activeDepthView == VK_NULL_HANDLE) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the editor view depth attachment is not ready.");
+			return;
+		}
+	}
+	VulkanContext::Impl::PostProcessTargetBundle* postProcessTargets = nullptr;
+	const bool processingRawPreview = outputRequest.kind == RenderOutputKind::SceneView
+		&& impl->sceneViewRawPreviewRequested;
+	if(processingEnabled)
+	{
+		using namespace TerraEngine::Renderer::Vulkan;
+		if(processingRuntimeOutput && (activeRenderExtent.width != impl->swapchainExtent.width
+			|| activeRenderExtent.height != impl->swapchainExtent.height))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Fixed exposure requires native runtime source and output extents.");
+			return;
+		}
+		PreparedPostProcessViewResources resources;
+		resources.rendererGeneration = impl->renderSessionGeneration;
+		resources.backendResourceGeneration = impl->backendResourceGeneration;
+		resources.sourceExtent = activeRenderExtent;
+		resources.sourceFormat = impl->offscreenColorFormat;
+		const auto& source = renderingDedicatedCaptureTarget ? impl->captureView : (view == ViewType::Scene ? impl->sceneView : impl->gameView);
+		resources.sourceTargetGeneration = source.generation;
+		resources.passes.physicalDevice = impl->physicalDevice;
+		resources.passes.destinationRenderPass = processingRuntimeOutput ? impl->renderPass : impl->offscreenRenderPass;
+		resources.passes.cameraRasterPass = impl->offscreenRenderPass;
+		resources.passes.destinationFormat = processingRuntimeOutput ? impl->swapchainImageFormat : impl->offscreenColorFormat;
+		resources.passes.depthFormat = impl->depthFormat != VK_FORMAT_UNDEFINED ? impl->depthFormat : impl->FindDepthFormat();
+		resources.passes.runtimeDestination = processingRuntimeOutput;
+		resources.passes.ditherCameraOutput = SupportsOutputDithering(impl->swapchainImageFormat);
+		resources.passes.usesVrs = impl->UsesVrsAttachment();
+		resources.passes.vrsTexelSize = impl->vrs.texelSize;
+		resources.passes.destinationViews = {source.view, source.visibilityIdentity.view, source.depthView, impl->vrs.view};
+		resources.passes.sceneDepth.image = source.depthImage;
+		resources.passes.sceneDepth.view = source.depthView;
+		resources.passes.sceneDepth.extent = source.extent;
+		resources.passes.sceneDepth.format = impl->FindDepthFormat();
+		resources.passes.sceneDepth.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		if(screenLightingRequested)
+		{
+			resources.passes.retireScreenRaster = &Impl::RetirePostProcessScreenRaster;
+			resources.passes.screenRasterContext = impl.get();
+			resources.passes.sceneColorSource = {source.image, source.allocation, source.view, {}, source.extent,
+				impl->offscreenColorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+			resources.passes.sceneIdentity = {source.visibilityIdentity.image, source.visibilityIdentity.allocation, source.visibilityIdentity.view,
+				{}, source.extent, VK_FORMAT_R32G32B32A32_UINT, source.visibilityIdentity.usage};
+		}
+		PostProcessTargetRequest request;
+		PostProcessPassConfiguration configuration;
+		std::string reason;
+		if(!BuildPostProcessViewRequest(presentation, *presentation.graphicsSettings, resources, request, configuration, reason))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Fixed exposure view plan unavailable: " << reason);
+			return;
+		}
+		postProcessTargets = impl->EnsurePostProcessTargets(request, reason,
+			[&](PostProcessTargetBundle& candidate, std::string& failure) {
+				if(candidate.sceneColor.format != impl->offscreenColorFormat)
+				{
+					failure = "Raw scene and processing target formats are not copy compatible.";
+					return false;
+				}
+				configuration.lookups = impl->PreparePostProcessLookups(configuration.color, failure);
+				if(!failure.empty()) return false;
+				if(configuration.effects.lensDirt.Active())
+				{
+					auto dirt = impl->PreparePostProcessLensDirtTexture(true, configuration.effects.lensDirt.texture, failure);
+					if(!dirt || dirt->sourceOwner != configuration.dirtTexture.sourceOwner) return false;
+					configuration.dirtTexture = std::move(*dirt);
+				}
+				candidate.borrowedOffscreenImage = source.image;
+				if(!failure.empty() || !PreparePostProcessPasses(candidate, configuration, failure)) return false;
+				if(coverageAA && !impl->PrepareIndexedMsaaTargets(source, *candidate.passes, failure)) return false;
+				if(view == ViewType::Game)
+				{
+					impl->CreateUIPipelines(candidate.passes->overlayPass, candidate.passes.get());
+					if(!candidate.passes->staticUiPipeline || !candidate.passes->sdfTextPipeline)
+					{ failure = "Overlay HUD pipeline preparation failed."; return false; }
+				}
+				return true;
+			});
+		if(!postProcessTargets)
+		{
+			// Keep the preceding presented image until one complete target and
+			// pipeline candidate is usable. No partial graph is recorded here.
+			TERRAENGINE_LOG(LogLevel::Warning, "Fixed exposure resources unavailable: " << reason);
+			return;
+		}
+	}
+	const auto* coverage = coverageAA && postProcessTargets ? postProcessTargets->passes->coverage.get() : nullptr;
+	if(coverageAA && !coverage) return; // Require a complete, certified coverage owner.
+	const auto temporalView = postProcessTargets ? postProcessTargets->passes->temporalView : nullptr;
+	const auto screenRaster = postProcessTargets ? postProcessTargets->passes->screenRaster : nullptr;
+	if(screenLightingRequested)
+	{
+		std::string reason;
+		bool pending = false;
+		indexedRaster.emplace();
+		if(!screenRaster || !indexedRequested || !impl->RegisterIndexedScreenSpacePass(screenRaster, reason)
+			|| !impl->PrepareIndexedRasterView(*publication, publicationIndex, screenRaster->renderPass, VK_SAMPLE_COUNT_1_BIT,
+				*indexedRaster, reason, pending))
+		{
+			if(!pending) TERRAENGINE_LOG(LogLevel::Warning, "Screen-space indexed view preparation failed: " << reason);
+			return;
+		}
+		if(presentation.sky.renderBackground)
+		{
+			impl->CreateSkyBackgroundPipeline(screenRaster->renderPass, 7u);
+			if(!impl->skyBackgroundVariants.contains(screenRaster->renderPass)) return;
+		}
+		cameraRasterPass = currentPass = screenRaster->renderPass;
+	}
+	const auto scaledCamera = postProcessTargets ? postProcessTargets->passes->scaledCamera : nullptr;
+	const VkExtent2D nativeOutputExtent = activeRenderExtent;
+	if(scaledCamera)
+	{
+		// All geometry, light cluster depth, and motion now see the physical
+		// internal surface. Full-size presentation belongs to another owner.
+		activeRenderExtent = scaledCamera->extent;
+		activeDepthImage = scaledCamera->depth.image;
+		activeDepthView = scaledCamera->depth.view;
+	}
+	if(postProcessPlan.temporalResolve || postProcessPlan.motionBlur)
+	{
+		std::string reason;
+		if(!temporalView || !indexedRaster || !presentation.graphicsView || !presentation.graphicsView->lifetimeGeneration
+			|| !impl->PrepareIndexedTemporalVariants(*publication, publicationIndex, cameraRasterPass,
+				*indexedRaster, *postProcessTargets->passes, reason))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Temporal raster preparation failed: "
+				<< (reason.empty() ? "native temporal target, indexed route or live view is missing" : reason));
 			return;
 		}
 	}
@@ -631,6 +1054,7 @@ void VulkanContext::RenderFrame(
 	std::unordered_map<DrawResourcePreparationKey, VulkanPipeline*, DrawResourcePreparationKeyHash> preparedFramePipelines;
 	preparedFramePipelines.reserve(std::min<std::size_t>(drawResourceUpperBound, 128U));
 	const auto PrepareFramePipeline = [&](TerraEngine::UUID collection, VkRenderPass pass, std::uint32_t flags) {
+		if (indexedRaster && pass == cameraRasterPass) return; // Indexed uses an exact prepared key below.
 		const bool identity = impl->UsesConventionalVisibilityAttachments(pass);
 		impl->EnsurePipeline(collection, pass, flags, identity);
 		const auto cachedPass = impl->pipelineCache.find(pass);
@@ -639,6 +1063,7 @@ void VulkanContext::RenderFrame(
 		std::uint64_t selectedGeneration = 0;
 		for (auto& [key, pipeline] : cachedPass->second) {
 			if (key.shaderCollectionId == collection && key.materialFlags == flags && key.usesConventionalVisibilityIdentity == identity
+				&& pipeline.rasterRoute == VulkanRasterRoute::MeshTasks && pipeline.rasterSamples == VK_SAMPLE_COUNT_1_BIT
 				&& pipeline.pipeline != VK_NULL_HANDLE && pipeline.layout != VK_NULL_HANDLE
 				&& (!selected || key.collectionGeneration > selectedGeneration)) {
 				selected = &pipeline; selectedGeneration = key.collectionGeneration;
@@ -701,6 +1126,13 @@ void VulkanContext::RenderFrame(
 		}
 
 		if (!material) return;
+		if (indexedRaster && preparationPass == cameraRasterPass)
+		{
+			// Topology, index allocation and the exact pipeline were preflighted
+			// for every draw. Reuse the usual protected material publication.
+			PrepareMaterialOnce(defaultMeshCollectionId, command.materialId, material);
+			return;
+		}
 
 		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
 
@@ -872,6 +1304,7 @@ void VulkanContext::RenderFrame(
 
 		if (useMainCommandBuffer) {
 			cmd = impl->commandBuffers[impl->currentFrame];
+			impl->DiscardPostProcessCommands(std::span<const VkCommandBuffer>(&cmd, 1));
 			const auto resetCommandStart = BackendClock::now();
 			const VkResult resetCommandResult = vkResetCommandBuffer(cmd, 0);
 			TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
@@ -934,6 +1367,7 @@ void VulkanContext::RenderFrame(
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
 		return;
 	}
+	if(scaledCamera) RecordScaledCameraInitialization(cmd, *scaledCamera);
 	TerraEngine::Tests::Review::ObserveDiscardedPrimaryReview({
 		TerraEngine::Tests::Review::PrimaryReviewPoint::Begin, publication->frameId,
 		reinterpret_cast<std::uintptr_t>(cmd), 0, {selection.outputKind, selection.viewType, selection.outputId},
@@ -1155,7 +1589,16 @@ void VulkanContext::RenderFrame(
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
 
-	if (!impl->editorMode && !renderingDedicatedCaptureTarget) {
+	if (coverage) {
+		renderPassInfo.renderPass = coverage->renderPass;
+		renderPassInfo.framebuffer = coverage->framebuffer;
+	} else if(screenRaster) {
+		renderPassInfo.renderPass = screenRaster->renderPass;
+		renderPassInfo.framebuffer = screenRaster->framebuffer;
+	} else if(scaledCamera) {
+		renderPassInfo.renderPass = impl->offscreenRenderPass;
+		renderPassInfo.framebuffer = scaledCamera->framebuffer;
+	} else if (!renderingOffscreenScene) {
 		renderPassInfo.renderPass = impl->renderPass;
 		renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
 	} else {
@@ -1189,10 +1632,17 @@ void VulkanContext::RenderFrame(
 	clearValues[3].color = {{0, 0, 0, 0}};
 	renderPassInfo.clearValueCount = impl->UsesVrsAttachment() ? 4u : 3u;
 	renderPassInfo.pClearValues = clearValues.data();
+	auto screenClear = screenRaster ? screenRaster->clearValues : std::array<VkClearValue, 8>{};
+	if(screenRaster)
+	{
+		screenClear[0] = clearValues[0]; // Preserve the ordinary Scene/Game clear.
+		renderPassInfo.clearValueCount = screenRaster->attachmentCount;
+		renderPassInfo.pClearValues = screenClear.data();
+	}
 
 	// Create Grid Pipeline if needed (lazy init).
 
-	if (view == ViewType::Scene && presentation.sceneViewGridVisible) {
+	if (view == ViewType::Scene && presentation.sceneViewGridVisible && !postProcessTargets) {
 		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
 	}
 	impl->CreateSkyBackgroundPipeline(renderPassInfo.renderPass);
@@ -1762,6 +2212,99 @@ void VulkanContext::RenderFrame(
 	}
 
 	const glm::mat4 currentViewProjection = presentation.projectionMatrix * presentation.viewMatrix;
+	using namespace TerraEngine::Renderer::Vulkan;
+	glm::mat4 cameraRasterViewProjection = currentViewProjection;
+	std::optional<TemporalViewFramePlan> temporalFrame;
+	PreparedPostProcessMotion motionPreparation;
+	using MotionJobResult = std::optional<PreparedPostProcessMotion>;
+	std::vector<std::future<MotionJobResult>> motionJobs;
+	std::optional<TerraEngine::Tasks::ScopedTaskSettlement<MotionJobResult>> motionSettlement;
+	struct TemporalReservationSettlement
+	{
+		TemporalViewFrameState* state = nullptr;
+		VkCommandBuffer command = VK_NULL_HANDLE;
+		std::uint64_t recording = 0u;
+		bool queued = false;
+		~TemporalReservationSettlement()
+		{
+			if(!state || queued) return;
+			state->Discard(command);
+			state->CancelReservation(recording);
+		}
+	} temporalSettlement;
+	if(temporalView)
+	{
+		const auto& settings = *presentation.graphicsSettings;
+		PostProcessHistoryScope scope;
+		scope.target.scope = presentation.graphicsCamera ? GraphicsScope::Camera : GraphicsScope::Game;
+		scope.target.camera = presentation.graphicsCamera;
+		scope.target.view = presentation.graphicsView;
+		scope.lifecycle = settings.lifecycle;
+		PostProcessHistorySignature signature;
+		signature.internalWidth = activeRenderExtent.width;
+		signature.internalHeight = activeRenderExtent.height;
+		signature.outputWidth = postProcessTargets->outputExtent.width;
+		signature.outputHeight = postProcessTargets->outputExtent.height;
+		signature.colorFormat = static_cast<std::uint32_t>(postProcessTargets->sceneColor.format);
+		signature.depthFormat = static_cast<std::uint32_t>(impl->FindDepthFormat());
+		signature.motionFormat = static_cast<std::uint32_t>(temporalView->motion->totalMotion.format);
+		signature.scaleNumerator = 1u;
+		signature.scaleDenominator = scaledCamera ? 2u : 1u;
+		signature.reconstructionGeneration = scaledCamera ? 2u : (postProcessPlan.temporalResolve ? 1u : 3u);
+		signature.projectionGeneration = BuildVulkanHiZProjectionSignature(presentation.projectionMatrix);
+		signature.cutGeneration = presentation.graphicsView->lifetimeGeneration;
+		// The reference-frame generation identifies each publication. Within
+		// a cell, the current and previous matrices already encode the two
+		// exact camera-relative origins. A cell crossing seeds a new history.
+		signature.worldOriginGeneration = 1u;
+		signature.worldOriginCell = presentation.referenceFrame.canonicalOrigin.cell;
+		signature.surfaceGeneration = postProcessTargets->generation;
+		temporalFrame = temporalView->frameState->Reserve(TemporalPassGeneration(*temporalView->resolve),
+			publication->frameId, currentFrame, scope, signature, publication, publicationIndex, publication->frameId);
+		if(!temporalFrame)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Temporal view " << signature.outputWidth << "x" << signature.outputHeight
+				<< " has no compatible history reservation for frame " << publication->frameId
+				<< " (projection " << signature.projectionGeneration << ", origin " << signature.worldOriginGeneration
+				<< ", view lifetime " << signature.cutGeneration << ").");
+			return;
+		}
+		temporalSettlement.state = temporalView->frameState.get();
+		temporalSettlement.command = cmd;
+		temporalSettlement.recording = publication->frameId;
+		// Keep the native TAA pattern. On the 2x path a low-resolution raster
+		// pixel spans two output pixels, so use a conservative subpixel offset
+		// to avoid making thin silhouettes appear and disappear across phases.
+		// Motion preparation receives these exact current and previous shifts.
+		const bool scaledTemporalViewport = activeRenderExtent.width != nativeOutputExtent.width
+			|| activeRenderExtent.height != nativeOutputExtent.height;
+		constexpr float kScaledTemporalJitterFraction = 0.125f;
+		const float jitterAmplitude = scaledTemporalViewport ? kScaledTemporalJitterFraction : 1.0f;
+		const auto jitter = postProcessPlan.temporalResolve
+			? TemporalJitter(temporalFrame->provenance.current->jitterPhase, nativeOutputExtent) * jitterAmplitude : glm::vec2(0.0f);
+		const auto previousJitter = postProcessPlan.temporalResolve && temporalFrame->provenance.previous
+			? TemporalJitter(temporalFrame->provenance.previous->jitterPhase, nativeOutputExtent) * jitterAmplitude : glm::vec2(0.0f);
+		cameraRasterViewProjection = ApplyTemporalJitter(currentViewProjection, jitter);
+		// Workers pair copied canonical poses and retained palettes while the
+		// protected recorder prepares cluster inputs. They touch no device or ECS.
+		motionJobs.reserve(1u);
+		motionSettlement.emplace(motionJobs);
+		try
+		{
+			motionSettlement->CreateAndEnqueue(ThreadPool::instance(),
+				[provenance = temporalFrame->provenance, jitter, previousJitter, cameraMotion = postProcessPlan.motionBlur]() -> MotionJobResult {
+					PreparedPostProcessMotion result;
+					std::string failure;
+					if(!TryPreparePostProcessMotion(provenance, jitter, previousJitter, cameraMotion, result, failure))
+					{
+						TERRAENGINE_LOG(LogLevel::Warning, "Temporal motion preparation failed: " << failure);
+						return std::nullopt;
+					}
+					return result;
+				});
+		}
+		catch(const std::exception&) { return; }
+	}
 	VulkanContext::Impl::ViewDepthHistoryState& depthHistory = impl->depthHistoryByView[viewIndex];
 	// The first command buffer can belong to an independently sized capture.
 	// Runtime AO history owns swapchain-sized depth, so captures must neither
@@ -1886,8 +2429,9 @@ void VulkanContext::RenderFrame(
 	// after that slot's fence has completed. This keeps AO independent from the
 	// live depth attachment that the upcoming render pass will clear and write.
 	constexpr bool kEnableRuntimeScreenSpaceAo = true;
-	const bool screenSpaceAoActive = kEnableRuntimeScreenSpaceAo && aoDepthHistoryMatchesView;
-	const float aoQualityForFrame = screenSpaceAoActive
+	const bool enhancedAo = screenRaster && screenRaster->demand.ambientOcclusion;
+	const bool screenSpaceAoActive = kEnableRuntimeScreenSpaceAo && aoDepthHistoryMatchesView && !enhancedAo;
+	const float aoQualityForFrame = screenSpaceAoActive || enhancedAo
 		? static_cast<float>(presentation.settings.ambientOcclusionQuality)
 		: 0.0f;
 	analysisCullingData.renderSettings2 = glm::vec4(
@@ -2233,6 +2777,26 @@ void VulkanContext::RenderFrame(
 	}
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.precompute.end" : "game.precompute.end");
 
+	if(temporalFrame)
+	{
+		try
+		{
+			auto result = motionJobs.front().get();
+			if(!result)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "Temporal motion could not pair the retained view publications.");
+				return;
+			}
+			motionPreparation = std::move(*result);
+		}
+		catch(const std::exception&) { return; }
+		motionPreparation.shader.currentRasterViewProjection = cameraRasterViewProjection;
+		motionPreparation.shader.previousRasterViewProjection = ApplyTemporalJitter(
+			motionPreparation.shader.previousRasterViewProjection,
+			glm::vec2(motionPreparation.shader.jitterUV.z, motionPreparation.shader.jitterUV.w));
+		if(temporalFrame->previous && motionPreparation.cpuHistoryCompatible) motionPreparation.shader.state.x = 1u;
+	}
+
 	// Prepared draws keep resource validation and command recording separate:
 	// the expensive lookups happen once, then worker command buffers consume a
 	// compact list of already-resolved Vulkan handles.
@@ -2256,6 +2820,9 @@ void VulkanContext::RenderFrame(
 		PushConstants push{};
 		std::uint32_t materialFlags = 0u;
 		uint32_t indirectBufferIndex = 0;
+		VkBuffer indexedBuffer = VK_NULL_HANDLE;
+		std::uint32_t firstIndex = 0, indexCount = 0;
+		std::uint64_t indexedAllocationGeneration = 0;
 		bool shadowGrouped = false;
 		std::uint32_t shadowMemberIndex = 0, shadowGroupIndex = 0;
 		// CPU keeps pipeline/descriptors/push ownership. This selects only the
@@ -2266,6 +2833,22 @@ void VulkanContext::RenderFrame(
 			TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware;
 	};
 	thread_local std::vector<PreparedDraw> prepared;
+	struct TemporalDraw
+	{
+		const MotionRasterPipeline* pipeline = nullptr;
+		std::array<VkDescriptorSet, 2> surfaceSets{};
+		VkBuffer indices = VK_NULL_HANDLE;
+		std::uint32_t firstIndex = 0u, count = 0u, row = 0u;
+	};
+	std::vector<TemporalDraw> motionDraws;
+	std::shared_ptr<PostProcessMotionMeshOwners> motionMeshes;
+	if(temporalView)
+	{
+		motionDraws.reserve(motionPreparation.draws.size());
+		motionMeshes = std::make_shared<PostProcessMotionMeshOwners>();
+		motionPreparation.meshes = motionMeshes;
+	}
+	std::atomic<std::uint32_t> recordedIndexedDrawCount{0u};
 	prepared.clear();
 	prepared.reserve(commandResolver.Count());
 	// Validate and publish the whole crowd stream before any grouped command is
@@ -2318,7 +2901,7 @@ void VulkanContext::RenderFrame(
 	groupedRepresentatives.reserve(presentation.groupedSubmissions.size());
 	bool groupedInstanceStreamReady = false;
 	bool groupedInstanceAllocationReplaced = false;
-	if(presentation.renderOptimization.valid != 0u
+	if(!indexedRaster && presentation.renderOptimization.valid != 0u
 		&& !presentation.groupedSubmissions.empty()
 		&& !presentation.groupedInstanceRecords.empty()) {
 		bool complete = true;
@@ -2499,7 +3082,7 @@ void VulkanContext::RenderFrame(
 	pendingStats.optimization.instanceStreamCapacityBytes = static_cast<std::uint32_t>(
 		std::min<VkDeviceSize>(impl->groupedInstanceCapacities[currentFrame],
 			std::numeric_limits<std::uint32_t>::max()));
-	if(!groupedInstanceStreamReady && !presentation.groupedSubmissions.empty()) {
+	if(!indexedRaster && !groupedInstanceStreamReady && !presentation.groupedSubmissions.empty()) {
 		pendingStats.optimization.fallbackAllocationFailureCount = 1u;
 	}
 	std::uint32_t recordedGroupedInstanceCount = 0u;
@@ -2515,6 +3098,15 @@ void VulkanContext::RenderFrame(
 		}
 		const bool pipelineUsesConventionalVisibilityIdentity =
 			impl->UsesConventionalVisibilityAttachments(currentPass);
+		if (indexedRaster && currentPass == cameraRasterPass)
+		{
+			const auto key = impl->BuildPipelineKey(shaderCollectionId, materialFlags, true, *indexedRaster);
+			const auto pass = impl->pipelineCache.find(currentPass);
+			if (!key || pass == impl->pipelineCache.end()) return nullptr;
+			const auto pipeline = pass->second.find(*key);
+			return pipeline == pass->second.end() || !pipeline->second.pipeline || !pipeline->second.layout
+				? nullptr : &pipeline->second;
+		}
 		// Resource publication happens before vkBeginCommandBuffer. A shader
 		// reload arriving during recording waits for next frame's preparation;
 		// this lookup must never replace resources used by the active command.
@@ -3143,18 +3735,22 @@ void VulkanContext::RenderFrame(
 			continue;
 		}
 		RenderItemRecord command{};
-		if(!commandResolver.Resolve(commandIndex, command)) continue;
+		if(!commandResolver.Resolve(commandIndex, command)) {
+			if (indexedRaster) return; // An explicit indexed view is admitted as a whole.
+			continue;
+		}
 		const Material* material = ResolveMaterial(command.materialId);
-		if (!material) continue;
+		if (!material) {
+			if (indexedRaster) return;
+			continue;
+		}
 
-		VkRenderPass currentPass = (impl->editorMode || renderingDedicatedCaptureTarget)
-			? impl->offscreenRenderPass
-			: impl->renderPass;
+		const VkRenderPass currentPass = cameraRasterPass;
 		uint32_t materialFlags = material->header.flags;
 
 		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
 
-		if (collectionId == TerraEngine::EMPTY_UUID) {
+		if (indexedRaster || collectionId == TerraEngine::EMPTY_UUID) {
 			collectionId = defaultMeshCollectionId;
 		}
 		const std::optional<std::uint32_t> canonicalGraphicsGroup =
@@ -3171,7 +3767,7 @@ void VulkanContext::RenderFrame(
 
 		// Route default materials through the task pipeline whenever supported.
 
-		if (collectionId == defaultMeshCollectionId
+		if (!indexedRaster && collectionId == defaultMeshCollectionId
 			&& defaultTaskPipelineAvailable
 			&& (groupedPerInstanceAnimationBridgeAvailable
 				|| canonicalGraphicsAvailable
@@ -3194,6 +3790,7 @@ void VulkanContext::RenderFrame(
 		if(staticPreparation == nullptr) {
 			TERRAENGINE_LOG(LogLevel::Warning,
 				"Skipping draw because its static Vulkan resources are unavailable.");
+			if (indexedRaster) return;
 			continue;
 		}
 		collectionId = staticPreparation->selectedCollectionId;
@@ -3215,7 +3812,7 @@ void VulkanContext::RenderFrame(
 			&& !conservativeDeformableVisibility;
 		const auto& executorPlan = impl->latestVirtualGeometryExecutorPlan;
 		const bool deviceAuthoredCommand =
-			executorPlan.resourcesReady
+			!indexedRaster && executorPlan.resourcesReady
 			&& executorPlan.descriptorReady
 			&& executorPlan.pipelinesReady
 			&& executorPlan.generatedSubmissionExecutionAvailable
@@ -3234,7 +3831,7 @@ void VulkanContext::RenderFrame(
 		PushConstants push{};
 		// Every draw in this immutable view uses the same camera transform.
 		// Reusing the matrix avoids repeated identical 4x4 multiplies for a shared crowd.
-		push.viewProj = currentViewProjection;
+		push.viewProj = cameraRasterViewProjection;
 		push.model = command.modelMatrix;
 		push.materialIndex = 0;
 
@@ -3244,6 +3841,15 @@ void VulkanContext::RenderFrame(
 		}
 		ApplyAnimationGraphicsBridge(command, push,
 			ownerPaletteDeformation, canonicalGraphicsGroup);
+		if (indexedRaster && command.animationBinding.HasCpuDeformation()
+			&& (push.meshDataIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+				|| push.textureIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX))
+		{
+			// A skinned draw must retain the actual current per-frame palette.
+			// Submitting the base mesh would silently change the selected route.
+			TERRAENGINE_LOG(LogLevel::Warning, "Indexed view has no current CPU animation bridge.");
+			return;
+		}
 		push.vrsActive = 0u;
 		push.taskCullingEnabled = activeTaskCulling ? 1u : 0u;
 		push.statsSlotIndex = statsSlotIndex;
@@ -3404,6 +4010,66 @@ void VulkanContext::RenderFrame(
 				(command.virtualGeometryFlags
 					>> kVirtualGeometryRasterRouteShift)
 				& kVirtualGeometryRasterRouteMask);
+		if (indexedRaster)
+		{
+			const auto mesh = impl->meshCache.find(command.meshId);
+			if (mesh == impl->meshCache.end() || !mesh->second.indexedTopology
+				|| !mesh->second.indexedCornerBuffer.buffer || !mesh->second.indexedAllocationGeneration) return;
+			const auto& indexed = mesh->second;
+			const auto range = TerraEngine::Renderer::Vulkan::ResolveIndexedCornerRange(
+				*indexed.indexedTopology, ownerMeshletOffset, ownerMeshletCount);
+			if (!range) return;
+			draw.indexedBuffer = indexed.indexedCornerBuffer.buffer;
+			draw.indexedAllocationGeneration = indexed.indexedAllocationGeneration;
+			draw.firstIndex = range->firstIndex;
+			draw.indexCount = range->indexCount;
+			draw.rasterRoute = TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed;
+			if(temporalView)
+			{
+				if(commandIndex >= motionPreparation.draws.size()) return;
+				auto& row = motionPreparation.draws[commandIndex];
+				const auto surface = ResolvePipeline(defaultMeshCollectionId, cameraRasterPass, materialFlags);
+				const auto& meshOwner = indexed.indexedTopology->sourceOwner;
+				if(!surface || surface->setLayouts.size() != 2u || row.selectionIndex != commandIndex
+					|| !row.currentGeometryValid || row.identity.meshId != command.meshId
+					|| !meshOwner || meshOwner != indexed.sourceOwner
+					|| indexed.indexedTopology->cpuPublicationGeneration != indexed.cpuPublicationGeneration
+					|| meshOwner->publicationGeneration != indexed.cpuPublicationGeneration
+					|| !MatricesApproximatelyEqual(row.shader.currentModel, draw.push.model, 1.0e-5f))
+				{
+					TERRAENGINE_LOG(LogLevel::Warning, "Temporal motion draw " << commandIndex
+						<< " did not match the current indexed surface owner (motion reason "
+						<< static_cast<unsigned>(row.reason) << ").");
+					return;
+				}
+				motionMeshes->try_emplace(command.meshId, meshOwner);
+				// The topology identity pairs logical draws. Exact native motion
+				// also needs the same immutable mesh publication in both frames.
+				const auto& priorMeshes = temporalFrame->previousMeshes;
+				bool matchesPreviousMesh = false;
+				if(priorMeshes)
+				{
+					const auto prior = priorMeshes->find(command.meshId);
+					matchesPreviousMesh = prior != priorMeshes->end() && prior->second == meshOwner;
+				}
+				std::string reason;
+				const auto pipeline = PrepareTemporalMotionVariant(*temporalView,
+					{surface->setLayouts[0], surface->setLayouts[1]}, surface->rasterCullMode,
+					surface->rasterFrontFace, VK_NULL_HANDLE, reason);
+				if(!pipeline) return;
+				row.shader.currentModel = draw.push.model; // Use the exact model already sent to opaque depth.
+				row.shader.deformationState.z = 1u;
+				if(matchesPreviousMesh && row.cpuPairValid && motionPreparation.shader.state.x != 0u)
+				{
+					row.shader.deformationState.z |= 2u;
+					if(row.cameraOnlyAvailable) row.shader.deformationState.z |= 4u;
+				}
+				else
+					row.shader.deformationState.y = 0u;
+				motionDraws.push_back({pipeline, draw.descriptorSets, draw.indexedBuffer,
+					draw.firstIndex, draw.indexCount, commandIndex});
+			}
+		}
 		// Generated packet commands encode one selected packet's dispatch count.
 		// A validated crowd range instead needs the normal frame-slot indirect
 		// command with its count multiplied by members. Retaining the
@@ -3442,12 +4108,15 @@ void VulkanContext::RenderFrame(
 			++recordedGroupedSubmissionCount;
 		}
 
-		VkDrawMeshTasksIndirectCommandEXT indirectCmd{};
-		indirectCmd.groupCountX = taskGroupCount;
-		indirectCmd.groupCountY = 1;
-		indirectCmd.groupCountZ = 1;
-		draw.indirectBufferIndex = static_cast<uint32_t>(indirectCommands.size());
-		indirectCommands.push_back(indirectCmd);
+		if (!indexedRaster)
+		{
+			VkDrawMeshTasksIndirectCommandEXT indirectCmd{};
+			indirectCmd.groupCountX = taskGroupCount;
+			indirectCmd.groupCountY = 1;
+			indirectCmd.groupCountZ = 1;
+			draw.indirectBufferIndex = static_cast<uint32_t>(indirectCommands.size());
+			indirectCommands.push_back(indirectCmd);
+		}
 
 		prepared.push_back(std::move(draw));
 
@@ -5369,6 +6038,13 @@ void VulkanContext::RenderFrame(
 				}
 				HashBytes(signature, &draw.push, sizeof(draw.push));
 				HashCombine(signature, draw.indirectBufferIndex);
+				if (draw.indexedBuffer)
+				{
+					HashCombine(signature, std::hash<VkBuffer>{}(draw.indexedBuffer));
+					HashCombine(signature, draw.indexedAllocationGeneration);
+					HashCombine(signature, draw.firstIndex);
+					HashCombine(signature, draw.indexCount);
+				}
 				HashCombine(signature, draw.useGeneratedVirtualGeometryIndirect ? 1u : 0u);
 				HashCombine(signature, draw.generatedVirtualGeometryIndirectIndex);
 				HashCombine(signature, static_cast<std::uint32_t>(draw.rasterRoute));
@@ -5383,7 +6059,7 @@ void VulkanContext::RenderFrame(
 				renderExtent.width,
 				renderExtent.height });
 		};
-		auto recordSecondaryRange = [this, computeCompositeReady, preparedForRecording](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
+		auto recordSecondaryRange = [this, computeCompositeReady, preparedForRecording, &recordedIndexedDrawCount](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
 
 			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 			vkResetCommandBuffer(secondary, 0);
@@ -5421,6 +6097,7 @@ void VulkanContext::RenderFrame(
 			scissor.extent = renderExtent;
 			vkCmdSetScissor(secondary, 0u, 1u, &scissor);
 			VkPipeline boundPipeline = VK_NULL_HANDLE;
+			VkBuffer boundIndexBuffer = VK_NULL_HANDLE;
 			VkPipelineLayout boundDescriptorLayout = VK_NULL_HANDLE;
 			std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
 			bool descriptorsBound = false;
@@ -5463,6 +6140,17 @@ void VulkanContext::RenderFrame(
 					draw.pushConstantRanges.data(),
 					draw.pushConstantRangeCount,
 					draw.push);
+				if (draw.indexedBuffer)
+				{
+					if (boundIndexBuffer != draw.indexedBuffer)
+					{
+						vkCmdBindIndexBuffer(secondary, draw.indexedBuffer, 0, VK_INDEX_TYPE_UINT32);
+						boundIndexBuffer = draw.indexedBuffer;
+					}
+					vkCmdDrawIndexed(secondary, draw.indexCount, 1u, draw.firstIndex, 0, 0u);
+					recordedIndexedDrawCount.fetch_add(1u, std::memory_order_relaxed);
+					continue;
+				}
 
 				const VkBuffer commandBuffer = draw.useGeneratedVirtualGeometryIndirect
 					? impl->latestVirtualGeometryExecutorResources.generatedSubmissionBuffer
@@ -5496,7 +6184,9 @@ void VulkanContext::RenderFrame(
 				renderPass, framebuffer, renderExtent, start, end);
 			const auto cachedSecondary =
 				impl->reusableSecondaryCommandSignatures.find(secondary);
-			if(cachedSecondary != impl->reusableSecondaryCommandSignatures.end()
+			// Derive indexed receipts from each native call rather than estimates
+			// from a mesh-task cache entry. Automatic recording keeps its reuse path.
+			if(!indexedRaster && cachedSecondary != impl->reusableSecondaryCommandSignatures.end()
 				&& TerraEngine::Renderer::Vulkan::CanReuseSecondaryCommands(
 					cachedSecondary->second, secondarySignature, true)) {
 				secondaryBuffers.push_back(secondary);
@@ -5564,7 +6254,7 @@ void VulkanContext::RenderFrame(
 
 			vkBeginCommandBuffer(skyCmd, &begin);
 			impl->RenderSkyBackground(skyCmd, *publicationPresentation,
-				renderPassInfo.renderArea.extent);
+				renderPassInfo.renderArea.extent, screenRaster ? screenRaster->renderPass : VK_NULL_HANDLE);
 			vkEndCommandBuffer(skyCmd);
 			secondaryBuffers.insert(secondaryBuffers.begin(), skyCmd);
 		}
@@ -5572,7 +6262,7 @@ void VulkanContext::RenderFrame(
 
 	// Render grid (Scene View only).
 
-	if (view == ViewType::Scene && presentation.sceneViewGridVisible) {
+	if (view == ViewType::Scene && presentation.sceneViewGridVisible && !postProcessTargets) {
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 
@@ -5607,7 +6297,7 @@ void VulkanContext::RenderFrame(
 	// Runtime UI belongs to the Game view only. The Scene view must stay free of
 	// authored UI so editor camera work, picking, and gizmos are never obscured
 	// by the game's overlay.
-	if (view == ViewType::Game) {
+	if (view == ViewType::Game && !postProcessTargets) {
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 		VkCommandBuffer uiCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
@@ -5644,7 +6334,7 @@ void VulkanContext::RenderFrame(
 			VkRect2D uiScissor{};
 			uiScissor.extent = activeRenderExtent;
 			vkCmdSetScissor(uiCmd, 0u, 1u, &uiScissor);
-			impl->RenderUI(uiCmd, publicationPresentation->uiBatch);
+			impl->RenderUI(uiCmd, publicationPresentation->uiBatch, snapshotSlotIndex);
 			vkEndCommandBuffer(uiCmd);
 			secondaryBuffers.push_back(uiCmd);
 		}
@@ -5657,6 +6347,25 @@ void VulkanContext::RenderFrame(
 	}
 
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+	if(postProcessTargets && activeDepthImage != VK_NULL_HANDLE)
+	{
+		// The new raw source keeps its own depth across frame slots. Order its
+		// previous writes before this frame's clear, independently from the
+		// runtime destination depth that the final composition pass may clear.
+		VkImageMemoryBarrier sourceDepthReuse{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+		sourceDepthReuse.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		sourceDepthReuse.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		sourceDepthReuse.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		sourceDepthReuse.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		sourceDepthReuse.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		sourceDepthReuse.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		sourceDepthReuse.image = activeDepthImage;
+		sourceDepthReuse.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+		vkCmdPipelineBarrier(cmd,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			0, 0, nullptr, 0, nullptr, 1, &sourceDepthReuse);
+	}
 	if (!impl->editorMode
 		&& !renderingDedicatedCaptureTarget
 		&& impl->depthImage != VK_NULL_HANDLE) {
@@ -5711,6 +6420,44 @@ void VulkanContext::RenderFrame(
 	}
 
 	vkCmdEndRenderPass(cmd);
+	std::shared_ptr<PostProcessMotionBuffers> submittedMotion;
+	if(temporalView)
+	{
+		// The ordinary indexed draw and this equal-depth pass use the same
+		// sealed ranges, model matrices, palettes and actual raster jitter.
+		if(motionDraws.size() != motionPreparation.draws.size()) return;
+		std::string reason;
+		submittedMotion = PreparePostProcessMotionBuffers(impl->physicalDevice, impl->device,
+			impl->allocator, temporalView->motionLayout, std::move(motionPreparation), reason);
+		if(!submittedMotion)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Temporal motion buffers were not prepared: " << reason);
+			return;
+		}
+		BeginMotionRasterPass(cmd, *temporalView->motion);
+		const VkViewport viewport{0.0f, 0.0f, static_cast<float>(activeRenderExtent.width),
+			static_cast<float>(activeRenderExtent.height), 0.0f, 1.0f};
+		const VkRect2D scissor{{0, 0}, activeRenderExtent};
+		vkCmdSetViewport(cmd, 0u, 1u, &viewport);
+		vkCmdSetScissor(cmd, 0u, 1u, &scissor);
+		for(const auto& motion : motionDraws)
+		{
+			const std::array sets{motion.surfaceSets[0], motion.surfaceSets[1], submittedMotion->descriptorSet};
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion.pipeline->pipeline);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion.pipeline->layout, 0u,
+				static_cast<std::uint32_t>(sets.size()), sets.data(), 0u, nullptr);
+			vkCmdBindIndexBuffer(cmd, motion.indices, 0u, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexed(cmd, motion.count, 1u, motion.firstIndex, 0, motion.row);
+		}
+		vkCmdEndRenderPass(cmd);
+	}
+	if(coverage)
+	{
+		// Depth and integer identity both use coverage sample zero for
+		// selection. The conservative pyramid instead retains any uncovered lane.
+		if(!TerraEngine::Renderer::Vulkan::RecordIdentityResolve(cmd, *coverage)
+			|| !TerraEngine::Renderer::Vulkan::RecordHiZDepthSeed(cmd, *coverage)) return;
+	}
 	if(hasDirectGeometryCommands)
 	{
 		impl->MarkVirtualGeometryTimestampEnd(
@@ -5719,7 +6466,79 @@ void VulkanContext::RenderFrame(
 			view,
 			TerraEngine::Renderer::VirtualGeometryBackendStage::HardwareRaster);
 	}
-	if (impl->editorMode || renderingDedicatedCaptureTarget) {
+	struct PostProcessTimestampSettlement
+	{
+		VulkanContext::Impl* owner = nullptr;
+		VkCommandBuffer command = VK_NULL_HANDLE;
+		bool admitted = false;
+		~PostProcessTimestampSettlement()
+		{
+			if(owner != nullptr && !admitted)
+				owner->DiscardPostProcessTimestampCommands(std::span<const VkCommandBuffer>(&command, 1));
+		}
+	} postProcessTimingSettlement{postProcessTargets ? impl.get() : nullptr, cmd};
+	if(postProcessTargets)
+	{
+		using namespace TerraEngine::Renderer::Vulkan;
+		const auto& source = renderingDedicatedCaptureTarget ? impl->captureView : (view == ViewType::Scene ? impl->sceneView : impl->gameView);
+		const bool exposureTimed = impl->BeginPostProcessTimestamp(cmd, impl->currentFrame,
+			snapshotSlotIndex, *publicationPresentation, postProcessTargets->generation);
+		const auto color = TerraEngine::Renderer::GraphicsSettings::ResolvePostProcessColorSettings(
+			publicationPresentation->graphicsSettings->values);
+		struct ColorMarkerContext
+		{
+			Impl& owner;
+			VkCommandBuffer command;
+			std::uint32_t frameSlot, viewSlot;
+			const TerraEngine::Renderer::RenderViewPresentationInput& view;
+			std::uint64_t targetGeneration;
+		} markerContext{*impl, cmd, impl->currentFrame, snapshotSlotIndex, *publicationPresentation, postProcessTargets->generation};
+		const auto mark = +[](void* opaque, PostProcessStage stage, bool begin) {
+			auto& context = *static_cast<ColorMarkerContext*>(opaque);
+			const auto index = static_cast<std::uint32_t>(stage);
+			if(begin)
+				context.owner.BeginPostProcessTimestamp(context.command, context.frameSlot, context.viewSlot,
+					context.view, context.targetGeneration, index);
+			else
+				context.owner.EndPostProcessTimestamp(context.command, context.frameSlot, context.viewSlot, index);
+		};
+		// A legacy fixed-exposure-only sample already covers the complete chain.
+		// Rich combinations get distinct, non-overlapping effect query pairs.
+		PostProcessEffectSettings effects;
+		if(ResolvePostProcessEffectSettings(publicationPresentation->graphicsSettings->values, effects) != GraphicsRequestReason::None) return;
+		const bool individual = postProcessPlan.spatialAA || postProcessPlan.presentationEffects || temporalView || screenRaster || postProcessPlan.customStages
+			|| color.HasBloom() || color.HasToneAndGrading() || effects.HasHdrCameraEffects() || effects.outputDithering
+			|| color.exposure == TerraEngine::Renderer::GraphicsSettings::ExposureMode::Automatic;
+		// The seed follows the actual submitted source owner and view. Other
+		// views never share mutable grain state or advance this snapshot's seed.
+		const auto seed = static_cast<std::uint32_t>(publication->frameId
+			^ (static_cast<std::uint64_t>(viewIndex) << 29u) ^ (outputRequest.outputId * 0x9e3779b9u));
+		const auto temporal = temporalFrame
+			? std::optional<TemporalChainRecording>{{*temporalFrame, submittedMotion, rasterSettings.sharpening}} : std::nullopt;
+		const auto sceneColorImage = scaledCamera ? scaledCamera->color.image : source.image;
+		if(!RecordPostProcessChain(cmd, *postProcessTargets, sceneColorImage, color, publicationPresentation->deltaTimeSeconds,
+			individual ? mark : nullptr, &markerContext, effects, seed, temporal ? &*temporal : nullptr,
+			publication, publicationIndex)) return;
+		const VkFramebuffer destination = processingRuntimeOutput ? impl->framebuffers[imageIndex] : source.framebuffer;
+		const VkExtent2D outputExtent = processingRuntimeOutput ? impl->swapchainExtent : nativeOutputExtent;
+		// This query covers the dithered camera composite only. HUD and grid draw later.
+		const bool dither = postProcessTargets->passes->ditherPipeline && !processingRawPreview;
+		if(dither) mark(&markerContext, PostProcessStage::OutputDither, true);
+		BeginPostProcessComposite(cmd, *postProcessTargets, destination, outputExtent, processingRawPreview);
+		if(dither) mark(&markerContext, PostProcessStage::OutputDither, false);
+		// The exposure variant also owns the source preserve and final sample.
+		// Stop before grid and HUD work shared with the ordinary view.
+		if(exposureTimed) impl->EndPostProcessTimestamp(cmd, impl->currentFrame, snapshotSlotIndex);
+		if(view == ViewType::Scene && presentation.sceneViewGridVisible)
+			RecordPostProcessGrid(cmd, *postProcessTargets, *publicationPresentation, outputExtent);
+		if(view == ViewType::Game)
+		{
+			impl->RenderUI(cmd, publicationPresentation->uiBatch, snapshotSlotIndex, postProcessTargets->passes.get());
+		}
+		EndPostProcessComposite(cmd, processingRuntimeOutput,
+			processingRuntimeOutput ? impl->swapchainImages[imageIndex] : source.image);
+	}
+	if (renderingOffscreenScene) {
 		Impl::OffscreenResources& identityTarget = renderingDedicatedCaptureTarget
 			? impl->captureView
 			: (view == ViewType::Scene ? impl->sceneView : impl->gameView);
@@ -5728,8 +6547,10 @@ void VulkanContext::RenderFrame(
 		// Direct meshes may legitimately publish no VG packets. The renderer still
 		// owns one immutable frame snapshot, so always stamp its explicit frame id
 		// instead of substituting a backend-only serial that automation cannot map.
-		identityTarget.identityFrameId = publication->frameId != 0u
-			? publication->frameId : impl->backendFrameSerial;
+		// The scaled Game output is a color reconstruction. Its unscaled
+		// presentation image does not claim the internal packed identity data.
+		identityTarget.colorFrameId = publication->frameId != 0u ? publication->frameId : impl->backendFrameSerial;
+		identityTarget.identityFrameId = scaledCamera ? 0u : identityTarget.colorFrameId;
 		identityTarget.identityRendererGeneration = impl->renderSessionGeneration;
 		identityTarget.identityOriginGeneration =
 			presentation.referenceFrame.originGeneration;
@@ -5754,7 +6575,7 @@ void VulkanContext::RenderFrame(
 		// occupies twice the bytes of a typical BGRA8 swapchain attachment.
 		const VkFormat colorFormat = offscreenColor ? impl->offscreenColorFormat : impl->swapchainImageFormat;
 		impl->shadowValidationReadback.RecordFrameColor(cmd, color, colorFormat,
-			activeRenderExtent.width, activeRenderExtent.height, layout,
+			nativeOutputExtent.width, nativeOutputExtent.height, layout,
 			{impl->renderSessionGeneration, publication->frameId, shadowCommandSerial, renderViewType, diagnosticViewId});
 	}
 
@@ -5768,6 +6589,7 @@ void VulkanContext::RenderFrame(
 	}
 	if (kEnableRuntimeScreenSpaceAo
 		&& !impl->editorMode
+		&& !enhancedAo
 		&& runtimeAoHistoryPass
 		&& presentation.settings.ambientOcclusionStrength > 0.001f
 		&& presentation.settings.ambientOcclusionQuality > 0u) {
@@ -5781,7 +6603,9 @@ void VulkanContext::RenderFrame(
 		impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.hiz.begin" : "game.hiz.begin");
 		// Build Hi-Z after the depth attachment contains the final scene depth.
 		// The next frame can then use this stable pyramid for conservative occlusion.
-		if (impl->GenerateHiZPyramid(writableFrameHiZ, cmd, activeDepthImage, activeDepthView, activeRenderExtent, snapshotSlotIndex, currentHiZHistory)) {
+		const VkImageView coverageSeed = coverage ? coverage->images[TerraEngine::Renderer::Vulkan::IndexedMsaa4Attachments::HiZDepthSeed].view : VK_NULL_HANDLE;
+		if (impl->GenerateHiZPyramid(writableFrameHiZ, cmd, activeDepthImage, activeDepthView,
+			activeRenderExtent, snapshotSlotIndex, currentHiZHistory, coverageSeed)) {
 			impl->MarkHiZWritePending(hiZViewIndex, impl->currentFrame);
 		}
 		impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.hiz.end" : "game.hiz.end");
@@ -5794,6 +6618,25 @@ void VulkanContext::RenderFrame(
 	{
 		impl->MarkDeviceLost(primaryRecordingResult, "primary shadow/view recording completion");
 		return;
+	}
+	if (indexedRaster && recordedIndexedDrawCount.load(std::memory_order_relaxed) != prepared.size())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Indexed view omitted a prepared draw; the prior view remains usable.");
+		return;
+	}
+	if(postProcessTargets && !TerraEngine::Renderer::Vulkan::RecordPostProcessTargetUse(*postProcessTargets, cmd, impl->currentFrame))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Could not retain the recorded fixed-exposure target use.");
+		return;
+	}
+	if(!postProcessTargets && renderingOffscreenScene)
+	{
+		// A later camera can overwrite the same physical target while the frame
+		// number remains unchanged. Only successful command submission retires
+		// the preceding camera's explicit-stage capture publication.
+		const auto& source = renderingDedicatedCaptureTarget ? impl->captureView
+			: (view == ViewType::Scene ? impl->sceneView : impl->gameView);
+		if(!impl->RecordPostProcessSourceOverwrite(cmd, source.image)) return;
 	}
 	commandRecordingPhaseProfile.reset();
 	commandRecordingProfile.reset();
@@ -5862,7 +6705,121 @@ void VulkanContext::RenderFrame(
 	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 		impl->pendingPrimaryCommandBuffersSubmitted.resize(impl->MAX_FRAMES_IN_FLIGHT, 0u);
 	}
+	struct SceneContentAdmission
+	{
+		Impl* owner = nullptr;
+		VkCommandBuffer command = VK_NULL_HANDLE;
+		bool queued = false;
+		~SceneContentAdmission() noexcept
+		{
+			if(owner && !queued)
+				owner->DiscardPostProcessCommands(std::span<const VkCommandBuffer>(&command, 1));
+		}
+	} sceneContentAdmission{nullptr, cmd};
+	if(impl->editorMode && renderingOffscreenScene && !renderingDedicatedCaptureTarget
+		&& outputRequest.kind == RenderOutputKind::SceneView && view == ViewType::Scene)
+	{
+		using namespace TerraEngine::Renderer;
+		const auto& target = impl->sceneView;
+		Vulkan::SceneViewContentStamp stamp;
+		stamp.frameId = publication->frameId; // Zero stays unknown; never substitute a statistics serial.
+		stamp.poseSequence = presentation.poseSequence;
+		stamp.sceneAaRevision = presentation.sceneAaRevision;
+		stamp.backendResourceGeneration = publication->backendResourceGeneration;
+		stamp.rendererSessionGeneration = publication->rendererSessionGeneration;
+		stamp.internalWidth = activeRenderExtent.width; stamp.internalHeight = activeRenderExtent.height;
+		stamp.outputWidth = target.extent.width; stamp.outputHeight = target.extent.height;
+		stamp.imageStage = RenderCaptureImageStage::Legacy;
+		if(presentation.graphicsSettings)
+		{
+			const auto& settings = *presentation.graphicsSettings;
+			stamp.settingsRevision = settings.revision;
+			stamp.projectGeneration = settings.lifecycle.projectGeneration;
+			stamp.playSessionGeneration = settings.lifecycle.playSessionGeneration;
+		}
+		bool shapeMatches = outputRequest.targetSize.x == target.extent.width
+			&& outputRequest.targetSize.y == target.extent.height;
+		if(presentation.graphicsView)
+		{
+			const auto& identity = *presentation.graphicsView;
+			stamp.viewLifetimeGeneration = identity.lifetimeGeneration;
+			stamp.viewType = static_cast<std::uint32_t>(identity.viewType);
+			stamp.outputKind = static_cast<std::uint32_t>(identity.outputKind); stamp.outputId = identity.outputId;
+			shapeMatches = shapeMatches && identity.viewType == RenderViewType::Scene
+				&& identity.outputKind == outputRequest.kind && identity.outputId == outputRequest.outputId;
+		}
+		if(postProcessTargets)
+		{
+			const auto& passes = *postProcessTargets->passes;
+			stamp.postProcessTargetGeneration = postProcessTargets->generation;
+			stamp.internalWidth = postProcessTargets->internalExtent.width;
+			stamp.internalHeight = postProcessTargets->internalExtent.height;
+			// These are the actual branches recorded above, not a queued setting.
+			stamp.aaMode = scaledCamera ? 0u : (temporalView ? 5u : (coverage ? 4u : (passes.fxaa ? 1u : (passes.smaa ? 2u : (passes.cmaa2 ? 3u : 0u)))));
+			stamp.imageStage = processingRawPreview ? RenderCaptureImageStage::Raw : RenderCaptureImageStage::Composited;
+			shapeMatches = shapeMatches && postProcessTargets->outputExtent.width == target.extent.width
+				&& postProcessTargets->outputExtent.height == target.extent.height
+				&& postProcessTargets->sceneColor.extent.width == stamp.internalWidth
+				&& postProcessTargets->sceneColor.extent.height == stamp.internalHeight;
+			if(!processingRawPreview)
+			{
+				const auto finalIndex = passes.finalProcessingImage;
+				shapeMatches = shapeMatches && finalIndex < postProcessTargets->processingImageCount
+					&& finalIndex < postProcessTargets->processing.size();
+				if(shapeMatches)
+				{
+					const auto& selected = postProcessTargets->processing[finalIndex];
+					shapeMatches = selected.extent.width == target.extent.width && selected.extent.height == target.extent.height;
+				}
+			}
+		}
+		if(!shapeMatches) stamp.viewLifetimeGeneration = 0;
+		sceneContentAdmission.owner = impl.get();
+		if(!impl->RecordSceneViewContent(cmd, target, stamp))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Could not retain the actual Scene image content receipt before queue admission.");
+			return;
+		}
+	}
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+	temporalSettlement.queued = true;
+	sceneContentAdmission.queued = true;
+	if(impl->recordedGraphicsFrameId == publication->frameId)
+	{
+		// Only a completed primary admitted for submission supplies evidence.
+		// Suppressed/resized/stale requests never become managed camera views.
+		impl->recordedGraphicsViews.push_back({publicationIndex, nativeOutputExtent.width, nativeOutputExtent.height,
+			recordedIndexedDrawCount.load(std::memory_order_relaxed),
+			indexedRaster ? static_cast<std::uint32_t>(indexedRaster->samples) : 1u,
+			static_cast<std::uint32_t>(motionDraws.size()), temporalFrame ? publication->frameId : 0u,
+			temporalFrame && temporalFrame->previous ? temporalFrame->previous->frameId : 0u,
+			activeRenderExtent.width, activeRenderExtent.height,
+			temporalFrame ? temporalFrame->provenance.current->jitterPhase : 0u});
+	}
+	if(postProcessTargets)
+	{
+		using namespace TerraEngine::Renderer;
+		const auto& source = renderingDedicatedCaptureTarget ? impl->captureView : (view == ViewType::Scene ? impl->sceneView : impl->gameView);
+		auto& output = postProcessTargets->passes->output;
+		output.sourceImage = source.image;
+		output.sourceTargetGeneration = source.generation;
+		output.publicationFrameId = publication->frameId != 0u ? publication->frameId : impl->backendFrameSerial;
+		output.settingsRevision = presentation.graphicsSettings->revision;
+		output.command = cmd;
+		output.submissionAccepted = false;
+		output.rawPreview = processingRawPreview;
+		output.compositedImage = processingRuntimeOutput ? impl->swapchainImages[imageIndex] : source.image;
+		output.compositedFormat = processingRuntimeOutput ? impl->swapchainImageFormat : impl->offscreenColorFormat;
+		output.compositedExtent = processingRuntimeOutput ? impl->swapchainExtent : nativeOutputExtent;
+		output.compositedLayout = processingRuntimeOutput ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		output.compositedEncoding = output.compositedFormat == VK_FORMAT_R8G8B8A8_SRGB
+			|| output.compositedFormat == VK_FORMAT_B8G8R8A8_SRGB
+			? RenderCaptureColorEncoding::Srgb : RenderCaptureColorEncoding::Linear;
+		output.overlaysIncluded = (view == ViewType::Scene && presentation.sceneViewGridVisible)
+			|| (view == ViewType::Game && (!presentation.uiBatch.staticQuads.empty()
+				|| !presentation.uiBatch.immediateQuads.empty() || !presentation.uiBatch.textRuns.empty() || !presentation.uiBatch.imageRuns.empty()));
+	}
+	postProcessTimingSettlement.admitted = true;
 	// The existing admission list now owns this completed primary. No new
 	// submission, wait or visibility boundary is introduced by settlement.
 	computeRecordingSettlement.admitted = true;

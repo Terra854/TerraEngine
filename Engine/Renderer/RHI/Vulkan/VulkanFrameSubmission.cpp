@@ -261,6 +261,9 @@ void VulkanContext::EndFrame() {
 	if (!impl->initialized || impl->skipFrame || impl->deviceLost || impl->emptyFrameRecovery.Suspended())
 	{
 		impl->DiscardRecordedShadowWrites(impl->currentFrame);
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->DiscardPostProcessCommands(impl->pendingPrimaryCommandBuffers[impl->currentFrame]);
+		}
 		return;
 	}
 
@@ -283,6 +286,7 @@ void VulkanContext::EndFrame() {
 		if (!alreadySubmitted) {
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
 			impl->DiscardRecordedHiZWrites(impl->currentFrame, impl->swapchainAcquireWaitConsumed);
+			impl->DiscardPostProcessCommands(cmds);
 			cmds.clear();
 			impl->emptyFrameValidationReceipt.forcedEmpty = true;
 		}
@@ -307,6 +311,7 @@ void VulkanContext::EndFrame() {
 		// the editor UI pass acquires the next swapchain image.
 		impl->DiscardRecordedHiZWrites(impl->currentFrame, impl->swapchainAcquireWaitConsumed);
 		impl->DiscardRecordedShadowWrites(impl->currentFrame);
+		impl->DiscardPostProcessCommands(cmds);
 		cmds.clear();
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
@@ -351,6 +356,7 @@ void VulkanContext::EndFrame() {
 		}
 		impl->DiscardRecordedShadowWrites(impl->currentFrame);
 		impl->DiscardRecordedHiZWrites(impl->currentFrame, impl->swapchainAcquireWaitConsumed);
+		impl->DiscardPostProcessCommands(cmds);
 		cmds.clear();
 		impl->editorRenderSubmitted = false;
 		break;
@@ -474,6 +480,8 @@ void VulkanContext::EndFrame() {
 				return;
 			}
 			(void)emptyProgress.SubmitAccepted();
+			// A completion-only submit can still fence an earlier runtime prefix.
+			impl->MarkPostProcessCommandsSubmitted({}, impl->currentFrame, impl->inFlightFences[impl->currentFrame]);
 			impl->swapchainAcquireWaitConsumed = true;
 #if defined(TERRAENGINE_RUNTIME_MEMORY_SAFETY_VALIDATION)
 			impl->emptyFrameValidationReceipt.acquireWaitConsumedAfter = impl->swapchainAcquireWaitConsumed.load(std::memory_order_acquire);
@@ -582,6 +590,7 @@ void VulkanContext::EndFrame() {
 			// the last successful bytes for diagnostics and retry a full slice.
 			impl->ResetLightingUploadMirrors();
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
+			impl->DiscardPostProcessCommands(cmds);
 			if (impl->MarkDeviceLost(submitResult, "editor render queue submit")) {
 				cmds.clear();
 				return;
@@ -611,6 +620,8 @@ void VulkanContext::EndFrame() {
 				"Queue submit failed during editor rendering; swapchain recovery was required.");
 			return;
 		}
+		// Scene and Game commands wait for a later editor completion submit.
+		impl->MarkPostProcessCommandsSubmitted(cmds, impl->currentFrame, VK_NULL_HANDLE);
 		impl->editorRenderSubmitted = true;
 		if (impl->animationComputeRecordedForCurrentFrame
 			&& !impl->animationComputeSubmissionMarkedForCurrentFrame) {
@@ -637,6 +648,7 @@ void VulkanContext::EndFrame() {
 		if (resetResult != VK_SUCCESS) {
 			impl->ResetLightingUploadMirrors();
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
+			impl->DiscardPostProcessCommands(cmds);
 			if (impl->MarkDeviceLost(resetResult, "runtime frame fence reset")) return;
 			TERRAENGINE_LOG(LogLevel::Error, "Runtime frame fence reset failed: " << resetResult);
 			impl->RecreateSwapChain();
@@ -669,6 +681,7 @@ void VulkanContext::EndFrame() {
 		if (submitResult != VK_SUCCESS) {
 			impl->ResetLightingUploadMirrors();
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
+			impl->DiscardPostProcessCommands(cmds);
 			if (impl->MarkDeviceLost(submitResult, "runtime render queue submit")) {
 				return;
 			}
@@ -684,6 +697,7 @@ void VulkanContext::EndFrame() {
 				"Queue submit failed during runtime rendering; swapchain recovery was required.");
 			return;
 		}
+		impl->MarkPostProcessCommandsSubmitted(cmds, impl->currentFrame, impl->inFlightFences[impl->currentFrame]);
 		if (impl->animationComputeRecordedForCurrentFrame
 			&& !impl->animationComputeSubmissionMarkedForCurrentFrame) {
 			// Runtime compute and graphics share this one fence-bearing submit.

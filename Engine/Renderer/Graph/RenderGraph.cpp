@@ -1,10 +1,18 @@
 #include "RenderGraph.h"
+#include "Renderer/GraphicsSettings/PostProcessAuthoringFrame.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsCatalog.h"
+#include "Renderer/GraphicsSettings/PostProcessColorSettings.h"
+#include "Renderer/GraphicsSettings/PostProcessEffectSettings.h"
+#include "RenderFramePublication.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace TerraEngine::Renderer {
@@ -142,6 +150,17 @@ namespace TerraEngine::Renderer {
 	}
 
 	namespace {
+		std::uint64_t GraphViewIdentity(const RenderFrameViewRequest& view)
+		{
+			// Native recording is bounded to a handful of view snapshots. Seven
+			// explicit instance bits allow 128 views per physical output while leaving
+			// eight effect-resource bits and their high domain bit disjoint. Reject
+			// excess instead of truncating an ordinal into another camera's resources.
+			if(view.viewInstanceIndex > 127u) throw std::length_error("Render graph physical output exceeds its bounded view-instance identity capacity.");
+			return (std::uint64_t(view.viewInstanceIndex) << 48u) | (std::uint64_t(view.outputKind) << 40u)
+				| (std::uint64_t(view.viewType) << 32u) | std::uint64_t(view.outputId);
+		}
+
 		void HashCombine(std::uint64_t& seed, std::uint64_t value)
 		{
 			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
@@ -311,6 +330,263 @@ namespace TerraEngine::Renderer {
 		return result;
 	}
 
+	std::uint64_t BuildPostProcessGraphTopologySignature(
+		const PostProcessGraphSettings& settings) noexcept
+	{
+		// Zero also represents an unavailable plan. Requested effects must never
+		// create resources before their complete backend path is qualified.
+		if(!settings.executionAvailable || !(settings.screenSpaceLighting
+			|| settings.temporalResolve || settings.hdrCamera || settings.toneAndGrade
+			|| settings.spatialAA || settings.presentationEffects || settings.coverageAA || settings.customStages || settings.outputDithering)) return 0u;
+		std::uint64_t signature = 1469598103934665603ull;
+		for(const bool enabled : {settings.screenSpaceLighting, settings.temporalResolve,
+			settings.hdrCamera, settings.toneAndGrade, settings.spatialAA,
+			settings.presentationEffects, settings.coverageAA, settings.motionBlur, settings.outputDithering}) HashCombine(signature, enabled ? 1u : 0u);
+		HashCombine(signature, settings.antiAliasingMode);
+		HashCombine(signature, settings.customStages);
+		HashCombine(signature, settings.sampleCount);
+		HashCombine(signature, settings.internalSize.x);
+		HashCombine(signature, settings.internalSize.y);
+		HashCombine(signature, settings.outputSize.x);
+		HashCombine(signature, settings.outputSize.y);
+		HashCombine(signature, settings.resourceFormatGeneration);
+		return signature == 0u ? 1u : signature;
+	}
+
+	PostProcessGraphSettings BuildPostProcessGraphSettings(
+		const GraphicsSettings::GraphicsSettingsSnapshot& snapshot) noexcept
+	{
+		PostProcessGraphSettings settings;
+		settings.customStages = snapshot.customPostProcessStages;
+		settings.internalSize = {snapshot.internalWidth, snapshot.internalHeight};
+		settings.outputSize = {snapshot.outputWidth, snapshot.outputHeight};
+		settings.sampleCount = snapshot.sampleCount;
+		settings.resourceFormatGeneration = snapshot.lifecycle.backendResourceGeneration;
+		for(const auto& entry : snapshot.values)
+		{
+			if(entry.id == GraphicsSettings::GraphicsSettingId::AntiAliasingMode)
+			{
+				if(const auto mode = std::get_if<std::uint32_t>(&entry.value))
+					settings.antiAliasingMode = *mode;
+			}
+			if(entry.id == GraphicsSettings::GraphicsSettingId::FixedExposureCompensation)
+			{
+				if(const auto exposure = std::get_if<float>(&entry.value))
+					settings.fixedExposureCompensation = *exposure;
+			}
+			if(entry.id == GraphicsSettings::GraphicsSettingId::InternalResolutionScale)
+			{
+				if(const auto scale = std::get_if<float>(&entry.value))
+					settings.internalResolutionScale = *scale;
+			}
+		}
+		const auto color = GraphicsSettings::ResolvePostProcessColorSettings(snapshot.values);
+		settings.fixedExposureCompensation = color.compensationEV;
+		settings.hdrCamera = color.HasExposure() || color.HasBloom();
+		settings.toneAndGrade = color.HasToneAndGrading();
+		GraphicsSettings::PostProcessEffectSettings effects;
+		if(GraphicsSettings::ResolvePostProcessEffectSettings(snapshot.values, effects) == GraphicsSettings::GraphicsRequestReason::None)
+		{
+			settings.hdrCamera = settings.hdrCamera || effects.HasHdrCameraEffects();
+			settings.presentationEffects = effects.presentation.Active();
+			settings.outputDithering = effects.outputDithering;
+			settings.motionBlur = effects.motionBlur.Active();
+			settings.screenSpaceLighting = effects.HasScreenSpace();
+		}
+		settings.spatialAA = settings.antiAliasingMode >= 1u
+			&& settings.antiAliasingMode <= 3u;
+		GraphicsSettings::GraphicsAAConfiguration raster;
+		const bool validAA = GraphicsSettings::ResolveGraphicsAAConfiguration(snapshot.values, raster) == GraphicsSettings::GraphicsRequestReason::None;
+		settings.coverageAA = validAA
+			&& raster.raster == GraphicsSettings::GraphicsGeometryRasterMode::Indexed
+			&& raster.antiAliasing == GraphicsSettings::GraphicsAntiAliasingMode::MSAA
+			&& settings.sampleCount == raster.sampleCount;
+		settings.temporalResolve = validAA
+			&& raster.raster == GraphicsSettings::GraphicsGeometryRasterMode::Indexed
+			&& (raster.antiAliasing == GraphicsSettings::GraphicsAntiAliasingMode::TAA
+				|| raster.upscaling == GraphicsSettings::GraphicsUpscalingMode::Temporal)
+			&& settings.sampleCount == 1u;
+		// Coverage resolves into the same native-extent image consumed by the
+		// color and overlay stages. The backend certifies the exact attachments.
+		settings.executionAvailable = snapshot.postProcessResourceGeneration != 0u
+			&& snapshot.postProcessResourceGeneration == settings.resourceFormatGeneration
+			&& (settings.coverageAA || settings.temporalResolve || ((settings.screenSpaceLighting || settings.hdrCamera || color.Active() || settings.spatialAA || settings.presentationEffects || settings.customStages || settings.outputDithering) && settings.sampleCount == 1u
+				&& (settings.antiAliasingMode == 0u || settings.spatialAA)))
+			&& (settings.internalResolutionScale == 1.0f || settings.temporalResolve);
+		return settings;
+	}
+
+	void BindGraphicsCameraViewProvenance(RenderFrameViewRequest& view, const RenderFrameSnapshot& snapshot,
+		std::optional<GraphicsSettings::GraphicsCameraTarget> camera)
+	{
+		view.graphicsCamera.reset(); view.graphicsView.reset();
+		if(!camera || camera->cameraId == TerraEngine::EMPTY_UUID || camera->sceneGeneration == 0
+			|| camera->objectLifetimeGeneration == 0 || camera->componentGeneration == 0 || camera->bindingGeneration == 0
+			|| std::find(snapshot.graphicsCameraIdentities.begin(), snapshot.graphicsCameraIdentities.end(), *camera) == snapshot.graphicsCameraIdentities.end()) return;
+		view.graphicsCamera = camera;
+		for(const auto& prior : snapshot.publishedGraphicsCameraViews)
+		{
+			if(prior.target.scope != GraphicsSettings::GraphicsScope::Camera || prior.target.camera != camera || !prior.target.view
+				|| prior.target.view->lifetimeGeneration == 0 || prior.target.view->outputKind != view.outputKind
+				|| prior.target.view->viewType != view.viewType || prior.target.view->outputId != view.outputId
+				|| prior.width == 0 || prior.height == 0) continue;
+			// Standalone extent0 requests the current native swapchain, rather than
+			// inventing a viewport size. Its protected registry already checks the
+			// backend owner; every other view must match explicit dimensions.
+			const bool nativeRuntimeExtent = view.outputKind == RenderOutputKind::MainRuntimeView
+				&& view.targetSize.x == 0 && view.targetSize.y == 0;
+			if(!nativeRuntimeExtent && (prior.width != view.targetSize.x || prior.height != view.targetSize.y)) continue;
+			// Duplicate exact registrations cannot prove a unique lifetime.
+			if(view.graphicsView) { view.graphicsView.reset(); return; }
+			view.graphicsView = prior.target.view;
+		}
+		if(view.graphicsView || view.targetSize.x == 0 || view.targetSize.y == 0
+			|| (view.outputKind != RenderOutputKind::OffscreenTexture && view.outputKind != RenderOutputKind::GameView)) return;
+		// Protected collection plans private lifetimes for dedicated captures and
+		// Game history before their first accepted draw. Zero is never C# visible.
+		for(const auto& planned : snapshot.cameraGraphicsSettings)
+		{
+			if(!planned || planned->publishedFrameId != 0 || planned->target.scope != GraphicsSettings::GraphicsScope::Camera
+				|| planned->target.camera != camera || !planned->target.view || planned->target.view->lifetimeGeneration == 0
+				|| planned->target.view->outputKind != view.outputKind || planned->target.view->viewType != view.viewType
+				|| planned->target.view->outputId != view.outputId || planned->lifecycle != snapshot.graphicsSettingsLifecycle
+				|| planned->outputWidth != view.targetSize.x || planned->outputHeight != view.targetSize.y) continue;
+			// A planned output can have a smaller color extent. Validate that
+			// extent using the same typed configuration as the protected planner.
+			GraphicsSettings::GraphicsAAConfiguration aa;
+			if(GraphicsSettings::ResolveGraphicsAAConfiguration(planned->values, aa) != GraphicsSettings::GraphicsRequestReason::None
+				|| planned->internalWidth != GraphicsSettings::ResolveGraphicsAAInternalDimension(view.targetSize.x, aa)
+				|| planned->internalHeight != GraphicsSettings::ResolveGraphicsAAInternalDimension(view.targetSize.y, aa)) continue;
+			if(view.graphicsView) { view.graphicsView.reset(); return; }
+			view.graphicsView=planned->target.view;
+		}
+	}
+
+	std::vector<PublishedGraphicsCameraView> CollectPublishedGraphicsCameraTargets(const RenderFramePublication& publication)
+	{
+		std::vector<PublishedGraphicsCameraView> targets;
+		for(std::size_t publicationIndex=0; publicationIndex<publication.presentationInputs.size(); ++publicationIndex)
+		{
+			const auto& presentation=publication.presentationInputs[publicationIndex];
+			const auto& camera = presentation.graphicsCamera;
+			const auto& output = presentation.output;
+			// Only the standalone swapchain request is allowed to defer extent
+			// resolution to Vulkan. A missing editor/capture extent has no view.
+			const bool nativeRuntimeExtent = output.kind == RenderOutputKind::MainRuntimeView
+				&& output.targetSize.x == 0 && output.targetSize.y == 0;
+			if(!nativeRuntimeExtent && (output.targetSize.x == 0 || output.targetSize.y == 0)) continue;
+			if(!camera || camera->cameraId == TerraEngine::EMPTY_UUID || camera->sceneGeneration == 0
+				|| camera->objectLifetimeGeneration == 0 || camera->componentGeneration == 0 || camera->bindingGeneration == 0) continue;
+			PublishedGraphicsCameraView evidence;
+			evidence.target.scope = GraphicsSettings::GraphicsScope::Camera;
+			evidence.target.camera = camera;
+			evidence.target.view = GraphicsSettings::GraphicsViewIdentity{output.diagnosticsView, output.outputId, 0, output.kind};
+			if(presentation.graphicsView && presentation.graphicsView->outputKind == output.kind
+				&& presentation.graphicsView->viewType == output.diagnosticsView && presentation.graphicsView->outputId == output.outputId)
+				evidence.target.view = presentation.graphicsView;
+			evidence.width = output.targetSize.x; evidence.height = output.targetSize.y;
+			evidence.publicationIndex=static_cast<std::uint32_t>(publicationIndex);
+			targets.push_back(std::move(evidence));
+		}
+		return targets;
+	}
+
+	std::shared_ptr<const GraphicsSettings::GraphicsSettingsSnapshot>
+	SelectGraphicsSettingsForView(const RenderFrameSnapshot& snapshot, const RenderFrameViewRequest& view) noexcept
+	{
+		if(view.outputKind == RenderOutputKind::SceneView && snapshot.sceneGraphicsSettings)
+			return snapshot.sceneGraphicsSettings;
+		if(!view.graphicsCamera || !view.graphicsView || view.graphicsView->lifetimeGeneration == 0
+			|| view.graphicsView->outputKind != view.outputKind || view.graphicsView->viewType != view.viewType
+			|| view.graphicsView->outputId != view.outputId) return snapshot.graphicsSettings;
+		// Verify the association again at selection so a caller cannot accidentally
+		// retain a previously bound request after snapshot membership changes.
+		RenderFrameViewRequest verified=view;
+		BindGraphicsCameraViewProvenance(verified,snapshot,view.graphicsCamera);
+		if(verified.graphicsView != view.graphicsView) return snapshot.graphicsSettings;
+		for(const auto& authored : snapshot.cameraPostProcessAuthoring)
+			if(authored && authored->target.camera == view.graphicsCamera && authored->target.view == view.graphicsView
+				&& authored->lifecycle == snapshot.graphicsSettingsLifecycle && authored->settings) return authored->settings;
+		for(const auto& candidate : snapshot.cameraGraphicsSettings)
+		{
+			// Camera UUID and all object/component/binding/view lifetimes must match.
+			// A matching physical output number alone never authorizes an override.
+			if(candidate && candidate->target.scope == GraphicsSettings::GraphicsScope::Camera
+				&& candidate->target.camera == view.graphicsCamera && candidate->target.view == view.graphicsView
+				&& (!snapshot.graphicsSettings || candidate->lifecycle == snapshot.graphicsSettings->lifecycle)) return candidate;
+		}
+		return snapshot.graphicsSettings;
+	}
+
+	void AppendPostProcessRenderPasses(std::vector<RenderPassNode>& passes,
+		const RenderFrameViewRequest& view, const PostProcessGraphSettings& settings)
+	{
+		// Preserve both the legacy declarations and their storage on bypass.
+		// This check precedes every string, vector, or graph-resource operation.
+		if(BuildPostProcessGraphTopologySignature(settings) == 0u) return;
+		const std::uint64_t viewIdentity = GraphViewIdentity(view);
+		const std::string prefix = "view-" + std::to_string(viewIdentity);
+		const std::string drawId = prefix + ".draw";
+		auto draw = std::find_if(passes.begin(), passes.end(), [&drawId](const auto& pass) {
+			return pass.passId == drawId;
+		});
+		if(draw == passes.end()) return;
+		// A disjoint resource domain preserves every legacy resource identity and
+		// leaves room for per-effect intermediates without four-bit lane aliases.
+		const std::uint64_t resourceBase = (std::uint64_t{1} << 63u) | (viewIdentity << 8u);
+		const std::uint64_t depthResource = (viewIdentity << 4u) | 3u;
+		const std::uint64_t sceneColor = resourceBase | 1u;
+		draw->outputs.push_back({sceneColor, RenderAccessMode::Write,
+			RenderStage::Geometry, drawId, RenderResourceSemantic::SceneColor});
+		std::string previousPass = drawId;
+		std::uint64_t previousColor = sceneColor;
+		std::uint64_t nextResource = 2u;
+		struct Stage { PostProcessPassKind kind; const char* name; bool enabled; bool depth; };
+		const std::array stages{
+			Stage{PostProcessPassKind::ScreenSpaceLighting, "screen-space-lighting", settings.screenSpaceLighting, true},
+			Stage{PostProcessPassKind::TemporalResolve, "temporal-resolve", settings.temporalResolve, true},
+			Stage{PostProcessPassKind::CustomFullscreen, "custom-hdr", (settings.customStages & 1u) != 0u, false},
+			Stage{PostProcessPassKind::HdrCamera, "hdr-camera", settings.hdrCamera, true},
+			Stage{PostProcessPassKind::ToneAndGrade, "tone-and-grade", settings.toneAndGrade, false},
+			Stage{PostProcessPassKind::CustomFullscreen, "custom-display", (settings.customStages & 2u) != 0u, false},
+			Stage{PostProcessPassKind::SpatialAA, "spatial-aa", settings.spatialAA, false},
+			Stage{PostProcessPassKind::PresentationEffects, "presentation-effects", settings.presentationEffects, false},
+			Stage{PostProcessPassKind::CustomFullscreen, "custom-before-ui", (settings.customStages & 4u) != 0u, false},
+			Stage{PostProcessPassKind::OverlayComposite, "overlay-composite", true, true}
+		};
+		for(const Stage& stage : stages)
+		{
+			if(!stage.enabled) continue;
+			RenderPassNode pass;
+			pass.passId = prefix + ".post." + stage.name;
+			pass.viewType = view.viewType;
+			pass.postProcessKind = stage.kind;
+			pass.workPolicy = RenderWorkPolicy::SerialRequired;
+			pass.ownership = RenderWorkerOwnership::CoordinatorOnly;
+			pass.canOverlap = false;
+			pass.fallbackReason = "Camera image stages share ordered view targets under the protected backend commit.";
+			pass.profilingLabel = "RenderGraph: " + pass.passId;
+			pass.dependencies.push_back(previousPass);
+			const RenderStage pipelineStage = stage.kind == PostProcessPassKind::OverlayComposite
+				? RenderStage::UI : RenderStage::Lighting;
+			pass.inputs.push_back({previousColor, RenderAccessMode::Read, pipelineStage,
+				pass.passId, previousColor == sceneColor ? RenderResourceSemantic::SceneColor
+					: RenderResourceSemantic::ProcessedColor});
+			if(stage.depth)
+			{
+				if(previousPass != drawId) pass.dependencies.push_back(drawId);
+				pass.inputs.push_back({depthResource, RenderAccessMode::Read, pipelineStage,
+					pass.passId, RenderResourceSemantic::SceneDepth});
+			}
+			previousColor = resourceBase | nextResource++;
+			pass.outputs.push_back({previousColor, RenderAccessMode::Write, pipelineStage,
+				pass.passId, stage.kind == PostProcessPassKind::OverlayComposite
+					? RenderResourceSemantic::CompositedColor : RenderResourceSemantic::ProcessedColor});
+			previousPass = pass.passId;
+			passes.push_back(std::move(pass));
+		}
+	}
+
 	std::vector<RenderPassNode> BuildDefaultRenderPasses(const RenderFrameSnapshot& snapshot, const BackendCapabilityProfile& capabilities)
 	{
 		std::vector<RenderPassNode> passes;
@@ -320,8 +596,7 @@ namespace TerraEngine::Renderer {
 			// The snapshot identity is (output kind, view type, full uint32 ID).
 			// Fixed disjoint bit lanes avoid hashing collisions and uint32 addition
 			// overflow. Four low bits identify resources; zero remains reserved.
-			const std::uint64_t viewIdentity = (std::uint64_t(view.outputKind) << 40u)
-				| (std::uint64_t(view.viewType) << 32u) | std::uint64_t(view.outputId);
+			const std::uint64_t viewIdentity = GraphViewIdentity(view);
 			const std::string viewPrefix = "view-" + std::to_string(viewIdentity);
 			const std::uint64_t resourceBase = viewIdentity << 4u;
 			const std::uint64_t collectedGeometryResource = resourceBase | 1u;

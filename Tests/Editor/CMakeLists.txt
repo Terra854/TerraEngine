@@ -224,6 +224,7 @@ add_executable(TerraEngine-EditorTests
 	Renderer/ViewportTextureRetirementTests.cpp
 	Renderer/RendererRecoveryEditorTests.cpp
 	Renderer/RendererRecoveryWindowTests.cpp
+	Renderer/PostProcessViewTests.cpp
 	Renderer/ResourceResidencyWindowTests.cpp
 	Renderer/SceneViewDisplayToggleTests.cpp
 	Renderer/SceneViewMarkerOverlayTests.cpp
@@ -855,7 +856,8 @@ terraengine_add_correctness_slice(Editor.RuntimeMemorySafety.Diagnostics TerraEn
 terraengine_add_correctness_slice(Editor.AudioControlPersistence TerraEngine-EditorTests Editor.AudioControlPersistence 4)
 
 # Decode the actual MCP image item and retain the existing rejection cases.
-terraengine_add_correctness_slice(Editor.RenderCaptureContracts TerraEngine-EditorTests Editor.MCP.CameraImages 11)
+terraengine_add_correctness_slice(Editor.RenderCaptureContracts TerraEngine-EditorTests Editor.MCP.CameraImages 14)
+terraengine_add_correctness_slice(Editor.PostProcessView TerraEngine-EditorTests PostProcess.View 3)
 
 # Review regressions invoke real MainEditor, window drawing and authoring code.
 # Reuse the maintained application source/link closure, replacing only its

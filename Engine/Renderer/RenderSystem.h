@@ -33,6 +33,7 @@
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFramePublication.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsTypes.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecoveryPolicy.h"
 #include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryReplay.h"
@@ -52,6 +53,14 @@ struct Material;
 enum class AssetType : std::uint32_t;
 struct RenderSystemLifetimeState;
 struct RenderFrameExecution;
+namespace TerraEngine::Renderer::GraphicsSettings
+{
+	class PostProcessAuthoringController;
+	struct PostProcessAuthoringAdmission;
+}
+namespace TerraEngine::Scripting::PostProcessAuthoringWire { struct Request; }
+class VulkanContext;
+struct RenderGraphicsSettingsState;
 
 namespace TerraEngine::Profiling { struct ProfilerFramePublicationEvidence; }
 namespace TerraEngine::Renderer::Vulkan { struct VulkanRendererPreparationSummary; }
@@ -252,6 +261,15 @@ public:
 	bool RequestConventionalVisibilityIdentityPick(
 		RenderViewType viewType, const glm::uvec2& pixel,
 		bool dedicatedCaptureTarget = false);
+	// UI callers normalize against this copied physical attachment extent. A
+	// later request supplies the same record to reject an intervening resize.
+	std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>
+		GetConventionalVisibilityIdentityPickTarget(
+			RenderViewType viewType, bool dedicatedCaptureTarget = false) const;
+	bool RequestConventionalVisibilityIdentityPick(
+		RenderViewType viewType, const glm::uvec2& pixel,
+		bool dedicatedCaptureTarget,
+		const TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata& expectedTarget);
 	std::optional<VirtualGeometryVisibilityPick>
 		GetLatestAuthoritativeConventionalVisibilityIdentityPick(
 			RenderViewType viewType, const glm::uvec2& pixel) const;
@@ -346,9 +364,86 @@ public:
 	// and deliberately does not rewrite the project's RenderSettings.json file.
 	bool QueueRuntimeQualityPreset(QualityPreset preset);
 	bool QueueRuntimeRenderSettings(const RenderSettings& settings);
+	// Copied managed requests enter the same protected scene/render boundary.
+	TerraEngine::Renderer::GraphicsSettings::PostProcessAuthoringController& GetPostProcessAuthoringController();
+	TerraEngine::Renderer::GraphicsSettings::PostProcessAuthoringAdmission SubmitPostProcessAuthoring(
+		const TerraEngine::Scripting::PostProcessAuthoringWire::Request& request);
+	void SettlePostProcessAuthoringSceneWrites(std::uint64_t frameId);
+	void PreparePostProcessAuthoringViews(const TerraEngine::Renderer::RenderFramePublication& publication, VulkanContext& native);
 	RenderSettings GetRuntimeRenderSettingsSnapshot() const;
 	QualityPreset GetRuntimeQualityPresetSnapshot() const;
 	std::uint64_t GetRuntimeRenderSettingsGeneration() const;
+	// Native adapters register copied supported options. Requests use the last
+	// captured lifecycle and publish only at the protected render boundary.
+	void ConfigureGraphicsSettingsCatalog(std::vector<TerraEngine::Renderer::GraphicsSettings::GraphicsSettingDescriptor> descriptors);
+	// Camera/view producers supply actual associations. Protected capture checks
+	// camera generations before admitting these copied output lifetime records.
+	void ConfigureGraphicsSettingsViewTargets(std::vector<TerraEngine::Renderer::GraphicsSettings::GraphicsTarget> targets);
+	void SetGraphicsSettingsPlaySessionGeneration(std::uint64_t generation);
+	std::vector<TerraEngine::Renderer::GraphicsSettings::GraphicsSettingDescriptor> GetGraphicsSettingsCatalogSnapshot(
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsTarget& target = {}) const;
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsTarget> ResolveGraphicsSettingsCameraTarget(std::uint32_t entity) const;
+	std::shared_ptr<const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot> GetRequestedGraphicsSettingsSnapshot(
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsTarget& target) const;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt QueueGraphicsPreferencesSave(std::string name,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsTarget target, std::uint64_t expectedStoreRevision);
+	TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt QueueGraphicsPreferencesRestore(std::string name,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsTarget target);
+	TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt CancelStagedGraphicsSettingsRequest(std::uint64_t requestId);
+	TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp GetGraphicsSettingsLifecycleSnapshot() const;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt QueueGraphicsSettingsRequest(
+		TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsRequest request);
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt> GetGraphicsSettingsReceipt(
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRequestId requestId) const;
+	std::shared_ptr<const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot> GetGraphicsSettingsSnapshot(
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsTarget& target = {}) const;
+	// The editor viewport has its own transient owner. Its lifecycle token
+	// cannot authorize a Game or Camera request through the managed facade.
+	struct SceneViewGraphicsSettingsState
+	{
+		TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp lifecycle;
+		TerraEngine::Renderer::GraphicsSettings::GraphicsViewIdentity view;
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRevision revision = 0;
+		std::uint32_t spatialModeMask = 1u;
+		std::shared_ptr<const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot> effective, requested;
+	};
+	std::optional<SceneViewGraphicsSettingsState> ReadSceneViewGraphicsSettings() const;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt QueueSceneViewGraphicsSettings(
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp& lifecycle,
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsViewIdentity& view,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRevision baseRevision,
+		std::span<const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingValue> values);
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReceipt> ReadSceneViewGraphicsSettingsReceipt(
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRequestId requestId) const;
+	// Protected renderer hooks keep this editor-only owner separate from the
+	// managed Game/Camera namespace and serialize native candidate preparation.
+	void RegisterSceneViewGraphicsOutput(glm::uvec2 extent, std::uint32_t spatialModeMask);
+	void CaptureSceneViewGraphicsSettingsAtProtectedBoundary();
+	bool HasSceneViewGraphicsSettingsPreparation() const;
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsPreparedCandidate>
+		GetPendingSceneViewGraphicsSettingsResourcePreparation() const;
+	void CompleteSceneViewGraphicsSettingsResourcePreparation(
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRequestId requestId,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp lifecycle,
+		bool succeeded, bool postProcessPrepared,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReason failureReason =
+			TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReason::PreparationFailed);
+	std::shared_ptr<const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot>
+		GetMergedSceneViewGraphicsSettingsSnapshot(std::uint64_t* sceneRevision = nullptr,
+			std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsViewIdentity>* view = nullptr,
+			glm::uvec2 plannedExtent = {}) const;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot ProjectSceneViewGraphicsSettings(
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsSettingsSnapshot& game) const;
+	// The backend resource owner reports success only after real preparation.
+	// Queueing its result never publishes a candidate by itself.
+	void CompleteGraphicsSettingsResourcePreparation(
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRequestId requestId,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsLifecycleStamp lifecycle,
+		bool succeeded, bool postProcessPrepared = false,
+		TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReason failureReason =
+			TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReason::PreparationFailed);
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsPreparedCandidate> GetPendingGraphicsSettingsResourcePreparation() const;
+	TerraEngine::Renderer::GraphicsSettings::GraphicsRequestReason GetGraphicsSettingsPreparationFailure() const;
 	// Comparison controls share the existing protected settings boundary. These
 	// APIs copy CPU values only and never save authored renderer preferences.
 	TerraEngine::Renderer::RendererEfficiencyOptionsReceipt QueueRendererEfficiencyOptions(
@@ -383,7 +478,7 @@ public:
 	SkyRuntimeState GetLatestSkyRuntimeState() const;
 	void MarkSkyStateDirty();
 
-	void LoadSettings();
+	void LoadSettings(bool persistMissingDefaults = true);
 	void SaveSettings();
 
 
@@ -396,12 +491,16 @@ public:
 		bool orthographic = false;
 		// Distance along the viewing ray to the editor orbit target.
 		float shadowFocusDistanceMetres = 0.0f;
+		std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget> graphicsCamera;
+		// Sequence issued by the editor camera producer. Rendering copies it
+		// into the immutable view before any backend acceptance is possible.
+		std::uint64_t poseSequence = 0;
 	};
 
 	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj,
 		const TerraEngine::Scene::WorldPosition& canonicalPosition,
-		bool orthographic = false, float shadowFocusDistanceMetres = 0.0f) {
-		sceneViewCamera = OverrideCameraData{view, proj, canonicalPosition, orthographic, shadowFocusDistanceMetres};
+		bool orthographic = false, float shadowFocusDistanceMetres = 0.0f, std::uint64_t poseSequence = 0) {
+		sceneViewCamera = OverrideCameraData{view, proj, canonicalPosition, orthographic, shadowFocusDistanceMetres, {}, poseSequence};
 		hasSceneViewCamera = true;
 	}
 	// Record the editor panel dimensions before rendering so Vulkan allocates
@@ -424,8 +523,9 @@ public:
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
 
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj,
-		const TerraEngine::Scene::WorldPosition& canonicalPosition) {
-		OverrideCameraData camera{view, proj, canonicalPosition, false};
+		const TerraEngine::Scene::WorldPosition& canonicalPosition,
+		std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget> graphicsCamera = {}) {
+		OverrideCameraData camera{view, proj, canonicalPosition, false, 0.0f, graphicsCamera};
 		gameViewCameras.push_back(camera);
 		// Store a descriptor copy for MCP capture requests. This is read-only
 		// metadata, not gameplay camera ownership, so capture can inspect the
@@ -484,6 +584,11 @@ private:
 	void ObserveFrameScratchAtProtectedBoundary();
 	void ApplyQualityPreset(QualityPreset preset, bool persistProjectSettings);
 	void ApplyQueuedRuntimeRenderSettings();
+	void CaptureGraphicsSettingsAtProtectedBoundary();
+	void PrepareGraphicsStartupAtProtectedBoundary();
+	void FinalizeGraphicsStartupAtProtectedBoundary();
+	void InitializeConfiguredVulkan();
+	void SetTransientNativeGraphicsSettings(const RenderSettings&, QualityPreset, bool taskCulling);
 	friend struct TerraEngine::Renderer::SyntheticCaptureTestAccess;
 	friend struct TerraEngine::Renderer::RenderCaptureBackendTestAccess;
 	// Validation access invokes the existing protected topology operation and
@@ -546,6 +651,7 @@ private:
 	{
 		entt::entity entity;
 		CameraComponent camera;
+		std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget> graphicsCamera;
 	};
 
 	struct RenderableEntry
@@ -838,6 +944,8 @@ private:
 	// RenderSystem consumes the newest request at its protected frame boundary,
 	// so no managed callback races currentSettings or backend resource changes.
 	mutable std::mutex runtimeRenderSettingsMutex;
+	// Jobs retain this small CPU owner instead of RenderSystem or scene objects.
+	std::shared_ptr<RenderGraphicsSettingsState> graphicsSettingsState;
 	std::optional<RuntimeRenderSettingsRequest> pendingRuntimeRenderSettings;
 	std::uint64_t runtimeRenderSettingsGeneration = 0U;
 	TerraEngine::Renderer::RendererEfficiencyOptionsQueue rendererEfficiencyOptionsQueue;
@@ -1159,6 +1267,8 @@ void PublishFrameDiagnostics(TerraEngine::Renderer::RenderFrameSnapshot& renderF
 	std::span<RenderableEntry> renderables, bool hasCameraInputs, const FrameRenderableCaptureState& capture,
 	const FrameCaptureRoots& roots, const FrameSceneRevisions& revisions, const FrameResourceCohort& resourceCohort,
 	const FrameBackendCapture& backendCapture, const FrameWorldTransforms& worldCapture);
+	void PlanGameViewHistory(TerraEngine::Renderer::RenderFrameSnapshot& snapshot,
+		TerraEngine::Renderer::RenderFrameViewRequest& request);
 
 	static bool ValidateDepthFixtureIntent(const TerraEngine::Renderer::RendererEfficiencyFixtureIntent& intent, std::string& reason);
 	struct FrameFixtureCapture;

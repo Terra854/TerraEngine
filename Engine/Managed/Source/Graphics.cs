@@ -189,7 +189,7 @@ namespace TerraEngine
 		}
 	}
 
-	public static class Graphics
+	public static partial class Graphics
 	{
 		public static uint AbiVersion => Native_Graphics_GetAbiVersion();
 

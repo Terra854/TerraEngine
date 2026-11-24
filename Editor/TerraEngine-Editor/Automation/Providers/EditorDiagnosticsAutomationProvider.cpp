@@ -49,6 +49,27 @@ namespace TerraEngine::Editor::Automation
 			descriptor.description = "Compatibility MCP operation owned by the editor diagnostics provider.";
 			descriptor.inputSchema = {{"type", "object"}, {"additionalProperties", true}};
 			descriptor.resultSchema = {{"type", "object"}};
+			if(descriptor.name == "game_view.capture" || descriptor.name == "scene_view.capture"
+				|| descriptor.name == "camera.capture_object" || descriptor.name == "camera.capture_custom")
+			{
+				// The handlers validate the same optional enum before native capture.
+				// Keep other existing camera-specific fields accepted for compatibility.
+				descriptor.inputSchema["properties"]["imageStage"] = {
+					{"type", "string"}, {"enum", {"legacy", "raw", "processed", "composited"}}};
+				descriptor.inputSchema["properties"]["freshness"] = {
+					{"type", "string"}, {"enum", descriptor.name == "scene_view.capture"
+						? nlohmann::json::array({"latestCompleted"})
+						: nlohmann::json::array({"latestCompleted", "nextFrame"})}};
+				descriptor.resultSchema["properties"]["imageStage"] = {
+					{"type", "string"}, {"enum", {"legacy", "raw", "processed", "composited"}}};
+				for(const std::string field : {"sourceEncoding", "deliveredEncoding"})
+					descriptor.resultSchema["properties"][field] = {
+						{"type", "string"}, {"enum", {"legacy", "linear", "srgb"}}};
+				descriptor.resultSchema["properties"]["settingsRevision"] = {{"type", "integer"}, {"minimum", 0}};
+				descriptor.description = descriptor.name == "scene_view.capture"
+					? "Captures the latest native visible Scene View image at its displayed stage and native extent by default."
+					: "Captures camera output with optional imageStage selection and delivered encoding provenance.";
+			}
 			descriptor.permission = permission;
 			descriptor.approvalPolicy = approval;
 			descriptor.mutationMode = mutationMode;
@@ -216,6 +237,7 @@ namespace TerraEngine::Editor::Automation
 		capabilities.reserve(21);
 		capabilities.push_back(MakeRegistration(resolveHandler, "activity.list", "activity", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "game_view.capture", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "scene_view.capture", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_object", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, true, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_custom", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));

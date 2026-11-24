@@ -51,6 +51,16 @@ namespace TerraEngine::Editor
 		return registration ? registration->descriptor : nullptr;
 	}
 
+	std::optional<ViewportTextureRegistration> ViewportTextureRegistry::FindDescriptor(void* descriptor) const noexcept
+	{
+		if (!descriptor) return std::nullopt;
+		if (scene_ && scene_->descriptor == descriptor) return scene_;
+		if (game_ && game_->descriptor == descriptor) return game_;
+		for (const auto& registration : retired_)
+			if (registration.descriptor == descriptor) return registration;
+		return std::nullopt;
+	}
+
 	void ViewportTextureRegistry::BeginDrawDataUsage()
 	{
 		cpuDrawDataUses_.clear();

@@ -229,6 +229,8 @@ set(ENGINE_SOURCES
 	Engine/Components/Physics/ConstraintSetComponent.cpp
 	Engine/Components/Physics/CharacterControllerComponent.cpp
 	Engine/Resource/ResourceManager.cpp
+	Engine/Resource/PostProcessProfile.cpp
+	Engine/Resource/PostProcessEffectAsset.cpp
 	Engine/Resource/ResourceManagerNavigation.cpp
 	Engine/Resource/MaterialRuntimeContract.cpp
 	Engine/Resource/ResourceResidency.cpp
@@ -284,6 +286,7 @@ set(ENGINE_SOURCES
 	Engine/Physics/Assets/CookedColliderAsset.cpp
 	Engine/Scene/SceneManager.cpp
 	Engine/Scene/Serializer.cpp
+	Engine/Scene/PostProcessVolumeComponent.cpp
 	Engine/Scene/SpatialIndex.cpp
 	Engine/Input/InputSystem.cpp
 	Engine/Input/GLFW/GlfwInputBackend.cpp
@@ -326,6 +329,21 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RenderSystemDiagnostics.cpp
 	Engine/Renderer/RenderSystemResources.cpp
 	Engine/Renderer/RenderSystemSettings.cpp
+	Engine/Renderer/GraphicsSettings/GraphicsSettingsController.cpp
+	Engine/Renderer/GraphicsSettings/GraphicsSettingsCatalog.cpp
+	Engine/Renderer/GraphicsSettings/PostProcessColorSettings.cpp
+	Engine/Renderer/GraphicsSettings/PostProcessEffectSettings.cpp
+	Engine/Renderer/GraphicsSettings/PostProcessProfileResolver.cpp
+	Engine/Renderer/GraphicsSettings/PostProcessVolumeCapture.cpp
+	Engine/Renderer/GraphicsSettings/PostProcessViewAuthoring.cpp
+	Engine/Renderer/GraphicsSettings/PostProcessAuthoringController.cpp
+	Engine/Renderer/GraphicsSettings/GraphicsStartupStore.cpp
+	Engine/Renderer/GraphicsSettings/GraphicsSettingsPersistence.cpp
+	Engine/Renderer/RenderSystemGraphicsStartup.cpp
+	Engine/Renderer/RenderSystemPostProcessAuthoring.cpp
+	Engine/Renderer/RenderSystemSceneGraphicsSettings.cpp
+	Engine/Scripting/GraphicsPreferenceStore.cpp
+	Engine/Scripting/PostProcessAuthoringWire.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
 	# The renderer owns reusable scratch; an episode lease bounds its borrowers.
 	Engine/Renderer/Graph/RenderFrameScratch.cpp
@@ -335,6 +353,7 @@ set(ENGINE_SOURCES
 	# Typed shadow policies consume copied semantic inputs outside GPU ownership.
 	Engine/Renderer/ShadowWorkPlan.cpp
 	Engine/Renderer/Graph/RenderGraph.cpp
+	Engine/Renderer/Graph/PostProcessCustomPass.cpp
 	Engine/Renderer/Graph/RenderWorkerTaskGroup.cpp
 	Engine/Renderer/Backend/RenderBackendWork.cpp
 	Engine/Renderer/Graph/RenderWorkPacket.cpp
@@ -358,6 +377,41 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanLightingDepthEvidence.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPipelineResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPostProcessing.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessTargets.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanIndexedGeometry.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanIndexedRasterPreparation.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanIndexedMsaaView.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessMsaa.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessHistory.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessTemporal.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessMotionPreparation.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessScreenSpaceInputs.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessLensPresentation.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessMotionBuffers.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessMotionPipeline.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessMotionTargets.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessScaledCamera.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessTemporalFrameState.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessTemporalView.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanIndexedTemporalView.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessLensHdr.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessDepthOfField.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessMotionBlur.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessScreenSpaceRaster.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessScreenSpaceLighting.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessScreenSpaceHiZ.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessCustom.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessCustomChain.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessCustomImages.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessCustomView.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessPasses.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessExposure.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessBloom.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessTone.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessFxaa.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessSmaa.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessCmaa2.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPostProcessLookups.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanReadback.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanReadbackLifecycle.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryResources.cpp
@@ -1333,6 +1387,22 @@ target_compile_definitions(TerraEngine-Launcher
 		TERRAENGINE_MANAGED_RUNTIME_LIBRARY="${TERRAENGINE_MANAGED_RUNTIME_LIBRARY}"
 )
 
+if(BUILD_TESTING)
+	# Only the test-built launcher exposes the bounded installed capture fixtures.
+	target_sources(TerraEngine-Launcher PRIVATE
+		Tests/Tools/PostProcessing/PostProcessColorRuntimeFixture.cpp
+		Tests/Tools/PostProcessing/PostProcessAuthoringRuntimeFixture.cpp
+		Tests/Tools/PostProcessing/PostProcessTemporalRuntimeFixture.cpp)
+	target_include_directories(TerraEngine-Launcher PRIVATE
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/PostProcessing"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Support")
+	target_compile_definitions(TerraEngine-Launcher PRIVATE TERRAENGINE_POST_PROCESS_COLOR_FIXTURE=1)
+	target_link_libraries(TerraEngine-Launcher PRIVATE TerraEngineCaptureDecodeAssertions)
+	if(WIN32)
+		target_link_libraries(TerraEngine-Launcher PRIVATE bcrypt)
+	endif()
+endif()
+
 add_dependencies(TerraEngine-Launcher
 	TerraEngineMeshCompiler
 	TerraEngineTextureCompiler
@@ -2289,6 +2359,78 @@ file(REMOVE
 	\"\${postprocess_out_dir}/VRSGenerate.comp.tspf\"
 	\"\${postprocess_out_dir}/GTAO.comp.spv\"
 	\"\${postprocess_out_dir}/GTAOBlur.comp.spv\"
+	\"\${postprocess_out_dir}/PostProcessFullscreen.vert.spv\"
+	\"\${postprocess_out_dir}/PostProcessExposure.frag.spv\"
+	\"\${postprocess_out_dir}/ExposureHistogram.comp.spv\"
+	\"\${postprocess_out_dir}/ExposureResolve.comp.spv\"
+	\"\${postprocess_out_dir}/ExposureApply16.comp.spv\"
+	\"\${postprocess_out_dir}/ExposureApply32.comp.spv\"
+	\"\${postprocess_out_dir}/BloomDownsample.comp.spv\"
+	\"\${postprocess_out_dir}/BloomDownsample32.comp.spv\"
+	\"\${postprocess_out_dir}/BloomUpsample.comp.spv\"
+	\"\${postprocess_out_dir}/BloomUpsample32.comp.spv\"
+	\"\${postprocess_out_dir}/BloomComposite.frag.spv\"
+	\"\${postprocess_out_dir}/ToneMap.frag.spv\"
+	\"\${postprocess_out_dir}/ToneMapLookups.frag.spv\"
+	\"\${postprocess_out_dir}/FXAA.frag.spv\"
+	\"\${postprocess_out_dir}/MsaaIdentityResolve.comp.spv\"
+	\"\${postprocess_out_dir}/HiZMsaa4Seed.comp.spv\"
+	\"\${postprocess_out_dir}/TemporalResolve16.comp.spv\"
+	\"\${postprocess_out_dir}/TemporalResolve32.comp.spv\"
+	\"\${postprocess_out_dir}/LensPresentation.frag.spv\"
+	\"\${postprocess_out_dir}/VolumetricFog.frag.spv\"
+	\"\${postprocess_out_dir}/OutputDither.frag.spv\"
+	\"\${postprocess_out_dir}/IndexedMotionTotal.vert.spv\"
+	\"\${postprocess_out_dir}/IndexedMotionTotal.frag.spv\"
+	\"\${postprocess_out_dir}/IndexedMotionCamera.vert.spv\"
+	\"\${postprocess_out_dir}/IndexedMotionCamera.frag.spv\"
+	\"\${postprocess_out_dir}/LensDirt.frag.spv\"
+	\"\${postprocess_out_dir}/LensFlare.frag.spv\"
+	\"\${postprocess_out_dir}/LinearViewDepth.comp.spv\"
+	\"\${postprocess_out_dir}/DepthOfField16.comp.spv\"
+	\"\${postprocess_out_dir}/DepthOfField32.comp.spv\"
+	\"\${postprocess_out_dir}/MotionBlurInputs.comp.spv\"
+	\"\${postprocess_out_dir}/MotionBlur16.comp.spv\"
+	\"\${postprocess_out_dir}/MotionBlur32.comp.spv\"
+	\"\${out_dir}/DefaultScreenSpace.frag.spv\"
+	\"\${out_dir}/DefaultScreenSpaceAo.frag.spv\"
+	\"\${postprocess_out_dir}/GTAOView.comp.spv\"
+	\"\${postprocess_out_dir}/GTAOBlurView.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceReflections16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceReflections32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceIndirect16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceIndirect32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask1-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask1-32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask2-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask2-32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask3-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask3-32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask4-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask4-32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask5-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask5-32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask6-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask6-32.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask7-16.comp.spv\"
+	\"\${postprocess_out_dir}/ScreenSpaceComposite-Mask7-32.comp.spv\"
+	\"\${postprocess_out_dir}/TemporalSharpen16.comp.spv\"
+	\"\${postprocess_out_dir}/TemporalSharpen32.comp.spv\"
+	\"\${postprocess_out_dir}/SMAAEdges.frag.spv\"
+	\"\${postprocess_out_dir}/SMAAWeights.frag.spv\"
+	\"\${postprocess_out_dir}/SMAAResolve.frag.spv\"
+	\"\${postprocess_out_dir}/CMAA2DetectEdges16.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2DetectEdges32.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2CountRows16.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2CountRows32.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2PrefixRows16.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2PrefixRows32.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2CompactRows16.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2CompactRows32.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2Classify16.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2Classify32.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2Resolve16.comp.spv\"
+	\"\${postprocess_out_dir}/CMAA2Resolve32.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryPacketCompaction.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedClusterBounds.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
@@ -2346,6 +2488,15 @@ if(NOT compile_ms EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.mesh.hlsl with TerraEngineShaderCompiler during install\")
 endif()
 
+# The indexed geometry variant reuses the Default material fragment shader.
+execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/DefaultIndexed.vert.hlsl\" -o \"\${out_dir}/DefaultIndexed.vert.tspf\" -s vs -e main --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_indexed_vs
+)
+if(NOT compile_indexed_vs EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile the Default indexed vertex shader during install\")
+endif()
+
 execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.frag.hlsl\" -o \"\${out_dir}/Default.frag.tspf\" -s ps --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_ps
@@ -2368,6 +2519,23 @@ execute_process(
 if(NOT compile_conventional_visibility_identity EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile the Vulkan conventional visibility identity fragment variant during install\")
 endif()
+
+# Keep the ordinary Forward+ shader unchanged. The seven-location variants
+# are selected only by a native screen-lighting raster owner.
+foreach(screen_surface IN ITEMS DefaultScreenSpace DefaultScreenSpaceAo)
+	set(screen_surface_defines -D TERRAENGINE_SCREEN_SPACE_INPUTS=1)
+	if(screen_surface STREQUAL \"DefaultScreenSpaceAo\")
+		list(APPEND screen_surface_defines -D TERRAENGINE_SCREEN_SPACE_OMIT_LEGACY_AO=1)
+	endif()
+	execute_process(
+		COMMAND \"\${DXC_PATH}\" -spirv -fspv-target-env=vulkan1.3 -T ps_6_0 -E main
+			\${screen_surface_defines} -Fo \"\${out_dir}/\${screen_surface}.frag.spv\"
+			\"\${SHADER_SRC_DIR}/Default.frag.hlsl\"
+		RESULT_VARIABLE compile_screen_surface)
+	if(NOT compile_screen_surface EQUAL 0)
+		message(FATAL_ERROR \"Failed to compile native screen-space surface \${screen_surface}\")
+	endif()
+endforeach()
 
 execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterGrid.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterGrid.comp.hlsl\"
@@ -2469,6 +2637,116 @@ execute_process(
 if(NOT compile_gtao_blur EQUAL 0)
     message(FATAL_ERROR \"Failed to compile GTAOBlur.comp.hlsl during install\")
 endif()
+
+# Install the shared fullscreen primitive and linear exposure stage together.
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${postprocess_out_dir}/PostProcessFullscreen.vert.spv\" -spirv \"\${postprocess_src_dir}/PostProcessFullscreen.vert.hlsl\"
+    RESULT_VARIABLE compile_postprocess_fullscreen
+)
+if(NOT compile_postprocess_fullscreen EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile PostProcessFullscreen.vert.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${postprocess_out_dir}/PostProcessExposure.frag.spv\" -spirv \"\${postprocess_src_dir}/PostProcessExposure.frag.hlsl\"
+    RESULT_VARIABLE compile_postprocess_exposure
+)
+if(NOT compile_postprocess_exposure EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile PostProcessExposure.frag.hlsl during install\")
+endif()
+
+# Compile color and spatial AA variants with the actual storage image format.
+foreach(color_shader IN ITEMS
+	\"ExposureHistogram|ExposureHistogram|comp|cs_6_0|BuildHistogram|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"ExposureResolve|ExposureResolve|comp|cs_6_0|ResolveExposure|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"ExposureApply|ExposureApply16|comp|cs_6_0|ApplyExposure|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"ExposureApply|ExposureApply32|comp|cs_6_0|ApplyExposure|EXPOSURE_OUTPUT_RGBA32F=1\"
+	\"BloomDownsample|BloomDownsample|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"BloomDownsample|BloomDownsample32|comp|cs_6_0|main|BLOOM_OUTPUT_RGBA32F=1\"
+	\"BloomUpsample|BloomUpsample|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"BloomUpsample|BloomUpsample32|comp|cs_6_0|main|BLOOM_OUTPUT_RGBA32F=1\"
+	\"BloomComposite|BloomComposite|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"ToneMap|ToneMap|frag|ps_6_0|PSMain|TERRAENGINE_COLOR_LOOKUPS=0\"
+	\"ToneMap|ToneMapLookups|frag|ps_6_0|PSMain|TERRAENGINE_COLOR_LOOKUPS=1\"
+	\"FXAA|FXAA|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"MsaaIdentityResolve|MsaaIdentityResolve|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"HiZMsaa4Seed|HiZMsaa4Seed|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"TemporalResolve|TemporalResolve16|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"TemporalResolve|TemporalResolve32|comp|cs_6_0|main|TEMPORAL_OUTPUT_RGBA32F=1\"
+	\"LensPresentation|LensPresentation|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"VolumetricFog|VolumetricFog|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"OutputDither|OutputDither|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"IndexedMotion|IndexedMotionTotal|vert|vs_6_0|main|INDEXED_MOTION_CAMERA_ONLY=0\"
+	\"IndexedMotion|IndexedMotionTotal|frag|ps_6_0|main|INDEXED_MOTION_CAMERA_ONLY=0\"
+	\"IndexedMotion|IndexedMotionCamera|vert|vs_6_0|main|INDEXED_MOTION_CAMERA_ONLY=1\"
+	\"IndexedMotion|IndexedMotionCamera|frag|ps_6_0|main|INDEXED_MOTION_CAMERA_ONLY=1\"
+	\"LensDirt|LensDirt|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"LensFlare|LensFlare|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"LinearViewDepth|LinearViewDepth|comp|cs_6_0|CSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"DepthOfField|DepthOfField16|comp|cs_6_0|CSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"DepthOfField|DepthOfField32|comp|cs_6_0|CSMain|CAMERA_OUTPUT_RGBA32F=1\"
+	\"MotionBlurInputs|MotionBlurInputs|comp|cs_6_0|CSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"MotionBlur|MotionBlur16|comp|cs_6_0|CSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"MotionBlur|MotionBlur32|comp|cs_6_0|CSMain|CAMERA_OUTPUT_RGBA32F=1\"
+	\"GTAO|GTAOView|comp|cs_6_0|main|POSTPROCESS_SCREEN_SPACE_VIEW=1\"
+	\"GTAOBlur|GTAOBlurView|comp|cs_6_0|main|POSTPROCESS_SCREEN_SPACE_VIEW=1\"
+	\"ScreenSpaceReflections|ScreenSpaceReflections16|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"ScreenSpaceReflections|ScreenSpaceReflections32|comp|cs_6_0|main|SCREEN_SPACE_OUTPUT_RGBA32F=1\"
+	\"ScreenSpaceIndirect|ScreenSpaceIndirect16|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"ScreenSpaceIndirect|ScreenSpaceIndirect32|comp|cs_6_0|main|SCREEN_SPACE_OUTPUT_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask1-16|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask1-32|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask2-16|comp|cs_6_0|main|SCREEN_COMPOSITE_SSGI=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask2-32|comp|cs_6_0|main|SCREEN_COMPOSITE_SSGI=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask3-16|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_SSGI=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask3-32|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_SSGI=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask4-16|comp|cs_6_0|main|SCREEN_COMPOSITE_AO=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask4-32|comp|cs_6_0|main|SCREEN_COMPOSITE_AO=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask5-16|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_AO=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask5-32|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_AO=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask6-16|comp|cs_6_0|main|SCREEN_COMPOSITE_SSGI=1,SCREEN_COMPOSITE_AO=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask6-32|comp|cs_6_0|main|SCREEN_COMPOSITE_SSGI=1,SCREEN_COMPOSITE_AO=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask7-16|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_SSGI=1,SCREEN_COMPOSITE_AO=1\"
+	\"ScreenSpaceComposite|ScreenSpaceComposite-Mask7-32|comp|cs_6_0|main|SCREEN_COMPOSITE_SSR=1,SCREEN_COMPOSITE_SSGI=1,SCREEN_COMPOSITE_AO=1,SCREEN_COMPOSITE_RGBA32F=1\"
+	\"TemporalSharpen|TemporalSharpen16|comp|cs_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"TemporalSharpen|TemporalSharpen32|comp|cs_6_0|main|TEMPORAL_OUTPUT_RGBA32F=1\"
+	\"SMAAEdges|SMAAEdges|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"SMAAWeights|SMAAWeights|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"SMAAResolve|SMAAResolve|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Edges|CMAA2DetectEdges16|comp|cs_6_0|DetectEdges|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Edges|CMAA2DetectEdges32|comp|cs_6_0|DetectEdges|CMAA2_OUTPUT_RGBA32F=1\"
+	\"CMAA2Candidates|CMAA2CountRows16|comp|cs_6_0|CountRows|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Candidates|CMAA2CountRows32|comp|cs_6_0|CountRows|CMAA2_OUTPUT_RGBA32F=1\"
+	\"CMAA2Candidates|CMAA2PrefixRows16|comp|cs_6_0|PrefixRows|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Candidates|CMAA2PrefixRows32|comp|cs_6_0|PrefixRows|CMAA2_OUTPUT_RGBA32F=1\"
+	\"CMAA2Candidates|CMAA2CompactRows16|comp|cs_6_0|CompactRows|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Candidates|CMAA2CompactRows32|comp|cs_6_0|CompactRows|CMAA2_OUTPUT_RGBA32F=1\"
+	\"CMAA2Candidates|CMAA2Classify16|comp|cs_6_0|Classify|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Candidates|CMAA2Classify32|comp|cs_6_0|Classify|CMAA2_OUTPUT_RGBA32F=1\"
+	\"CMAA2Resolve|CMAA2Resolve16|comp|cs_6_0|Resolve|TERRAENGINE_SHADER_DEFAULT=1\"
+	\"CMAA2Resolve|CMAA2Resolve32|comp|cs_6_0|Resolve|CMAA2_OUTPUT_RGBA32F=1\")
+	string(REPLACE \"|\" \";\" color_fields \"\${color_shader}\")
+	list(GET color_fields 0 color_source)
+	list(GET color_fields 1 color_output)
+	list(GET color_fields 2 color_stage)
+	list(GET color_fields 3 color_profile)
+	list(GET color_fields 4 color_entry)
+	list(GET color_fields 5 color_define)
+	string(REPLACE \",\" \";\" color_defines \"\${color_define}\")
+	set(color_define_args)
+	foreach(color_definition IN LISTS color_defines)
+		list(APPEND color_define_args -D \"\${color_definition}\")
+	endforeach()
+	execute_process(
+		COMMAND \"\${DXC_PATH}\" -T \"\${color_profile}\" -E \"\${color_entry}\"
+			\${color_define_args} -spirv -fspv-target-env=vulkan1.3 -I \"\${postprocess_src_dir}\"
+			-Fo \"\${postprocess_out_dir}/\${color_output}.\${color_stage}.spv\"
+			\"\${postprocess_src_dir}/\${color_source}.\${color_stage}.hlsl\"
+		RESULT_VARIABLE compile_color_shader)
+	if(NOT compile_color_shader EQUAL 0)
+		message(FATAL_ERROR \"Failed to compile color shader \${color_output}.\${color_stage}\")
+	endif()
+endforeach()
 
 execute_process(
     COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryPacketCompaction.comp.spv\" -spirv \"\${virtualgeometry_src_dir}/VirtualGeometryPacketCompaction.comp.hlsl\"
@@ -2690,6 +2968,8 @@ set(retired_shader_candidates
 	\"Default.mesh.spv\"
 	\"Default.frag.spv\"
 	\"Default.ConventionalVisibilityIdentity.frag.spv\"
+	\"DefaultScreenSpace.frag.spv\"
+	\"DefaultScreenSpaceAo.frag.spv\"
 	\"Lighting/ClusterGrid.comp.tspf\"
 	\"Lighting/ClusterDepthMask.comp.tspf\"
 	\"Lighting/LightCull.comp.tspf\"
@@ -2700,6 +2980,77 @@ set(retired_shader_candidates
 	\"PostProcess/VRSGenerate.comp.tspf\"
 	\"PostProcess/GTAO.comp.spv\"
 	\"PostProcess/GTAOBlur.comp.spv\"
+	\"PostProcess/PostProcessFullscreen.vert.spv\"
+	\"PostProcess/PostProcessExposure.frag.spv\"
+	\"PostProcess/ExposureHistogram.comp.spv\"
+	\"PostProcess/ExposureResolve.comp.spv\"
+	\"PostProcess/ExposureApply16.comp.spv\"
+	\"PostProcess/ExposureApply32.comp.spv\"
+	\"PostProcess/BloomDownsample.comp.spv\"
+	\"PostProcess/BloomDownsample32.comp.spv\"
+	\"PostProcess/BloomUpsample.comp.spv\"
+	\"PostProcess/BloomUpsample32.comp.spv\"
+	\"PostProcess/BloomComposite.frag.spv\"
+	\"PostProcess/ToneMap.frag.spv\"
+	\"PostProcess/ToneMapLookups.frag.spv\"
+	\"PostProcess/FXAA.frag.spv\"
+	\"DefaultIndexed.vert.tspf\"
+	\"PostProcess/MsaaIdentityResolve.comp.spv\"
+	\"PostProcess/HiZMsaa4Seed.comp.spv\"
+	\"PostProcess/TemporalResolve16.comp.spv\"
+	\"PostProcess/TemporalResolve32.comp.spv\"
+	\"PostProcess/LensPresentation.frag.spv\"
+	\"PostProcess/VolumetricFog.frag.spv\"
+	\"PostProcess/OutputDither.frag.spv\"
+	\"PostProcess/IndexedMotionTotal.vert.spv\"
+	\"PostProcess/IndexedMotionTotal.frag.spv\"
+	\"PostProcess/IndexedMotionCamera.vert.spv\"
+	\"PostProcess/IndexedMotionCamera.frag.spv\"
+	\"PostProcess/LensDirt.frag.spv\"
+	\"PostProcess/LensFlare.frag.spv\"
+	\"PostProcess/LinearViewDepth.comp.spv\"
+	\"PostProcess/DepthOfField16.comp.spv\"
+	\"PostProcess/DepthOfField32.comp.spv\"
+	\"PostProcess/MotionBlurInputs.comp.spv\"
+	\"PostProcess/MotionBlur16.comp.spv\"
+	\"PostProcess/MotionBlur32.comp.spv\"
+	\"PostProcess/GTAOView.comp.spv\"
+	\"PostProcess/GTAOBlurView.comp.spv\"
+	\"PostProcess/ScreenSpaceReflections16.comp.spv\"
+	\"PostProcess/ScreenSpaceReflections32.comp.spv\"
+	\"PostProcess/ScreenSpaceIndirect16.comp.spv\"
+	\"PostProcess/ScreenSpaceIndirect32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask1-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask1-32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask2-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask2-32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask3-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask3-32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask4-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask4-32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask5-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask5-32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask6-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask6-32.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask7-16.comp.spv\"
+	\"PostProcess/ScreenSpaceComposite-Mask7-32.comp.spv\"
+	\"PostProcess/TemporalSharpen16.comp.spv\"
+	\"PostProcess/TemporalSharpen32.comp.spv\"
+	\"PostProcess/SMAAEdges.frag.spv\"
+	\"PostProcess/SMAAWeights.frag.spv\"
+	\"PostProcess/SMAAResolve.frag.spv\"
+	\"PostProcess/CMAA2DetectEdges16.comp.spv\"
+	\"PostProcess/CMAA2DetectEdges32.comp.spv\"
+	\"PostProcess/CMAA2CountRows16.comp.spv\"
+	\"PostProcess/CMAA2CountRows32.comp.spv\"
+	\"PostProcess/CMAA2PrefixRows16.comp.spv\"
+	\"PostProcess/CMAA2PrefixRows32.comp.spv\"
+	\"PostProcess/CMAA2CompactRows16.comp.spv\"
+	\"PostProcess/CMAA2CompactRows32.comp.spv\"
+	\"PostProcess/CMAA2Classify16.comp.spv\"
+	\"PostProcess/CMAA2Classify32.comp.spv\"
+	\"PostProcess/CMAA2Resolve16.comp.spv\"
+	\"PostProcess/CMAA2Resolve32.comp.spv\"
 	\"VirtualGeometry/VirtualGeometryPacketCompaction.comp.spv\"
 	\"VirtualGeometry/VirtualGeometryAnimatedClusterBounds.comp.spv\"
 	\"VirtualGeometry/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
@@ -3326,6 +3677,7 @@ if(BUILD_TESTING AND WIN32)
 	add_subdirectory(Tests/Tools/RuntimeMemorySafety)
 	# Real readback lifetime evidence has its own protocol and installed closure.
 	add_subdirectory(Tests/Tools/ReadbackLifetime)
+	add_subdirectory(Tests/Tools/PostProcessing)
 endif()
 
 # Source review tools are native, read-only validation utilities. Keep them out

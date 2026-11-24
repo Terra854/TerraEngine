@@ -49,6 +49,7 @@ struct Shader;
 struct ShaderCollection;
 
 struct Texture;
+namespace TerraEngine::Resource { struct PostProcessProfile; struct PostProcessEffectAsset; }
 namespace TerraEngine::Animation
 {
 	struct AnimationClipAsset;
@@ -95,7 +96,12 @@ enum class AssetType : std::uint32_t {
 	// indexes retain their numeric meanings when audio support is introduced.
 	AudioClip = 13U,
 	// Terrain keeps one persisted identity while TerrainAssetStore owns its areas.
-	Terrain = 14U
+	Terrain = 14U,
+	// Append-only versioned authored camera profile identity.
+	PostProcessProfile = 15U,
+	PostProcessEffect = 16U,
+	// An individual compiled stage is distinct from a shader collection.
+	PostProcessShaderStage = 17U
 };
 
 constexpr bool IsAnimationAssetType(AssetType type) noexcept
@@ -112,7 +118,8 @@ constexpr bool IsRendererResourceAssetType(AssetType type) noexcept
 	return type == AssetType::Mesh
 		|| type == AssetType::Texture
 		|| type == AssetType::Material
-		|| type == AssetType::ShaderCollection;
+		|| type == AssetType::ShaderCollection
+		|| type == AssetType::PostProcessShaderStage;
 }
 
 // Validation commands return structured evidence instead of only logging a
@@ -345,6 +352,23 @@ struct ShaderStagePath
 	std::filesystem::path path;
 };
 
+// Captured after manifest/default loading and before renderer initialization.
+// This contains authored startup inputs only; querying it performs no storage
+// writes and never claims that player overrides have become effective.
+struct GraphicsStartupInputs
+{
+	bool exportRuntime = false;
+	std::string productName;
+	std::string productIdentity;
+	std::optional<RenderSettings> authoredSettings;
+	bool validationEnabled = false;
+	bool debugEnabled = false;
+	// These legacy export profile fields are metadata. The current renderer does
+	// not consume them as a live texture budget or post-processing render scale.
+	std::uint32_t textureBudgetMegabytes = 512;
+	float profileResolutionScale = 1.0f;
+};
+
 // Centralized resource cache that understands TerraEngine's authored file
 // formats (TMAT, TEMF, TSPF, TETF). The manager resolves asset paths,
 // deduplicates loads, and issues asynchronous tasks through the shared
@@ -468,6 +492,7 @@ public:
 	void SetRenderDebugEnabled(bool enabled);
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::optional<RenderSettings> GetConfiguredRenderSettings() const;
+	GraphicsStartupInputs GetGraphicsStartupInputs() const;
 	// Editor bootstrap resolves this read-only profile before Engine::Run. It is
 	// reapplied by Initialize instead of being erased by session-default resets.
 	void ConfigureEditorStartupProfile(const RenderSettings& settings, bool validationEnabled,
@@ -768,6 +793,30 @@ public:
 	// Reassemble from accepted stage owners after explicit shader reloads finish.
 	std::shared_future<TerraEngine::UUID> ReloadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
 	std::shared_future<TerraEngine::UUID> LoadTextureAsync(const std::filesystem::path& path);
+	// Profile preparation uses the ordinary worker/request publication path.
+	// UUID overload pins the registered identity at admission; Acquire never IOs.
+	TerraEngine::UUID LoadPostProcessProfile(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessProfileAsync(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessProfileAsync(const TerraEngine::UUID& id);
+	std::shared_future<TerraEngine::UUID> ReloadPostProcessProfileAsync(const std::filesystem::path& path);
+	[[nodiscard]] std::shared_ptr<const TerraEngine::Resource::PostProcessProfile>
+		AcquirePostProcessProfileSnapshot(const TerraEngine::UUID& id) const;
+	// nullopt means writer-busy; a contained null owner means missing/unready.
+	[[nodiscard]] std::optional<std::shared_ptr<const TerraEngine::Resource::PostProcessProfile>>
+		TryAcquirePostProcessProfileSnapshot(const TerraEngine::UUID& id) const;
+	TerraEngine::UUID LoadPostProcessEffect(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessEffectAsync(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessEffectAsync(const TerraEngine::UUID& id);
+	std::shared_future<TerraEngine::UUID> ReloadPostProcessEffectAsync(const std::filesystem::path& path);
+	[[nodiscard]] std::shared_ptr<const TerraEngine::Resource::PostProcessEffectAsset>
+		AcquirePostProcessEffectSnapshot(const TerraEngine::UUID& id) const;
+	// Stage IDs require explicit typed registration, never generated UUIDs.
+	TerraEngine::UUID LoadPostProcessShaderStage(const TerraEngine::UUID& id);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessShaderStageAsync(const TerraEngine::UUID& id);
+	std::shared_future<TerraEngine::UUID> ReloadPostProcessShaderStageAsync(const TerraEngine::UUID& id);
+	[[nodiscard]] std::shared_ptr<const Shader> AcquirePostProcessShaderStageSnapshot(const TerraEngine::UUID& id) const;
+
+
 	std::shared_future<TerraEngine::UUID> LoadAnimationAssetAsync(
 		const std::filesystem::path& path,
 		AssetType type);
@@ -1029,13 +1078,22 @@ private:
 		// Unlike registration's reverse map, this index changes only when real
 		// payload bytes are accepted. Package sibling GUIDs can therefore retain
 		// the published owner without guessing which registration was last.
-		struct AcceptedPayload { TerraEngine::UUID ownerId = TerraEngine::EMPTY_UUID; std::uint64_t publicationGeneration = 0U; };
+		struct AcceptedPayload {
+			TerraEngine::UUID ownerId = TerraEngine::EMPTY_UUID;
+			std::uint64_t publicationGeneration = 0U;
+			// Profiles have authored revisions, not renderer publication clocks.
+			// A weak control-block identity prevents path remapping and allocator
+			// address reuse from lending a prior path's bytes to another request.
+			std::weak_ptr<const Resource> immutableOwner;
+		};
 		std::unordered_map<std::string, AcceptedPayload> acceptedPayloads;
 		// Renderer and stage consumers retain immutable backing storage, including
 		// every span/string view, while a worker publishes a replacement owner.
 		using Owner = std::conditional_t<std::is_same_v<Resource, Shader>
 			|| std::is_same_v<Resource, ShaderCollection> || std::is_same_v<Resource, Mesh>
-			|| std::is_same_v<Resource, Material> || std::is_same_v<Resource, Texture>,
+			|| std::is_same_v<Resource, Material> || std::is_same_v<Resource, Texture>
+			|| std::is_same_v<Resource, TerraEngine::Resource::PostProcessProfile>
+			|| std::is_same_v<Resource, TerraEngine::Resource::PostProcessEffectAsset>,
 			std::shared_ptr<Resource>, std::unique_ptr<Resource>>;
 		std::unordered_map<TerraEngine::UUID, Owner> resources;
 		// Retained tombstones make a delete/reload distinguishable from a first
@@ -1069,6 +1127,18 @@ private:
 			return accepted != cache.acceptedPayloads.end() && accepted->second.ownerId == id
 				&& accepted->second.publicationGeneration > 0U
 				&& owner->second->publicationGeneration == accepted->second.publicationGeneration
+				&& registration != cache.idToPath.end() && registration->second == key;
+		}
+		if constexpr (std::is_same_v<Resource, TerraEngine::Resource::PostProcessProfile>
+			|| std::is_same_v<Resource, TerraEngine::Resource::PostProcessEffectAsset>) {
+			const auto accepted = cache.acceptedPayloads.find(key);
+			const auto owner = cache.resources.find(id);
+			const auto registration = cache.idToPath.find(id);
+			const auto pathIdentity = cache.pathToId.find(key);
+			return pathIdentity != cache.pathToId.end() && pathIdentity->second == id
+				&& accepted != cache.acceptedPayloads.end() && accepted->second.ownerId == id
+				&& owner != cache.resources.end() && owner->second
+				&& accepted->second.immutableOwner.lock() == owner->second
 				&& registration != cache.idToPath.end() && registration->second == key;
 		}
 		return cache.resources.contains(id);
@@ -1309,6 +1379,9 @@ private:
 	TerraEngine::Renderer::RendererRecoveryPolicy m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	std::string m_ProductName = "TerraEngine";
 	std::string m_Version = "1.0.0";
+	std::string m_GraphicsProductIdentity = "product-name:TerraEngine";
+	std::uint32_t m_ProfileTextureBudgetMegabytes = 512;
+	float m_ProfileResolutionScale = 1.0f;
 	TerraEngine::Resource::ResidencyPolicy m_ResidencyPolicy;
 	TerraEngine::Resource::ResidencyDiagnosticsSummary m_ResidencyDiagnostics;
 	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::ResidentAsset> m_ResidentAssets;
@@ -1354,6 +1427,18 @@ private:
 	ResourceCache<Shader> shaderCache;
 	ResourceCache<ShaderCollection> shaderCollectionCache;
 	ResourceCache<Texture> textureCache;
+	ResourceCache<TerraEngine::Resource::PostProcessProfile> postProcessProfileCache;
+	ResourceCache<TerraEngine::Resource::PostProcessEffectAsset> postProcessEffectCache;
+	AssetPathRegistry postProcessShaderStagePaths;
+	std::shared_future<TerraEngine::UUID> LoadPostProcessProfileRequest(const std::filesystem::path& path,
+		bool reload, bool inlineDispatch, const TerraEngine::UUID& expectedIdentity = TerraEngine::EMPTY_UUID);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessEffectRequest(const std::filesystem::path& path,
+		bool reload, bool inlineDispatch, const TerraEngine::UUID& expectedIdentity = TerraEngine::EMPTY_UUID);
+	std::shared_future<TerraEngine::UUID> LoadPostProcessShaderStageRequest(const TerraEngine::UUID& id, bool reload, bool inlineDispatch);
+	std::vector<std::uint8_t> ReadPostProcessAssetBytes(const std::filesystem::path& path,
+		const std::filesystem::path& capturedRoot, bool mountedAuthority, std::size_t maximumBytes, std::string_view expectedClass) const;
+
+
 	AssetPathRegistry physicsMaterialPaths;
 	AssetPathRegistry cookedColliderPaths;
 	// Audio uses shared immutable generations rather than raw cache pointers:
@@ -1607,6 +1692,12 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 				resource.reset();
 			}
 		}
+		else if constexpr (std::is_same_v<Resource, TerraEngine::Resource::PostProcessEffectAsset>)
+		{
+			const auto embeddedId = resource->descriptor.assetId;
+			if (publicationId == TerraEngine::EMPTY_UUID) publicationId = embeddedId;
+			if (embeddedId == TerraEngine::EMPTY_UUID || embeddedId != publicationId) { loadedSuccessfully = false; resource.reset(); }
+		}
 		else if (publicationId == TerraEngine::EMPTY_UUID)
 		{
 			// Only self-identifying resources may defer UUID selection until parsing.
@@ -1666,7 +1757,9 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 		const auto ownerSlot = cache.resources.try_emplace(publicationId);
 		destinations.owner = ownerSlot.second;
 		typename ResourceCache<Resource>::AcceptedPayload* acceptedSlot = nullptr;
-		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material>) {
+		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material>
+			|| std::is_same_v<Resource, TerraEngine::Resource::PostProcessProfile>
+			|| std::is_same_v<Resource, TerraEngine::Resource::PostProcessEffectAsset> || std::is_same_v<Resource, Shader>) {
 			// Allocate the provenance node before any public owner or clock changes.
 			// A rejected publication rolls this node back with the other staging.
 			const auto accepted = cache.acceptedPayloads.try_emplace(key);
@@ -1710,6 +1803,10 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 		ownerSlot.first->second.swap(stagedOwner);
 		if constexpr (std::is_same_v<Resource, Mesh> || std::is_same_v<Resource, Material>) {
 			if (acceptedSlot) *acceptedSlot = {publicationId, ownerSlot.first->second->publicationGeneration};
+		}
+		if constexpr (std::is_same_v<Resource, TerraEngine::Resource::PostProcessProfile>
+			|| std::is_same_v<Resource, TerraEngine::Resource::PostProcessEffectAsset> || std::is_same_v<Resource, Shader>) {
+			if (acceptedSlot) *acceptedSlot = {publicationId, 0u, ownerSlot.first->second};
 		}
 		if constexpr (std::is_same_v<Resource, Shader>) {
 			if (request) request->shaderPayload = ownerSlot.first->second;
@@ -1787,6 +1884,15 @@ void ResourceManager::VisitAssetCache(AssetType type, Visitor&& visitor)
 		return;
 	case AssetType::RagdollProfile:
 		visitor(ragdollProfileCache);
+		return;
+	case AssetType::PostProcessProfile:
+		visitor(postProcessProfileCache);
+		return;
+	case AssetType::PostProcessEffect:
+		visitor(postProcessEffectCache);
+		return;
+	case AssetType::PostProcessShaderStage:
+		visitor(shaderCache);
 		return;
 	case AssetType::Texture:
 		visitor(textureCache);

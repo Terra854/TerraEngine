@@ -12,6 +12,11 @@
 #include <span>
 #include <vector>
 
+namespace TerraEngine::Renderer
+{
+	enum class RenderCaptureColorEncoding : std::uint8_t;
+}
+
 namespace TerraEngine::Renderer::VulkanReadback
 {
 	// Returns the tightly packed source pixel size accepted by the capture path.
@@ -26,4 +31,13 @@ namespace TerraEngine::Renderer::VulkanReadback
 		std::uint32_t width,
 		std::uint32_t height,
 		VkFormat format);
+
+	// Explicit source encoding avoids applying the display transfer a second
+	// time to a processed image. Alpha remains linear coverage in every mode.
+	[[nodiscard]] TERRAENGINE_API std::vector<std::uint8_t> ConvertToRgba8(
+		std::span<const std::uint8_t> sourceBytes,
+		std::uint32_t width,
+		std::uint32_t height,
+		VkFormat format,
+		RenderCaptureColorEncoding sourceEncoding);
 }

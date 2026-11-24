@@ -339,6 +339,19 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPreparationCacheTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderInstanceAbiTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessFoundationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessColorTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessAATests.cpp
+	# History remains internal to the renderer. Link its implementation into its CPU tests.
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanIndexedGeometryTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessHistoryTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessTemporalTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessLightingTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessAuthoringTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessCameraTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessCameraAuthoringTransactionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PostProcessingStressTests.cpp
+	${PROJECT_SOURCE_DIR}/Engine/Renderer/RHI/Vulkan/VulkanPostProcessHistory.cpp
 	# Final evidence tests use production timing/session policies, without a GPU.
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererEfficiencyEvidenceTests.cpp
 	# CPU contracts distinguish numerical expectations from actual GPU proof.
@@ -462,6 +475,7 @@ add_executable(TerraEngine-EngineTests
 	Scripting/AnimationManagedLifecycleTests.cpp
 	Scripting/AnimationManagedParityTests.cpp
 	Scripting/ScriptingComponentAccessTests.cpp
+	Scripting/GraphicsSettingsContractTests.cpp
 	Scripting/ScriptingDiagnosticsTests.cpp
 	Scripting/ScriptingDispatchTests.cpp
 	Scripting/ScriptingMutationTests.cpp
@@ -1204,6 +1218,13 @@ if(TERRAENGINE_ENABLE_NATIVE_REVIEW_TESTS)
 		"TERRAENGINE_REVIEW_TERRAIN_SHADER_PACKAGES=${CMAKE_BINARY_DIR}/Build/Engine/Shaders/Terrain")
 	set_tests_properties(Engine.ReviewSimulationNative PROPERTIES
 		LABELS "Correctness;Native;GPU;OptIn" RUN_SERIAL TRUE TIMEOUT 300)
+	terraengine_add_correctness_slice(Engine.PostProcessColorNative TerraEngine-EngineTests
+		"Native.ReviewSimulation.PostProcessColor." 6)
+	set_property(TEST Engine.PostProcessColorNative APPEND PROPERTY ENVIRONMENT
+		TERRAENGINE_VULKAN_REVIEW_ENABLE=1
+		"TERRAENGINE_REVIEW_INSTALL_ROOT=${CMAKE_BINARY_DIR}/Build")
+	set_tests_properties(Engine.PostProcessColorNative PROPERTIES
+		LABELS "Correctness;Native;GPU;OptIn" RUN_SERIAL TRUE TIMEOUT 300)
 endif()
 
 # Safety regressions use real ownership paths. Pre-narrowing observers stop
@@ -1319,6 +1340,18 @@ terraengine_add_correctness_slice(Engine.VulkanPresentationReservationRecovery T
 
 # The floor counts registered cases; each image case decodes both overlay modes.
 terraengine_add_correctness_slice(Engine.RenderCaptureContracts TerraEngine-EngineTests "Renderer.CaptureEncoding,Renderer.CaptureQueue,Renderer.SyntheticCapture" 49)
+terraengine_add_correctness_slice(Engine.PostProcessFoundation TerraEngine-EngineTests "Renderer.PostProcess.Foundation" 49)
+# Keep typed settings and rollback separate from the native image-quality runs.
+terraengine_add_correctness_slice(Engine.PostProcessAAContract TerraEngine-EngineTests "Renderer.PostProcess.AA.Contract." 11)
+terraengine_add_correctness_slice(Engine.IndexedGeometryContract TerraEngine-EngineTests "Renderer.IndexedGeometry." 5)
+terraengine_add_correctness_slice(Engine.PostProcessHistoryContract TerraEngine-EngineTests "Renderer.PostProcess.History." 4)
+terraengine_add_correctness_slice(Engine.PostProcessTemporalContract TerraEngine-EngineTests "Renderer.PostProcess.Temporal.Contract." 11)
+terraengine_add_correctness_slice(Engine.PostProcessLightingContract TerraEngine-EngineTests "Renderer.PostProcess.Lighting." 6)
+terraengine_add_correctness_slice(Engine.PostProcessAuthoringContract TerraEngine-EngineTests "Renderer.PostProcess.Authoring." 26)
+terraengine_add_correctness_slice(Engine.PostProcessCameraAuthoringTransactions TerraEngine-EngineTests "Renderer.PostProcess.CameraAuthoring." 5)
+terraengine_add_correctness_slice(Engine.PostProcessCameraContract TerraEngine-EngineTests "Renderer.PostProcess.Camera.Contract." 8)
+terraengine_add_correctness_slice(Engine.PostProcessingStressContract TerraEngine-EngineTests "Renderer.PostProcess.Stress." 1)
+terraengine_add_correctness_slice(Engine.GraphicsSettingsContract TerraEngine-EngineTests "Scripting.GraphicsSettings." 18)
 # Counted native-owner policy plus the renderer's real physical-charge adapter.
 terraengine_add_correctness_slice(Engine.ReadbackLifetime TerraEngine-EngineTests "Renderer.ReadbackLifetime,Renderer.SyntheticCapture.FakeReadback" 29)
 # Observe actual producer callbacks and retained publications before extraction.

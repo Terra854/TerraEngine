@@ -39,6 +39,7 @@
 
 class Object;
 class VulkanContext;
+namespace TerraEngine::Renderer::Vulkan { struct EditorPresentResult; }
 class TerrainWindow;
 namespace TerraEngine::Editor::Navigation { class NavigationWindow; }
 namespace TerraEngine::Editor::Terrain { class TerrainIndependentCopyService; }
@@ -285,6 +286,13 @@ public:
 	void* GetSceneTextureID() const { return viewportTextures.ActiveDescriptor(TerraEngine::Editor::ViewportTextureKind::Scene); }
 	void* GetGameTextureID() const { return viewportTextures.ActiveDescriptor(TerraEngine::Editor::ViewportTextureKind::Game); }
 	void CaptureViewportDrawDataUses();
+	// Opt-in trace preparation runs inside the existing queue-owned UI callback;
+	// settlement records actual accepted submit/WSI facts, never nearby stats.
+	void SettleSceneViewPresentationTrace(const TerraEngine::Renderer::Vulkan::EditorPresentResult& result);
+	void StartSceneViewPresentationTrace();
+	[[nodiscard]] bool IsSceneViewPresentationTraceEnabled() const noexcept;
+	void StopSceneViewPresentationTrace();
+	[[nodiscard]] nlohmann::json ReadSceneViewPresentationTrace(std::uint64_t afterSequence = 0, std::uint32_t limit = 1024) const;
 	void CommitViewportDrawDataUses(std::uint64_t submittedSerial);
 	void AbandonViewportDrawDataUses();
 	void ReleaseCompletedViewportTextures(std::uint64_t completedSerial);
@@ -327,6 +335,8 @@ private:
 	void CapturePlayModeSceneState();
 	void RestorePlayModeSceneState();
 	void ClearPlayModeSceneState();
+	// Retire transient settings only while this editor still owns a renderer.
+	void RetireGraphicsPlaySession();
 	void CapturePrefabReturnSceneState();
 	void RestorePrefabReturnSceneState();
 	void CaptureCurrentPrefabEditingState();
@@ -353,6 +363,9 @@ private:
 	};
 	std::optional<PrefabResetRequest> m_PrefabResetRequest;
 	std::optional<bool> m_LastPrefabResetResult;
+	// The counter survives Stop and project switches; published zero means Edit Mode.
+	std::uint64_t m_GraphicsPlaySessionGeneration = 0U;
+	bool m_GraphicsPlaySessionActive = false;
 	bool m_PlayModeEntryPending = false;
 	std::filesystem::path m_PlayModeEntrySceneRoot;
 	std::uint64_t m_PlayModeEntrySceneGeneration = 0U;
@@ -414,6 +427,8 @@ private:
 	std::vector<PrefabReturnGameViewCamera> m_PrefabReturnGameViewCameras;
 
 	TerraEngine::Editor::ViewportTextureRegistry viewportTextures;
+	struct SceneViewTraceState;
+	std::unique_ptr<SceneViewTraceState> sceneViewTrace;
 	bool sceneLoaded = false;
 	// Project asset discovery can finish after the startup scene is deserialized.
 	// Keep one bounded retry active until the scene's terrain UUID is registered.

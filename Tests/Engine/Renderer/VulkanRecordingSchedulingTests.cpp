@@ -73,6 +73,24 @@ namespace TerraEngine::Tests {
 				RequiredSource(context, (std::string("Engine/Renderer/RHI/Vulkan/") + file).c_str());
 			return VulkanSourceContracts::ReadContextSources();
 		}
+		std::string RequiredIdentityPickAdmission(TestContext& context)
+		{
+			// The compatibility overload now queries the real target then delegates
+			// to exact-metadata admission. Bound both definitions explicitly so a
+			// wrapper cannot accidentally satisfy or hide the snapshot/table checks.
+			const auto wrapper = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp",
+				"RenderSystem::RequestConventionalVisibilityIdentityPick(\n\tRenderViewType viewType, const glm::uvec2& pixel,\n\tbool dedicatedCaptureTarget)");
+			context.Expect(wrapper.find("GetConventionalVisibilityIdentityPickTarget(viewType, dedicatedCaptureTarget)") != std::string::npos
+				&& wrapper.find("viewType, pixel, dedicatedCaptureTarget, *target") != std::string::npos,
+				"Legacy identity pick callers must delegate using the real complete target metadata.");
+			const auto admission = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp",
+				"RenderSystem::RequestConventionalVisibilityIdentityPick(\n\tRenderViewType viewType, const glm::uvec2& pixel,\n\tbool dedicatedCaptureTarget,\n\tconst TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata& expectedTarget)");
+			context.Expect(admission.find("expectedTarget.rendererGeneration != targetMetadata->rendererGeneration") != std::string::npos
+				&& admission.find("expectedTarget.targetGeneration != targetMetadata->targetGeneration") != std::string::npos
+				&& admission.find("expectedTarget.identityExtent != targetMetadata->identityExtent") != std::string::npos,
+				"Identity admission must reject replacement/resize before reading a normalized pixel from a different target.");
+			return admission;
+		}
 		std::string RequiredVulkanResources(TestContext& context)
 		{
 			for(const char* file : {"VulkanContextResources.cpp", "VulkanResourceSource.h", "VulkanAnimationResources.cpp", "VulkanVirtualGeometryResources.cpp", "VulkanPipelineResources.cpp", "VulkanGlobalResources.cpp", "VulkanLightingResources.cpp", "VulkanGpuDiagnostics.cpp"})
@@ -734,7 +752,7 @@ namespace TerraEngine::Tests {
 			const std::string taskShader{ std::istreambuf_iterator<char>(taskStream), {} };
 			const std::string meshShader{ std::istreambuf_iterator<char>(meshStream), {} };
 			const std::string fragmentShader{ std::istreambuf_iterator<char>(fragmentStream), {} };
-			const auto renderSystem = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::RequestConventionalVisibilityIdentityPick(");
+			const auto renderSystem = RequiredIdentityPickAdmission(context);
 			const std::string resources = RequiredVulkanResources(context);
 			const std::string vulkan = RequiredVulkanContext(context);
 
@@ -790,7 +808,7 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.VulkanRecording.DedicatedCaptureIdentityUsesRetainedSnapshot", [](TestContext& context) {
-			const auto admission = RequiredDefinition(context, "Engine/Renderer/RenderSystem.cpp", "RenderSystem::RequestConventionalVisibilityIdentityPick(");
+			const auto admission = RequiredIdentityPickAdmission(context);
 			const auto observations = RequiredDefinition(context, "Engine/Renderer/Frame/RenderFrameSealing.cpp", "RenderSystem::ObserveFrameViewOutputs(");
 			const auto readback = RequiredDefinition(context, "Engine/Renderer/RenderSystemCapture.cpp", "RenderSystem::DrainConventionalVisibilityIdentityReadbacks(");
 			const auto publication = RequiredDefinition(context, "Engine/Renderer/Frame/RenderDiagnosticsPublication.cpp", "RenderSystem::PublishFrameDiagnostics(");

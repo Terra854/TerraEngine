@@ -235,7 +235,11 @@ void RenderSystem::Clear()
 
 void RenderSystem::SetTaskShaderCullingEnabled(bool enabled)
 {
-	taskShaderCullingEnabled = enabled;
+	{
+		std::lock_guard lock(runtimeRenderSettingsMutex);
+		if(taskShaderCullingEnabled != enabled) ++runtimeRenderSettingsGeneration;
+		taskShaderCullingEnabled = enabled;
+	}
 
 	if (rhi)
 	{

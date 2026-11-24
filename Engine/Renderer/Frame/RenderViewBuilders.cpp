@@ -28,17 +28,30 @@ RenderOutputRequest MakeFrameOutputRequest(RenderOutputKind kind, RenderViewType
 		request.outputId = outputId;
 		return request;
 	}
-RenderReferenceFrame FindFrameReferenceFrame(const RenderFrameSnapshot& renderFrameSnapshot, RenderOutputKind outputKind, std::uint32_t outputId) {
+RenderReferenceFrame FindFrameReferenceFrame(const RenderFrameSnapshot& renderFrameSnapshot, RenderOutputKind outputKind, std::uint32_t outputId,
+	std::optional<GraphicsSettings::GraphicsCameraTarget> camera = {}) {
 		for (const TerraEngine::Renderer::RenderFrameViewRequest& request :
 			renderFrameSnapshot.viewRequests)
 		{
-			if (request.outputKind == outputKind && request.outputId == outputId)
+			if (request.outputKind == outputKind && request.outputId == outputId
+				&& (!camera || request.graphicsCamera == camera))
 			{
 				return request.referenceFrame;
 			}
 		}
 		return TerraEngine::Renderer::RenderReferenceFrame{};
 	}
+// Associate a real source camera before selecting settings. New/retired views
+// render inherited game settings until the protected owner accepts their view.
+void BindFrameGraphicsCamera(RenderViewBuildState& frame, const RenderFrameSnapshot& snapshot,
+	std::optional<GraphicsSettings::GraphicsCameraTarget> camera, RenderOutputKind kind,
+	RenderViewType type, std::uint32_t outputId, glm::uvec2 extent)
+{
+	RenderFrameViewRequest request;
+	request.outputKind=kind; request.viewType=type; request.outputId=outputId; request.targetSize=extent;
+	BindGraphicsCameraViewProvenance(request,snapshot,camera);
+	frame.graphicsCamera=request.graphicsCamera; frame.graphicsView=request.graphicsView;
+}
 void LocalizeFrameLights(RenderViewBuildState& view) {
 		view.lightCandidates.erase(std::remove_if(
 			view.lightCandidates.begin(), view.lightCandidates.end(),
@@ -117,22 +130,26 @@ void RenderSystem::PrepareFrameSceneView(const FrameVisibilityInputs& visibility
 		// owner. Copying the shared header before materialization avoids deep-copying
 		// thousands of completed command and page records when the view is queued.
 		RenderViewBuildState sceneFrameData = frameData;
-		sceneFrameData.viewMatrix = fixedSceneCamera ? fixedSceneCamera->viewMatrix : sceneViewCamera.view;
-		sceneFrameData.projectionMatrix = fixedSceneCamera ? fixedSceneCamera->projectionMatrix : sceneViewCamera.proj;
+		// One protected override copy supplies matrices and the actual authored
+		// pose counter; a fixed recipe carries no interactive camera-pose proof.
+		const OverrideCameraData capturedSceneCamera = sceneViewCamera;
+		sceneFrameData.poseSequence = fixedSceneCamera ? 0u : capturedSceneCamera.poseSequence;
+		sceneFrameData.viewMatrix = fixedSceneCamera ? fixedSceneCamera->viewMatrix : capturedSceneCamera.view;
+		sceneFrameData.projectionMatrix = fixedSceneCamera ? fixedSceneCamera->projectionMatrix : capturedSceneCamera.proj;
 		sceneFrameData.referenceFrame = FindFrameReferenceFrame(renderFrameSnapshot,
 			RenderOutputKind::SceneView, 1U);
 		sceneFrameData.cameraLocalPosition = fixedSceneCamera ? fixedSceneCamera->cameraLocalPosition : glm::vec3(0.0F);
-		LocalizeFrameFixtureCamera(sceneFrameData, sceneViewCamera.canonicalPosition, sealedFixtureCameras);
+		LocalizeFrameFixtureCamera(sceneFrameData, capturedSceneCamera.canonicalPosition, sealedFixtureCameras);
 		if (!fixedSceneCamera)
 		{
 			// Resolve once in the view's reference frame and seal the result for
 			// both the spatial caster query and the backend shadow projection.
 			sceneFrameData.directionalShadowAnchor = TerraEngine::Renderer::ResolveSceneDirectionalShadowAnchor(
-				sceneFrameData.cameraLocalPosition, sceneFrameData.viewMatrix, sceneViewCamera.shadowFocusDistanceMetres);
+				sceneFrameData.cameraLocalPosition, sceneFrameData.viewMatrix, capturedSceneCamera.shadowFocusDistanceMetres);
 		}
 		LocalizeFrameLights(sceneFrameData);
 		sceneFrameData.sceneViewGridVisible = !fixedSceneCamera && sceneViewGridVisible;
-		sceneFrameData.sceneViewOrthographic = !fixedSceneCamera && sceneViewCamera.orthographic;
+		sceneFrameData.sceneViewOrthographic = !fixedSceneCamera && capturedSceneCamera.orthographic;
 		VisibleCommandBuildResult visibleCommands;
 		std::vector<RenderItemRecord>& sceneCommands =
 			lifetimeState->viewCommandScratch;
@@ -253,10 +270,12 @@ void RenderSystem::PrepareFrameGameViews(const FrameVisibilityInputs& visibility
 		{
 			RenderViewBuildState gameFrameData = frameData;
 			gameFrameData.editorContextTint = glm::vec4(0.0f);
+			BindFrameGraphicsCamera(gameFrameData, renderFrameSnapshot, fixedGameCamera ? std::nullopt : cam.graphicsCamera,
+				RenderOutputKind::GameView, RenderViewType::Game, 2u, effectiveGameTargetSize);
 			gameFrameData.viewMatrix = cam.view;
 			gameFrameData.projectionMatrix = cam.proj;
 			gameFrameData.referenceFrame = FindFrameReferenceFrame(renderFrameSnapshot,
-				RenderOutputKind::GameView, 2U);
+				RenderOutputKind::GameView, 2U, gameFrameData.graphicsCamera);
 			gameFrameData.cameraLocalPosition = fixedGameCamera ? fixedGameCamera->cameraLocalPosition : glm::vec3(0.0F);
 			LocalizeFrameFixtureCamera(gameFrameData, cam.canonicalPosition, sealedFixtureCameras);
 			LocalizeFrameLights(gameFrameData);
@@ -340,6 +359,8 @@ void RenderSystem::PrepareFrameGameViews(const FrameVisibilityInputs& visibility
 		for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
 		{
 			RenderViewBuildState runtimeFrameData = frameData;
+			BindFrameGraphicsCamera(runtimeFrameData, renderFrameSnapshot, cameras[cameraIndex].graphicsCamera,
+				RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, effectiveGameTargetSize);
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
 			const auto& camera = cameras[cameraIndex].camera;
 			const auto propagatedCameraTransform = worldTransforms->find(cameraEntity);
@@ -373,7 +394,7 @@ void RenderSystem::PrepareFrameGameViews(const FrameVisibilityInputs& visibility
 			runtimeFrameData.projectionMatrix[1][1] *= -1;
 			runtimeFrameData.cameraLocalPosition = glm::vec3(0.0F);
 			runtimeFrameData.referenceFrame = FindFrameReferenceFrame(renderFrameSnapshot,
-				RenderOutputKind::MainRuntimeView, 2U);
+				RenderOutputKind::MainRuntimeView, 2U, runtimeFrameData.graphicsCamera);
 			LocalizeFrameFixtureCamera(runtimeFrameData, cameraTransform.position, sealedFixtureCameras);
 			LocalizeFrameLights(runtimeFrameData);
 			// The editor publishes this descriptor through GameViewWindow. A
@@ -387,6 +408,7 @@ void RenderSystem::PrepareFrameGameViews(const FrameVisibilityInputs& visibility
 				cameraTransform.position,
 				false
 			};
+			latestGameViewCamera.graphicsCamera = runtimeFrameData.graphicsCamera;
 			hasLatestGameViewCamera = true;
 			runtimeFrameData.editorContextTint = glm::vec4(0.0f);
 			const VisibleCommandBuildResult visibleCommands = PrepareFrameVisibleCommands(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, visibleStreamingInputs, pendingStreamingTouchSets,
@@ -490,8 +512,13 @@ void RenderSystem::PrepareFrameDedicatedViews(const FrameVisibilityInputs& visib
 		const TerraEngine::Renderer::RenderCaptureViewIdentity captureIdentity =
 			TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
 				captureRequest.viewType);
+		const bool authoredCapture = captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::CustomCamera
+			&& (captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::CameraObject
+				|| (captureRequest.graphicsCamera && captureRequest.graphicsCamera->cameraId == captureRequest.sourceObjectId));
+		BindFrameGraphicsCamera(captureFrameData,renderFrameSnapshot,authoredCapture ? captureRequest.graphicsCamera : std::nullopt,
+			RenderOutputKind::OffscreenTexture,captureRequest.viewType,captureIdentity.outputId,captureRequest.targetSize);
 		captureFrameData.referenceFrame = FindFrameReferenceFrame(renderFrameSnapshot,
-			RenderOutputKind::OffscreenTexture, captureIdentity.outputId);
+			RenderOutputKind::OffscreenTexture,captureIdentity.outputId,captureFrameData.graphicsCamera);
 		LocalizeFrameLights(captureFrameData);
 		const VisibleCommandBuildResult visibleCommands = PrepareFrameVisibleCommands(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, visibleStreamingInputs, pendingStreamingTouchSets,
 			captureFrameData.projectionMatrix * captureFrameData.viewMatrix,

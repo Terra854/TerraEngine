@@ -46,6 +46,9 @@
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/File Formats/TerraEngineAnimationFile.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Resource/PostProcessProfile.h"
+#include "Engine/Resource/PostProcessEffectAsset.h"
+#include "Engine/Resource/ShaderPackage.h"
 #include "Engine/Resource/VirtualGeometryCodec.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
@@ -55,6 +58,48 @@
 using json = nlohmann::json;
 
 namespace {
+	std::optional<AssetType> RuntimeAssetTypeForCookedPostProcessImporter(std::string_view importer)
+	{
+		if(importer == "PostProcessProfileImporter") return AssetType::PostProcessProfile;
+		if(importer == "PostProcessEffectImporter") return AssetType::PostProcessEffect;
+		return std::nullopt;
+	}
+	bool ReadBoundedPostProcessBytes(const std::filesystem::path& path, std::size_t limit, std::vector<std::byte>& bytes)
+	{
+		std::ifstream input(path, std::ios::binary | std::ios::ate);
+		if(!input) return false;
+		const auto length = input.tellg();
+		if(length <= 0 || static_cast<std::uint64_t>(length) > limit) return false;
+		std::vector<std::byte> candidate(static_cast<std::size_t>(length));
+		input.seekg(0); input.read(reinterpret_cast<char*>(candidate.data()), static_cast<std::streamsize>(candidate.size()));
+		if(!input || input.peek() != std::char_traits<char>::eof()) return false;
+		bytes.swap(candidate); return true;
+	}
+	struct CheckedPostProcessSource
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::shared_ptr<const TerraEngine::Resource::PostProcessEffectAsset> effect;
+		std::string detail;
+		bool Passed() const { return assetId != TerraEngine::EMPTY_UUID; }
+	};
+	CheckedPostProcessSource CheckCookedPostProcessSource(const std::filesystem::path& path,
+		std::string_view importer, const TerraEngine::UUID& expectedId = TerraEngine::EMPTY_UUID)
+	{
+		CheckedPostProcessSource checked; const auto type = RuntimeAssetTypeForCookedPostProcessImporter(importer);
+		if(!type) { checked.detail = "Unknown cooked camera-asset importer."; return checked; }
+		const auto limit = *type == AssetType::PostProcessProfile ? TerraEngine::Resource::kMaximumPostProcessProfileBytes : TerraEngine::Resource::kMaximumPostProcessEffectBytes;
+		std::vector<std::byte> bytes;
+		if(!ReadBoundedPostProcessBytes(path, limit, bytes)) { checked.detail = "Cooked camera asset is missing, oversized, or changed during read."; return checked; }
+		if(*type == AssetType::PostProcessProfile) {
+			const auto decoded = TerraEngine::Resource::DeserializePostProcessProfile(bytes, expectedId);
+			checked.detail = decoded.detail; if(decoded.profile) checked.assetId = decoded.profile->assetId;
+		} else {
+			const auto decoded = TerraEngine::Resource::DeserializePostProcessEffectAsset(bytes, expectedId);
+			checked.detail = decoded.detail; checked.effect = decoded.effect;
+			if(decoded.effect) checked.assetId = decoded.effect->descriptor.assetId;
+		}
+		return checked;
+	}
 	constexpr auto kRecentlyRemovedAssetRetention = std::chrono::seconds(5);
 	constexpr const char* kModelPackageCompilerName = "TerraEngineModelPackageCompiler.exe";
 	constexpr const char* kMeshCompilerName = "TerraEngineMeshCompiler.exe";
@@ -582,6 +627,8 @@ namespace {
 		{
 			return true;
 		}
+		if(RuntimeAssetTypeForCookedPostProcessImporter(metadata.importerName))
+			return CheckCookedPostProcessSource(buildRoot / metadata.compiledPath, metadata.importerName, metadata.guid).Passed();
 		return std::filesystem::exists(buildRoot / metadata.compiledPath);
 	}
 
@@ -1848,6 +1895,7 @@ bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) con
 		|| importerName == "MeshImporter"
 		|| importerName == "AudioClipImporter"
 		|| importerName == "ShaderImporter"
+		|| RuntimeAssetTypeForCookedPostProcessImporter(importerName).has_value()
 		|| importerName == "PhysicsColliderRecipeImporter"
 		|| RuntimeAssetTypeForCookedAnimationImporter(importerName).has_value()
 		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(importerName);
@@ -2169,6 +2217,19 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 			}
 		}
 	}
+	else if(RuntimeAssetTypeForCookedPostProcessImporter(importerName))
+	{
+		// Reserve the bounded, checked embedded identity on the protected metadata
+		// path. Copy/validation/promotion still run in ordinary admitted worker jobs.
+		const auto source = CheckCookedPostProcessSource(absSourcePath, importerName);
+		if(source.Passed()) {
+			if(!metadataValid) metadata.guid = source.assetId;
+			else if(metadata.guid != source.assetId) {
+				needsImport = true;
+				TERRAENGINE_LOG(LogLevel::Warning, "Cooked camera asset UUID differs from existing metadata; prior accepted output will be retained: " << absSourcePath);
+			}
+		}
+	}
 	else if(importerName == "TerrainImporter")
 	{
 		// TerrainComponent persists the descriptor UUID, so metadata must use that
@@ -2324,6 +2385,13 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 }
 
 void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
+	const auto postProcessType = RuntimeAssetTypeForCookedPostProcessImporter(metadata.importerName);
+	if(postProcessType && (metadata.compiledPath.empty()
+		|| !CheckCookedPostProcessSource(buildRoot / metadata.compiledPath, metadata.importerName, metadata.guid).Passed())) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Camera asset registration rejected invalid cooked bytes or metadata identity: " << absSourcePath);
+		return;
+	}
+
 	bool assetAlreadyKnown = false;
 	std::optional<AssetMetadata> previousMetadata;
 	for(const auto& [path, registered] : assets) {
@@ -2388,6 +2456,7 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; known = true; }
 		else if(metadata.importerName == "AudioClipImporter") { type = AssetType::AudioClip; known = true; }
+		else if(postProcessType) { type = *postProcessType; known = true; }
 		else if (cookedAnimationType) {
 			type = *cookedAnimationType;
 			known = true;
@@ -2425,8 +2494,12 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 			{
 			// Register source path as an alias so the engine can resolve things like "viking_room.png" to the same GUID.
 			// We do this first so that idToPath (the preferred load path) is eventually overwritten by the compiled path.
-			ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, type);
+			if(!postProcessType) ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, type);
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
+			if(postProcessType && needsImport) {
+				if(*postProcessType == AssetType::PostProcessProfile) (void)ResourceManager::Instance().ReloadPostProcessProfileAsync(fullCompiled);
+				else (void)ResourceManager::Instance().ReloadPostProcessEffectAsync(fullCompiled);
+			}
 			if(type == AssetType::AudioClip && needsImport) {
 				// Audio ResourceManager performs its parse before replacing the shared
 				// generation, so corrupt watched reimports retain the prior clip.
@@ -2518,6 +2591,56 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 			// owns descriptor-safe retirement once a later frame observes the new
 			// asset revision.
 			}
+		}
+	}
+
+	// Fragment-stage identity is additional typed ownership. Keep the existing
+	// collection registration above unchanged for materials and legacy callers.
+	// Running this for either side makes effect-first and shader-first discovery
+	// equivalent, without inventing a shader UUID from a filename.
+	if(postProcessType || metadata.importerName == "ShaderImporter") {
+		auto registerReferencedFragment = [&](const TerraEngine::Resource::PostProcessEffectAsset& effect) {
+			const auto shaderId = effect.descriptor.shaderAssetId;
+			const AssetMetadata* shaderMetadata = nullptr;
+			for(const auto& [source, asset] : assets) {
+				(void)source;
+				if(asset.importerName == "ShaderImporter" && asset.guid == shaderId) { shaderMetadata = &asset; break; }
+			}
+			if(!shaderMetadata || shaderMetadata->compiledPath.empty()) return;
+			std::filesystem::path shaderPath;
+			if(!ResolveContainedAssetIoPath(buildRoot, buildRoot / shaderMetadata->compiledPath, shaderPath)
+				|| shaderPath.extension() != ".tspf") return;
+			std::vector<std::byte> bytes;
+			if(!ReadBoundedPostProcessBytes(shaderPath, TerraEngine::Resource::kMaximumShaderPackageBytes, bytes)) return;
+			std::string detail;
+			const auto shader = TerraEngine::Resource::DecodeShaderPackage(
+				std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()), shaderPath, detail);
+			if(!shader || shader->reflection.source.stage != static_cast<std::uint32_t>(ShaderStage::Fragment)
+				|| shader->binary.format != static_cast<std::uint32_t>(ShaderBinaryFormat::SPIRV)) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Referenced fullscreen shader is not a valid compiled fragment; prior registration retained: " << shaderPath);
+				return;
+			}
+			TerraEngine::Renderer::PostProcessCustomPassRegistration checked;
+			if(!TerraEngine::Resource::PreparePostProcessEffectRegistration(effect, shaderId, shader, false, {}, checked, detail)) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Fullscreen shader parameter ABI differs from its effect; prior registration retained: " << detail);
+				return;
+			}
+			auto& resources = ResourceManager::Instance();
+			resources.RegisterAssetPath(shaderId, shaderPath, AssetType::PostProcessShaderStage);
+			// Native request admission owns decoding/publication and assigns the
+			// actual generation. Detached importer validation never forges one.
+			if(metadata.importerName == "ShaderImporter" && needsImport)
+				(void)resources.ReloadPostProcessShaderStageAsync(shaderId);
+			else (void)resources.LoadPostProcessShaderStageAsync(shaderId);
+		};
+		for(const auto& [source, asset] : assets) {
+			(void)source;
+			if(asset.importerName != "PostProcessEffectImporter" || asset.compiledPath.empty()) continue;
+			const auto effect = CheckCookedPostProcessSource(buildRoot / asset.compiledPath, asset.importerName, asset.guid);
+			if(!effect.effect) continue;
+			if(metadata.importerName == "ShaderImporter" && effect.effect->descriptor.shaderAssetId != metadata.guid) continue;
+			if(metadata.importerName == "PostProcessEffectImporter" && asset.guid != metadata.guid) continue;
+			registerReferencedFragment(*effect.effect);
 		}
 	}
 
@@ -3546,6 +3669,8 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
 
 	if (ext == ".tmat") return "MaterialImporter";
+	if (ext == ".tepostprofile") return "PostProcessProfileImporter";
+	if (ext == ".teposteffect") return "PostProcessEffectImporter";
 	// Physics material JSON, authored collider recipes, and compiled collider
 	// envelopes use distinct importers so a move/rename retains their .meta GUID.
 	if (ext == ".tephysmat") return "PhysicsMaterialImporter";
@@ -4113,6 +4238,21 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 	std::string semanticStr = "color";
 	if (metadata.settings.contains("semantic")) semanticStr = metadata.settings["semantic"];
 	TextureFileSemantic semantic = semanticStr == "data" ? TextureFileSemantic::Data : TextureFileSemantic::Color;
+	// Import metadata selects an existing runtime transcode target. Missing
+	// metadata preserves BC7; data lookups can explicitly avoid BC7 storage.
+	std::string storageFormatStr = "bc7";
+	if (metadata.settings.contains("storageFormat")) {
+		if (!metadata.settings["storageFormat"].is_string()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Texture storageFormat must be bc7 or rgba8.");
+			return false;
+		}
+		storageFormatStr = metadata.settings["storageFormat"].get<std::string>();
+	}
+	if ((storageFormatStr != "bc7" && storageFormatStr != "rgba8")
+		|| (storageFormatStr == "rgba8" && semantic != TextureFileSemantic::Data)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Texture rgba8 storage requires semantic=data; supported storage formats are bc7 and rgba8.");
+		return false;
+	}
 
 	std::uint32_t quality = 1;
 	if (metadata.settings.contains("quality")) {
@@ -4141,7 +4281,8 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 		+ L" --semantic " + QuoteCommandLineArgument(semantic == TextureFileSemantic::Data ? "data" : "color")
 		+ L" --quality " + QuoteCommandLineArgument(std::to_string(quality))
 		+ (generateMipmaps ? L" --generate-mipmaps" : L" --no-mipmaps")
-		+ L" --filter " + QuoteCommandLineArgument(filterStr);
+		+ L" --filter " + QuoteCommandLineArgument(filterStr)
+		+ L" --storage-format " + QuoteCommandLineArgument(storageFormatStr);
 
 	if (!RunCompilerProcess(compilerPath, commandLine, progressState, "Texture compiler", stagedCompiledPath)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
@@ -4153,6 +4294,7 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 	}
 	return true;
 #else
+	const TextureStorageFormat storageFormat = storageFormatStr == "rgba8" ? TextureStorageFormat::RGBA8 : TextureStorageFormat::BC7;
 	TextureFilterType filter = TextureFilterType::Lanczos;
 	if (filterStr == "Box") filter = TextureFilterType::Box;
 	else if (filterStr == "Triangle") filter = TextureFilterType::Triangle;
@@ -4162,7 +4304,7 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 			SetImportProgress(progressState, std::string(stage), std::string(message), progress, false, false);
 		}
 	};
-	if (!CompileTexture(fullSourcePath, stagedCompiledPath, semantic, quality, generateMipmaps, filter, progressCallback)) {
+	if (!CompileTexture(fullSourcePath, stagedCompiledPath, semantic, quality, generateMipmaps, filter, progressCallback, storageFormat)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -4201,6 +4343,17 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 		entry = metadata.settings["entryPoint"];
 	}
 
+	// Fullscreen shaders opt in explicitly. Unknown/non-string values fail closed
+	// instead of weakening the ordinary authored surface push/binding policy.
+	ShaderUse shaderUse = ShaderUse::Surface;
+	if (metadata.settings.contains("shaderUse")) {
+		const auto& value = metadata.settings["shaderUse"];
+		if (!value.is_string() || (value != "surface" && value != "post-process")) {
+			TERRAENGINE_LOG(LogLevel::Error, "ShaderImporter shaderUse must be surface or post-process: " << fullSourcePath); return false;
+		}
+		if (value == "post-process") shaderUse = ShaderUse::PostProcess;
+	}
+
 #ifdef _WIN32
 	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kShaderCompilerName;
 	if (!std::filesystem::exists(compilerPath)) {
@@ -4213,6 +4366,7 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 		+ L" --output " + QuoteCommandLineArgument(stagedCompiledPath)
 		+ L" --stage " + QuoteCommandLineArgument(stage)
 		+ L" --entry " + QuoteCommandLineArgument(entry);
+	if (shaderUse == ShaderUse::PostProcess) commandLine += L" --shader-use post-process";
 	if (!target.empty()) {
 		commandLine += L" --target " + QuoteCommandLineArgument(target);
 	}
@@ -4242,7 +4396,7 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 #else
 	std::filesystem::path dxcPath = toolsDir / "dxc";
 #endif
-	if (!CompileShader(fullSourcePath, stagedCompiledPath, stage, target, entry, dxcPath)) {
+	if (!CompileShader(fullSourcePath, stagedCompiledPath, stage, target, entry, dxcPath, shaderUse)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -4405,7 +4559,8 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 		return true;
 	}
 	else if(metadata.importerName == "PhysicsMaterialImporter" || metadata.importerName == "CookedColliderImporter"
-		|| RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName).has_value()) {
+		|| RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName).has_value()
+		|| RuntimeAssetTypeForCookedPostProcessImporter(metadata.importerName).has_value()) {
 		// Cooked animation assets are already versioned runtime envelopes. Copy
 		// through staging rather than reparsing/re-serializing them so the watcher
 		// publishes a complete generation or leaves the prior build artifact intact.
@@ -4416,6 +4571,14 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 		if(error) return false;
 		std::filesystem::copy_file(fullSourcePath, stagedPath, std::filesystem::copy_options::overwrite_existing, error);
 		if(error) return false;
+		if(RuntimeAssetTypeForCookedPostProcessImporter(metadata.importerName)) {
+			const auto checked = CheckCookedPostProcessSource(stagedPath, metadata.importerName, metadata.guid);
+			if(!checked.Passed()) {
+				std::filesystem::remove(stagedPath, error);
+				TERRAENGINE_LOG(LogLevel::Error, "Cooked camera asset reimport rejected; prior artifact retained: " << checked.detail);
+				return false;
+			}
+		}
 		if (const std::optional<AssetType> animationType =
 			RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName))
 		{
@@ -4520,6 +4683,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; knownResource = true; }
 		else if(metadata.importerName == "AudioClipImporter") { type = AssetType::AudioClip; knownResource = true; }
+		else if(const auto cameraType = RuntimeAssetTypeForCookedPostProcessImporter(metadata.importerName)) { type = *cameraType; knownResource = true; }
 		else if (const std::optional<AssetType> animationType = RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName)) {
 			type = *animationType;
 			knownResource = true;
@@ -4527,6 +4691,9 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 
 		if (knownResource) {
 			ResourceManager::Instance().DeleteResource(metadata.guid, type);
+			if(metadata.importerName == "ShaderImporter"
+				&& !ResourceManager::Instance().GetRegisteredAssetPath(metadata.guid, AssetType::PostProcessShaderStage).empty())
+				ResourceManager::Instance().DeleteResource(metadata.guid, AssetType::PostProcessShaderStage);
 		}
 		if(metadata.importerName == "MaterialImporter") {
 			// Deletion deliberately records a fallback condition instead of touching

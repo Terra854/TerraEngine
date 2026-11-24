@@ -15,6 +15,7 @@ inline constexpr std::uint32_t kNativePhysicsDiagnosticBytes = 192U;
 inline constexpr std::uint32_t kNativePhysicsLayerNameBytes = 64U;
 inline constexpr std::uint32_t kNativePhysicsCollisionLayerCount = 32U;
 inline constexpr std::uint32_t kNativeGraphicsAbiVersion = 1U;
+inline constexpr std::uint32_t kNativeGraphicsSettingsAbiVersion = 2U;
 inline constexpr std::uint32_t kNativeRuntimeAbiVersion = 1U;
 inline constexpr std::uint32_t kNativeRuntimeDiagnosticBytes = 192U;
 inline constexpr std::uint32_t kNativeInputKeyCapacity = 128U;
@@ -351,6 +352,82 @@ static_assert(sizeof(NativeGraphicsAbiHeader) == 8U);
 static_assert(sizeof(NativeGraphicsRenderSettings) == 120U);
 static_assert(offsetof(NativeGraphicsRenderSettings, header) == 0U);
 static_assert(offsetof(NativeGraphicsRenderSettings, virtualGeometryBudgetBytes) == 96U);
+
+// Expanded settings are additive. A complete request owns a copied target and
+// bounded value lanes. Text spans index the caller's separate UTF-8 buffer,
+// which is copied during the call along with the value records.
+enum class NativeGraphicsSettingsStatus : std::uint32_t
+{
+	Success = 0U,
+	Accepted = 1U,
+	InvalidArgument = 2U,
+	VersionMismatch = 3U,
+	BufferTooSmall = 4U,
+	Unavailable = 5U,
+	Rejected = 6U
+};
+
+#pragma pack(push, 8)
+struct NativeGraphicsSettingsTargetPacket
+{
+	std::uint32_t scope;
+	std::uint32_t flags;
+	std::uint8_t cameraId[16];
+	std::uint64_t sceneGeneration;
+	std::uint64_t objectLifetimeGeneration;
+	std::uint64_t componentGeneration;
+	std::uint64_t bindingGeneration;
+	std::uint32_t viewType;
+	std::uint32_t outputKind;
+	std::uint32_t outputId;
+	std::uint32_t reserved;
+	std::uint64_t viewLifetimeGeneration;
+};
+
+struct NativeGraphicsSettingsValuePacket
+{
+	std::uint32_t settingId;
+	std::uint32_t valueKind;
+	std::uint64_t scalarBits;
+	std::uint8_t assetId[16];
+	std::uint32_t textOffset;
+	std::uint32_t textLength;
+};
+
+struct NativeGraphicsSettingsRequestPacket
+{
+	NativeGraphicsAbiHeader header;
+	std::uint32_t operation;
+	std::uint32_t valueCount;
+	std::uint32_t textBytes;
+	std::uint32_t preset;
+	std::uint64_t expectedRevision;
+	NativeGraphicsSettingsTargetPacket target;
+};
+
+struct NativeGraphicsSettingsReceiptPacket
+{
+	NativeGraphicsAbiHeader header;
+	std::uint32_t state;
+	std::uint32_t activation;
+	std::uint32_t reason;
+	std::uint32_t affectedCount;
+	std::uint32_t detailBytes;
+	std::uint32_t reserved;
+	std::uint64_t requestId;
+	std::uint64_t sequence;
+	std::uint64_t requestedRevision;
+	std::uint64_t effectiveRevision;
+	std::uint64_t appliedFrameId;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(NativeGraphicsSettingsTargetPacket) == 80U);
+static_assert(sizeof(NativeGraphicsSettingsValuePacket) == 40U);
+static_assert(sizeof(NativeGraphicsSettingsRequestPacket) == 112U);
+static_assert(sizeof(NativeGraphicsSettingsReceiptPacket) == 72U);
+static_assert(offsetof(NativeGraphicsSettingsRequestPacket, target) == 32U);
+static_assert(offsetof(NativeGraphicsSettingsReceiptPacket, requestId) == 32U);
 
 // Non-physics runtime services share a small versioned ABI. These packets are
 // copied snapshots or queued requests and contain no native pointers.
@@ -1206,6 +1283,46 @@ extern "C" {
 	TERRAENGINE_API NativeGraphicsStatus Native_Graphics_SubmitRuntimeQualityPreset(std::uint32_t preset);
 	TERRAENGINE_API NativeGraphicsStatus Native_Graphics_ReadQualityPreset(std::uint32_t* preset);
 	TERRAENGINE_API std::uint64_t Native_Graphics_GetRuntimeSettingsGeneration();
+	// V2 validates the exact packet and bounded arrays before queue admission.
+	// Receipts and settings return copied ownership, never a renderer pointer.
+	TERRAENGINE_API std::uint32_t Native_GraphicsSettings_GetAbiVersion();
+	TERRAENGINE_API std::uint32_t Native_PostProcessAuthoring_GetAbiVersion();
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_PostProcessAuthoring_Read(
+		const NativeGraphicsSettingsTargetPacket* target, char* output, std::uint32_t capacity, std::uint32_t* required);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_PostProcessAuthoring_ReadReceipt(
+		std::uint64_t requestId, char* output, std::uint32_t capacity, std::uint32_t* required);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_PostProcessAuthoring_Submit(
+		const NativeGraphicsSettingsTargetPacket* target, const std::uint8_t* payload,
+		std::uint32_t size, NativeGraphicsSettingsReceiptPacket* receipt);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_Submit(
+		const NativeGraphicsSettingsRequestPacket* request, const NativeGraphicsSettingsValuePacket* values,
+		const char* utf8Values, NativeGraphicsSettingsReceiptPacket* receipt);
+	// Query buffers are caller-owned UTF-8 JSON. requiredBytes includes the NUL
+	// terminator. A null destination and zero capacity performs only sizing.
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_Discover(
+		char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes);
+	// Scoped discovery validates the exact copied target before querying its
+	// capabilities. The original no-target export remains available unchanged.
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_DiscoverScoped(
+		const NativeGraphicsSettingsTargetPacket* target,
+		char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_Read(
+		const NativeGraphicsSettingsTargetPacket* target,
+		char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_ReadReceipt(
+		std::uint64_t requestId, char* destination, std::uint32_t capacity, std::uint32_t* requiredBytes);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_ResolveCamera(
+		std::uint32_t objectId, NativeGraphicsSettingsTargetPacket* target);
+	// Mutation calls admit exactly once and return a fixed receipt. They never
+	// repeat filesystem operations as a side effect of a query-buffer size retry.
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_SavePreferences(
+		const char* name, std::uint32_t nameBytes, const NativeGraphicsSettingsTargetPacket* target,
+		std::uint64_t expectedStoreRevision, NativeGraphicsSettingsReceiptPacket* receipt);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_RestorePreferences(
+		const char* name, std::uint32_t nameBytes, const NativeGraphicsSettingsTargetPacket* target,
+		NativeGraphicsSettingsReceiptPacket* receipt);
+	TERRAENGINE_API NativeGraphicsSettingsStatus Native_GraphicsSettings_CancelStaged(
+		std::uint64_t requestId, NativeGraphicsSettingsReceiptPacket* receipt);
 
 	// Hierarchy, immutable input/time snapshots, scene lifecycle/settings,
 	// resource residency, and full physics settings use one copied dispatcher.

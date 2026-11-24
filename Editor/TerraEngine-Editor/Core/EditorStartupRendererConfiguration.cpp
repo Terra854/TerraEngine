@@ -60,7 +60,17 @@ namespace
 				output.virtualGeometry.hiZNearPlaneGuardEnabled = virtualGeometry.value("hiZNearPlaneGuardEnabled", true);
 				output.virtualGeometry.hiZThinGeometryGuardEnabled = virtualGeometry.value("hiZThinGeometryGuardEnabled", true);
 				output.virtualGeometry.geometryBudgetBytes = virtualGeometry.value("geometryBudgetBytes", output.virtualGeometry.geometryBudgetBytes);
-				output.virtualGeometry.preloadBias = std::clamp(virtualGeometry.value("preloadBias", output.virtualGeometry.preloadBias), 0.0f, 8.0f);
+				output.virtualGeometry.deformationCurrentBudgetBytes = virtualGeometry.value("deformationCurrentBudgetBytes", output.virtualGeometry.deformationCurrentBudgetBytes);
+				output.virtualGeometry.deformationHistoryBudgetBytes = virtualGeometry.value("deformationHistoryBudgetBytes", output.virtualGeometry.deformationHistoryBudgetBytes);
+				output.virtualGeometry.deformationBoundsBudgetBytes = virtualGeometry.value("deformationBoundsBudgetBytes", output.virtualGeometry.deformationBoundsBudgetBytes);
+				output.virtualGeometry.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(
+					virtualGeometry.value("debugVisualizationMode", static_cast<std::uint32_t>(output.virtualGeometry.debugVisualizationMode)));
+				output.virtualGeometry.preloadBias = virtualGeometry.value("preloadBias", output.virtualGeometry.preloadBias);
+				output.virtualGeometry.lodTransitionHysteresisPixels = virtualGeometry.value("lodTransitionHysteresisPixels", output.virtualGeometry.lodTransitionHysteresisPixels);
+				output.virtualGeometry.lodTransitionStableFrames = virtualGeometry.value("lodTransitionStableFrames", output.virtualGeometry.lodTransitionStableFrames);
+				// Use the renderer's shared normalization so editor and export startup
+				// agree on guarded defaults and valid transition/preload ranges.
+				output.virtualGeometry = SanitizeVirtualGeometryQualityProfile(output.virtualGeometry);
 			}
 		} catch (const std::exception& exception) {
 			configuration.diagnostics.push_back(std::string("Project render settings are malformed; using safe defaults: ") + exception.what());

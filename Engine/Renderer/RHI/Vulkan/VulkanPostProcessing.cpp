@@ -217,7 +217,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 }
 
 
-bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
+bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory, VkImageView coverageDepthSeed) {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Viewport dimensions can change between RenderFrame discovering the desired
 	// size and BeginFrame reaching a fence-safe resource recreation boundary.
@@ -356,7 +356,7 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 	// to be valid. Any early return before this point leaves depth in the
 	// render-pass layout, while a complete Hi-Z record restores it before the
 	// next frame.
-	if (!PrepareDepthForCompute(cmd, sourceDepthImage, depthView, false)) {
+	if (!coverageDepthSeed && !PrepareDepthForCompute(cmd, sourceDepthImage, depthView, false)) {
 		return false;
 	}
 
@@ -454,7 +454,11 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 		hiZSourceStage,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-	VkDescriptorSet levelZeroSet = WriteHiZDescriptorSet(0u, depthView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, hiZ.mipViews[0]);
+	// Four-sample rendering supplies a color-aspect R32F seed that already
+	// reduced all coverage lanes and is in shader-read layout.
+	VkDescriptorSet levelZeroSet = WriteHiZDescriptorSet(0u, coverageDepthSeed ? coverageDepthSeed : depthView,
+		coverageDepthSeed ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		hiZ.mipViews[0]);
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiZPipelineLayout, 0u, 1u, &levelZeroSet, 0u, nullptr);
 	HiZPushConstants levelZeroPush{};
 	levelZeroPush.inputWidth = hiZ.width;
@@ -520,28 +524,8 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 	// Restore the active view depth image to the layout expected at the start
 	// of the next frame. Keeping this invariant avoids layout mismatches while
 	// the independent Hi-Z pyramid remains readable.
-	VkImageMemoryBarrier restoreDepthBarrier{};
-	restoreDepthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	restoreDepthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	restoreDepthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-	restoreDepthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	restoreDepthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	restoreDepthBarrier.image = sourceDepthImage;
-	restoreDepthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	restoreDepthBarrier.subresourceRange.baseMipLevel = 0u;
-	restoreDepthBarrier.subresourceRange.levelCount = 1u;
-	restoreDepthBarrier.subresourceRange.baseArrayLayer = 0u;
-	restoreDepthBarrier.subresourceRange.layerCount = 1u;
-	restoreDepthBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	restoreDepthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &restoreDepthBarrier);
+	if(!coverageDepthSeed)
+		RestoreDepthForAttachment(cmd, sourceDepthImage);
 
 	hiZ.history = completedHistory;
 	hiZ.history.valid = true;

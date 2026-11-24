@@ -5,6 +5,8 @@
 // This module handles project-level asset resolution and serves as the primary gateway for content consumption.
 
 #include "Resource/ResourceManager.h"
+#include "Resource/PostProcessProfile.h"
+#include "Resource/PostProcessEffectAsset.h"
 #include "Renderer/RenderSystem.h"
 
 #include <cstring>
@@ -245,6 +247,12 @@ namespace
 			return { ".teaudio" };
 		case AssetType::Terrain:
 			return { ".teterrain" };
+		case AssetType::PostProcessProfile:
+			return { ".tepostprofile" };
+		case AssetType::PostProcessEffect:
+			return { ".teposteffect" };
+		case AssetType::PostProcessShaderStage:
+			return { ".tspf" };
 		}
 
 		return {};
@@ -759,6 +767,29 @@ namespace
 			renderSettingsDocument,
 			"debugEnabled",
 			JsonBoolOr(*settingsObject, "debugEnabled", false)) ? 1u : 0u;
+		if(const auto geometry = settingsObject->find("virtualGeometry"); geometry != settingsObject->end() && geometry->is_object())
+		{
+			// Preserve the complete authored quality profile in standalone startup.
+			// Missing old fields retain their native default, including unlimited
+			// zero-byte budgets and the guarded visibility defaults.
+			auto& output = settings.virtualGeometry;
+			output.lodErrorScale = JsonFloatOr(*geometry, "lodErrorScale", output.lodErrorScale);
+			output.maxLodDrop = JsonUIntOr(*geometry, "maxLodDrop", output.maxLodDrop);
+			output.hiZOcclusionEnabled = JsonBoolOr(*geometry, "hiZOcclusionEnabled", output.hiZOcclusionEnabled);
+			output.hiZSelfOcclusionGuardEnabled = JsonBoolOr(*geometry, "hiZSelfOcclusionGuardEnabled", output.hiZSelfOcclusionGuardEnabled);
+			output.hiZNearPlaneGuardEnabled = JsonBoolOr(*geometry, "hiZNearPlaneGuardEnabled", output.hiZNearPlaneGuardEnabled);
+			output.hiZThinGeometryGuardEnabled = JsonBoolOr(*geometry, "hiZThinGeometryGuardEnabled", output.hiZThinGeometryGuardEnabled);
+			output.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(JsonUIntOr(*geometry,
+				"debugVisualizationMode", static_cast<std::uint32_t>(output.debugVisualizationMode)));
+			output.geometryBudgetBytes = JsonUInt64Or(*geometry, "geometryBudgetBytes", output.geometryBudgetBytes);
+			output.deformationCurrentBudgetBytes = JsonUInt64Or(*geometry, "deformationCurrentBudgetBytes", output.deformationCurrentBudgetBytes);
+			output.deformationHistoryBudgetBytes = JsonUInt64Or(*geometry, "deformationHistoryBudgetBytes", output.deformationHistoryBudgetBytes);
+			output.deformationBoundsBudgetBytes = JsonUInt64Or(*geometry, "deformationBoundsBudgetBytes", output.deformationBoundsBudgetBytes);
+			output.preloadBias = JsonFloatOr(*geometry, "preloadBias", output.preloadBias);
+			output.lodTransitionHysteresisPixels = JsonFloatOr(*geometry, "lodTransitionHysteresisPixels", output.lodTransitionHysteresisPixels);
+			output.lodTransitionStableFrames = JsonUIntOr(*geometry, "lodTransitionStableFrames", output.lodTransitionStableFrames);
+			output = SanitizeVirtualGeometryQualityProfile(output);
+		}
 		return settings;
 	}
 
@@ -1469,6 +1500,12 @@ ResourceManager::ResourceManager()
 	// for exact CPU accounting and let RegisterResidencyResource pin them until
 	// pipeline lifetime can safely publish release candidates.
 	shaderCollectionCache.tracksResidency = true;
+	// Immutable authored profile leases are CPU data, not backend draw resources.
+	postProcessProfileCache.assetType = AssetType::PostProcessProfile;
+	postProcessProfileCache.tracksResidency = false;
+	postProcessEffectCache.assetType = AssetType::PostProcessEffect;
+	postProcessEffectCache.tracksResidency = false;
+	shaderCache.assetType = AssetType::PostProcessShaderStage;
 	textureCache.assetType = AssetType::Texture;
 	textureCache.tracksResidency = true;
 
@@ -1489,6 +1526,8 @@ void ResourceManager::Initialize()
 	m_RenderProfileSummary = "profile=Default";
 	m_RenderValidationEnabled = false;
 	m_RenderDebugEnabled = false;
+	m_ProfileTextureBudgetMegabytes = 512;
+	m_ProfileResolutionScale = 1.0f;
 	m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	m_LastStartupError.reset();
 	ResetManifestMetadata();
@@ -1567,6 +1606,16 @@ void ResourceManager::Initialize()
 			m_RenderProfileSummary = RenderProfileSummaryFromJson(*renderIt);
 			m_RenderValidationEnabled = JsonBoolOr(*renderIt, "validationEnabled", false);
 			m_RenderDebugEnabled = JsonBoolOr(*renderIt, "debugEnabled", false);
+			m_ProfileTextureBudgetMegabytes = JsonUIntOr(*renderIt, "textureBudgetMb", 512u);
+			const float scale = JsonFloatOr(*renderIt, "resolutionScale", 1.0f);
+			m_ProfileResolutionScale = std::isfinite(scale) && scale > 0.0f ? scale : 1.0f;
+		}
+		if(m_ConfiguredRenderSettings)
+		{
+			// The exact document is authoritative. Feed the same diagnostic flags
+			// into native instance creation and the immutable startup snapshot.
+			m_RenderValidationEnabled = m_ConfiguredRenderSettings->validationEnabled != 0;
+			m_RenderDebugEnabled = m_ConfiguredRenderSettings->debugEnabled != 0;
 		}
 
 		if (auto recoveryIt = manifest.find("rendererRecovery"); recoveryIt != manifest.end() && recoveryIt->is_object()) {
@@ -1826,6 +1875,15 @@ std::optional<RenderSettings> ResourceManager::GetConfiguredRenderSettings() con
 	return m_ConfiguredRenderSettings;
 }
 
+GraphicsStartupInputs ResourceManager::GetGraphicsStartupInputs() const
+{
+	// Startup owns metadata mutation. Copy it before creating a store or Vulkan
+	// candidate so worker persistence can operate without reopening live state.
+	return {IsExportRuntime(), m_ProductName, m_GraphicsProductIdentity,
+		m_ConfiguredRenderSettings, m_RenderValidationEnabled, m_RenderDebugEnabled,
+		m_ProfileTextureBudgetMegabytes, m_ProfileResolutionScale};
+}
+
 void ResourceManager::ConfigureEditorStartupProfile(const RenderSettings& settings,
 	bool validationEnabled, bool debugEnabled,
 	std::optional<std::filesystem::path> projectRoot, std::string origin)
@@ -1856,6 +1914,7 @@ void ResourceManager::ResetManifestMetadata(std::string_view fallbackProductName
 		? std::string(kDefaultManifestProductName)
 		: std::string(fallbackProductName);
 	m_Version = std::string(kDefaultManifestVersion);
+	m_GraphicsProductIdentity = "product-name:" + m_ProductName;
 }
 
 
@@ -1884,6 +1943,10 @@ void ResourceManager::ApplyManifestMetadata(const nlohmann::json& manifest, std:
 			m_Version = manifestVersion;
 		}
 	}
+	// An authored game ID survives executable renames and product-name changes.
+	// Older projects retain a stable exact-name identity across version updates.
+	const std::string gameId = JsonStringOr(manifest, "gameId", "");
+	m_GraphicsProductIdentity = gameId.empty() ? "product-name:" + m_ProductName : "game-id:" + gameId;
 }
 
 
@@ -2889,6 +2952,7 @@ void ResourceManager::ClearCaches()
 	{
 		std::unique_lock lock(shaderCache.mutex);
 		shaderCache.pathToId.clear();
+		shaderCache.acceptedPayloads.clear();
 		shaderCache.idToPath.clear();
 		shaderCache.resources.clear();
 		shaderCache.inFlight.clear();
@@ -2943,6 +3007,27 @@ void ResourceManager::ClearCaches()
 		navigationGeometryPaths.idToPath.clear();
 		std::unique_lock snapshotLock(navigationGeometryMutex);
 		navigationGeometrySnapshots.clear();
+	}
+	{
+		// The epoch was invalidated before clearing; retained view leases keep
+		// old profile roots alive without granting their jobs publication rights.
+		std::unique_lock lock(postProcessProfileCache.mutex);
+		postProcessProfileCache.pathToId.clear();
+		postProcessProfileCache.idToPath.clear();
+		postProcessProfileCache.acceptedPayloads.clear();
+		postProcessProfileCache.resources.clear();
+		postProcessProfileCache.inFlight.clear();
+		postProcessProfileCache.inFlightTokens.clear();
+	}
+	{
+		std::unique_lock lock(postProcessEffectCache.mutex);
+		postProcessEffectCache.pathToId.clear(); postProcessEffectCache.idToPath.clear();
+		postProcessEffectCache.acceptedPayloads.clear(); postProcessEffectCache.resources.clear();
+		postProcessEffectCache.inFlight.clear(); postProcessEffectCache.inFlightTokens.clear();
+	}
+	{
+		std::unique_lock lock(postProcessShaderStagePaths.mutex);
+		postProcessShaderStagePaths.pathToId.clear(); postProcessShaderStagePaths.idToPath.clear();
 	}
 	ClearResidencyState();
 	ClearStreamingState();
@@ -3074,7 +3159,8 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 {
 	RequestDeliveries deliveries;
 	std::unique_lock gate(m_PublicationGate);
-	InvalidateIdentityLocked(static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
+	InvalidateIdentityLocked(type == AssetType::PostProcessShaderStage ? ResourceKind::Shader
+		: static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
 	InvalidateIdentityLocked(ResourceKind::Navigation, id, deliveries);
 	// Derived companion snapshots cannot survive deletion of their source owner.
 	{ std::unique_lock lock(navigationGeometryMutex);
@@ -3153,6 +3239,20 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		// Retain the generation tombstone for any surviving immutable audio lease.
 		break;
 	}
+	case AssetType::PostProcessProfile:
+		removeFromCache(postProcessProfileCache);
+		break;
+	case AssetType::PostProcessEffect:
+		removeFromCache(postProcessEffectCache);
+		break;
+	case AssetType::PostProcessShaderStage: {
+		removeFromCache(shaderCache);
+		std::unique_lock lock(postProcessShaderStagePaths.mutex);
+		for(auto it = postProcessShaderStagePaths.pathToId.begin(); it != postProcessShaderStagePaths.pathToId.end();)
+			it = it->second == id ? postProcessShaderStagePaths.pathToId.erase(it) : std::next(it);
+		postProcessShaderStagePaths.idToPath.erase(id);
+		break;
+	}
 	case AssetType::Terrain: {
 		std::unique_lock lock(terrainPaths.mutex);
 		for(auto iterator = terrainPaths.pathToId.begin(); iterator != terrainPaths.pathToId.end();) {
@@ -3180,7 +3280,8 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		&& type != AssetType::Skeleton && type != AssetType::AnimationClip
 		&& type != AssetType::AnimationController && type != AssetType::AnimationMask
 		&& type != AssetType::RetargetProfile && type != AssetType::MotionDatabase
-		&& type != AssetType::RagdollProfile)
+		&& type != AssetType::RagdollProfile && type != AssetType::PostProcessProfile
+		&& type != AssetType::PostProcessEffect && type != AssetType::PostProcessShaderStage)
 		deleteBackend = true;
 	{
 		std::unique_lock lock(m_ResidencyMutex);
@@ -3726,7 +3827,8 @@ bool ResourceManager::ReleaseResidentResource(
 {
 	RequestDeliveries deliveries;
 	std::unique_lock gate(m_PublicationGate);
-	InvalidateIdentityLocked(static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
+	InvalidateIdentityLocked(type == AssetType::PostProcessShaderStage ? ResourceKind::Shader
+		: static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
 	VisitAssetCache(type, [&](auto& cache) {
 		std::vector<std::string> keys;
 		{
@@ -4686,7 +4788,7 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 		|| isAvailable(skeletonCache) || isAvailable(animationClipCache)
 		|| isAvailable(animationControllerCache) || isAvailable(animationMaskCache)
 		|| isAvailable(retargetProfileCache) || isAvailable(motionDatabaseCache)
-		|| isAvailable(ragdollProfileCache)
+		|| isAvailable(ragdollProfileCache) || isAvailable(postProcessProfileCache) || isAvailable(postProcessEffectCache)
 		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths)
 		|| hasRegisteredPath(audioClipPaths) || hasRegisteredPath(terrainPaths)
 		|| hasRegisteredPath(navigationGeometryPaths);
@@ -4697,7 +4799,8 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 {
 	RequestDeliveries deliveries;
 	std::unique_lock gate(m_PublicationGate);
-	InvalidateIdentityLocked(static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
+	InvalidateIdentityLocked(type == AssetType::PostProcessShaderStage ? ResourceKind::Shader
+		: static_cast<ResourceKind>(static_cast<std::uint32_t>(type)), id, deliveries);
 	const std::filesystem::path resolvedPath = (path.is_absolute() ? path : assetRoot / path).lexically_normal();
 	const std::string key = NormalizeKey(resolvedPath);
 	const bool canBePreferredLoadPath = HasNativeExtensionForAssetType(resolvedPath, type);
@@ -4739,6 +4842,11 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 			cache.idToPath[id] = key;
 		}
 	});
+	if(type == AssetType::PostProcessShaderStage && canBePreferredLoadPath) {
+		std::unique_lock lock(postProcessShaderStagePaths.mutex);
+		postProcessShaderStagePaths.pathToId[key] = id;
+		postProcessShaderStagePaths.idToPath[id] = key;
+	}
 	// Registration accounting belongs to the same authority boundary. A clear
 	// cannot interleave between path ownership and its streaming evidence.
 	RegisterStreamableAsset(id, type, resolvedPath, true);
@@ -4749,6 +4857,12 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const
 {
 	if(id == TerraEngine::EMPTY_UUID) return {};
+	if(type == AssetType::PostProcessShaderStage) {
+		std::shared_lock lock(postProcessShaderStagePaths.mutex);
+		const auto found = postProcessShaderStagePaths.idToPath.find(id);
+		return found == postProcessShaderStagePaths.idToPath.end() ? std::filesystem::path{} : std::filesystem::path(found->second);
+	}
+
 	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider || type == AssetType::AudioClip || type == AssetType::Terrain) {
 		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
 			? physicsMaterialPaths : (type == AssetType::CookedCollider ? cookedColliderPaths : (type == AssetType::AudioClip ? audioClipPaths : terrainPaths));
@@ -4771,6 +4885,8 @@ std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine:
 	case AssetType::RetargetProfile: capture(retargetProfileCache); break;
 	case AssetType::MotionDatabase: capture(motionDatabaseCache); break;
 	case AssetType::RagdollProfile: capture(ragdollProfileCache); break;
+	case AssetType::PostProcessProfile: capture(postProcessProfileCache); break;
+	case AssetType::PostProcessEffect: capture(postProcessEffectCache); break;
 	case AssetType::Texture: capture(textureCache); break;
 	case AssetType::Material: capture(materialCache); break;
 	case AssetType::ShaderCollection: capture(shaderCollectionCache); break;
@@ -4902,6 +5018,12 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 		case AssetType::MotionDatabase:
 		case AssetType::RagdollProfile:
 			return LoadOpaqueAnimationAsset(candidatePath, type);
+		case AssetType::PostProcessProfile:
+			return LoadPostProcessProfile(candidatePath);
+		case AssetType::PostProcessEffect:
+			return LoadPostProcessEffect(candidatePath);
+		case AssetType::PostProcessShaderStage:
+			return TerraEngine::EMPTY_UUID; // A TSPF path has no embedded stage UUID.
 		case AssetType::Texture:
 			return LoadTexture(candidatePath);
 		case AssetType::Material:
@@ -4988,6 +5110,18 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 	case AssetType::RagdollProfile:
 		capturePath(ragdollProfileCache);
 		break;
+	case AssetType::PostProcessProfile:
+		capturePath(postProcessProfileCache);
+		break;
+	case AssetType::PostProcessEffect:
+		capturePath(postProcessEffectCache);
+		break;
+	case AssetType::PostProcessShaderStage: {
+		std::shared_lock lock(postProcessShaderStagePaths.mutex);
+		const auto found = postProcessShaderStagePaths.idToPath.find(id);
+		if(found != postProcessShaderStagePaths.idToPath.end()) result = found->second;
+		break;
+	}
 	case AssetType::Texture:
 		capturePath(textureCache);
 		break;
@@ -5463,6 +5597,174 @@ Shader* ResourceManager::GetShader(const TerraEngine::UUID& id)
 ShaderCollection* ResourceManager::GetShaderCollection(const TerraEngine::UUID& id)
 {
 	return GetResourceById<ShaderCollection>(id, shaderCollectionCache);
+}
+
+
+std::vector<std::uint8_t> ResourceManager::ReadPostProcessAssetBytes(const std::filesystem::path& absolutePath,
+	const std::filesystem::path& capturedRoot, bool mountedAuthority, std::size_t maximumBytes, std::string_view expectedClass) const
+{
+	if(mountedAuthority || ContentMount::Instance().IsMounted()) {
+		const auto relative = absolutePath.lexically_relative(capturedRoot);
+		if(relative.empty() || relative.is_absolute()) return {};
+		for(const auto& part : relative) if(part == "..") return {};
+		const auto logical = ContentMount::NormalizeLogicalPath(relative.generic_string());
+		auto read = ContentMount::Instance().ReadAllChecked(logical, maximumBytes);
+		// Metadata belongs to the same checked read as bytes; a remount cannot
+		// lend a different entry's class. A disappeared mount never falls loose.
+		if(!read.Succeeded() || read.entry.assetClass != expectedClass || read.bytes.empty()) return {};
+		return std::move(read.bytes);
+	}
+	std::ifstream file(absolutePath, std::ios::binary | std::ios::ate);
+	if(!file) return {};
+	const auto length = file.tellg();
+	if(length <= 0 || static_cast<std::uint64_t>(length) > maximumBytes) return {};
+	std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+	file.seekg(0); file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+	if(!file || file.peek() != std::char_traits<char>::eof()) return {};
+	return bytes;
+}
+
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessProfileRequest(
+	const std::filesystem::path& path, bool reload, bool inlineDispatch, const TerraEngine::UUID& expectedIdentity)
+{
+	if (!HasNativeExtensionForAssetType(path, AssetType::PostProcessProfile)) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	std::filesystem::path capturedRoot, resolvedPath;
+	std::uint64_t capturedEpoch = 0u;
+	bool mountedAuthority = false;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		capturedRoot = assetRoot;
+		resolvedPath = (path.is_absolute() ? path : capturedRoot / path).lexically_normal();
+		capturedEpoch = m_RequestEpoch;
+		// A mount present when requested remains the single authority even if it
+		// disappears before the worker runs. A package miss never reads loose data.
+		mountedAuthority = IsExportRuntime() || ContentMount::Instance().IsMounted();
+	}
+	const LoaderFunction<TerraEngine::Resource::PostProcessProfile> loader =
+		[this, capturedRoot, capturedEpoch, mountedAuthority](const std::filesystem::path& absolutePath)
+		-> std::unique_ptr<TerraEngine::Resource::PostProcessProfile> {
+		{
+			std::lock_guard gate(m_PublicationGate);
+			if (capturedEpoch != m_RequestEpoch) return {};
+		}
+		const auto bytes = ReadPostProcessAssetBytes(absolutePath, capturedRoot, mountedAuthority,
+			TerraEngine::Resource::kMaximumPostProcessProfileBytes, "data");
+		const auto decoded = TerraEngine::Resource::DeserializePostProcessProfile(std::as_bytes(std::span<const std::uint8_t>(bytes)));
+		if (!decoded.profile) return {};
+		// FinalizeLoad checks the embedded assetId against the exact registered
+		// request identity under the cache gate. Only then is a shared root visible.
+		return std::make_unique<TerraEngine::Resource::PostProcessProfile>(*decoded.profile);
+	};
+	return LoadOrSchedule<TerraEngine::Resource::PostProcessProfile>(resolvedPath, postProcessProfileCache,
+		loader, true, reload, true, {}, inlineDispatch, expectedIdentity);
+}
+
+TerraEngine::UUID ResourceManager::LoadPostProcessProfile(const std::filesystem::path& path)
+{
+	return LoadPostProcessProfileRequest(path, false, true).get();
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessProfileAsync(const std::filesystem::path& path)
+{
+	return LoadPostProcessProfileRequest(path, false, false);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessProfileAsync(const TerraEngine::UUID& id)
+{
+	const auto path = GetRegisteredAssetPath(id, AssetType::PostProcessProfile);
+	if (id == TerraEngine::EMPTY_UUID || path.empty()) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	return LoadPostProcessProfileRequest(path, false, false, id);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadPostProcessProfileAsync(const std::filesystem::path& path)
+{
+	return LoadPostProcessProfileRequest(path, true, false);
+}
+
+std::shared_ptr<const TerraEngine::Resource::PostProcessProfile>
+ResourceManager::AcquirePostProcessProfileSnapshot(const TerraEngine::UUID& id) const
+{
+	// No request, IO, scene lookup or renderer mutation occurs during view capture.
+	return AcquireOwnedSnapshot(postProcessProfileCache, id);
+}
+
+
+std::optional<std::shared_ptr<const TerraEngine::Resource::PostProcessProfile>>
+ResourceManager::TryAcquirePostProcessProfileSnapshot(const TerraEngine::UUID& id) const
+{
+	std::shared_lock lock(postProcessProfileCache.mutex, std::try_to_lock);
+	if(!lock.owns_lock()) return std::nullopt;
+	const auto registration = postProcessProfileCache.idToPath.find(id);
+	if(registration == postProcessProfileCache.idToPath.end()
+		|| !HasCurrentAcceptedPayload(postProcessProfileCache, registration->second, id))
+		return std::shared_ptr<const TerraEngine::Resource::PostProcessProfile>{};
+	return postProcessProfileCache.resources.at(id);
+}
+
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessEffectRequest(
+	const std::filesystem::path& path, bool reload, bool inlineDispatch, const TerraEngine::UUID& expectedIdentity)
+{
+	if (!HasNativeExtensionForAssetType(path, AssetType::PostProcessEffect)) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	std::filesystem::path capturedRoot, resolvedPath;
+	std::uint64_t capturedEpoch = 0u;
+	bool mountedAuthority = false;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		capturedRoot = assetRoot;
+		resolvedPath = (path.is_absolute() ? path : capturedRoot / path).lexically_normal();
+		capturedEpoch = m_RequestEpoch;
+		// A mount present when requested remains the single authority even if it
+		// disappears before the worker runs. A package miss never reads loose data.
+		mountedAuthority = IsExportRuntime() || ContentMount::Instance().IsMounted();
+	}
+	const LoaderFunction<TerraEngine::Resource::PostProcessEffectAsset> loader =
+		[this, capturedRoot, capturedEpoch, mountedAuthority](const std::filesystem::path& absolutePath)
+		-> std::unique_ptr<TerraEngine::Resource::PostProcessEffectAsset> {
+		{
+			std::lock_guard gate(m_PublicationGate);
+			if (capturedEpoch != m_RequestEpoch) return {};
+		}
+		const auto bytes = ReadPostProcessAssetBytes(absolutePath, capturedRoot, mountedAuthority,
+			TerraEngine::Resource::kMaximumPostProcessEffectBytes, "data");
+		const auto decoded = TerraEngine::Resource::DeserializePostProcessEffectAsset(std::as_bytes(std::span<const std::uint8_t>(bytes)));
+		if (!decoded.effect) return {};
+		// FinalizeLoad checks the embedded assetId against the exact registered
+		// request identity under the cache gate. Only then is a shared root visible.
+		return std::make_unique<TerraEngine::Resource::PostProcessEffectAsset>(*decoded.effect);
+	};
+	return LoadOrSchedule<TerraEngine::Resource::PostProcessEffectAsset>(resolvedPath, postProcessEffectCache,
+		loader, true, reload, true, {}, inlineDispatch, expectedIdentity);
+}
+
+TerraEngine::UUID ResourceManager::LoadPostProcessEffect(const std::filesystem::path& path)
+{
+	return LoadPostProcessEffectRequest(path, false, true).get();
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessEffectAsync(const std::filesystem::path& path)
+{
+	return LoadPostProcessEffectRequest(path, false, false);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessEffectAsync(const TerraEngine::UUID& id)
+{
+	const auto path = GetRegisteredAssetPath(id, AssetType::PostProcessEffect);
+	if (id == TerraEngine::EMPTY_UUID || path.empty()) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	return LoadPostProcessEffectRequest(path, false, false, id);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadPostProcessEffectAsync(const std::filesystem::path& path)
+{
+	return LoadPostProcessEffectRequest(path, true, false);
+}
+
+std::shared_ptr<const TerraEngine::Resource::PostProcessEffectAsset>
+ResourceManager::AcquirePostProcessEffectSnapshot(const TerraEngine::UUID& id) const
+{
+	// No request, IO, scene lookup or renderer mutation occurs during view capture.
+	return AcquireOwnedSnapshot(postProcessEffectCache, id);
 }
 
 

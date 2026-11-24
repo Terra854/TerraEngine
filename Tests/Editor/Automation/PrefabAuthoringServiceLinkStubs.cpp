@@ -14,6 +14,14 @@
 #include <utility>
 #include <vector>
 
+// The thin automation test target has no editor presentation loop.
+void MainEditorSubsystem::StartSceneViewPresentationTrace() {}
+void MainEditorSubsystem::StopSceneViewPresentationTrace() {}
+nlohmann::json MainEditorSubsystem::ReadSceneViewPresentationTrace(std::uint64_t, std::uint32_t) const
+{
+	return {{"enabled", false}, {"available", false}, {"events", nlohmann::json::array()}};
+}
+
 namespace
 {
 	std::optional<TerraEngine::UUID> ReadStubPrefabUuid(const nlohmann::json& objectJson)

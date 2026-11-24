@@ -306,6 +306,9 @@ namespace TerraEngine::Scheduling {
 			{ "Audio playback bindings", "Captured scene/object/component attachment identities.", "Workers receive immutable full-width binding observations." },
 			{ "Audio pending Play reservations", "Admission-ordered engine playback identities awaiting application.", "Controls freeze their predecessor at admission and never rebind later." },
 			{ "SceneMutationQueue", "Deferred structural scene mutation requests.", "Feeds deferred entity/component mutation in Part 3." },
+			{ "PostProcessAuthoringRequestQueue", "Exact camera authoring commands from managed code and the editor.", "Admitted on the protected render capture boundary." },
+			{ "PostProcessAuthoringSceneReceipts", "Typed scene transaction completion for profile assignments.", "Consumed before the next render capture." },
+			{ "PostProcessAuthoringPublications", "Prepared and effective post-process authoring roots per camera view.", "Updated after matching native render recording." },
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
 			{ "RuntimeTimeQueue", "Validated managed time-scale requests awaiting the next frame-start publication.", "Consumed before scheduler workload planning so every system observes one scale." },
 			{ "RuntimeTime", "Immutable scaled and unscaled frame timing published at frame start.", "Read by managed callbacks and every delta-time consumer." },
@@ -364,6 +367,9 @@ namespace TerraEngine::Scheduling {
 			{ "RendererDiagnostics", "Stable renderer and presentation diagnostic snapshots.", "" },
 			{ kResourceRuntimeRenderSettingsQueue, "Copied game-wide rendering overrides submitted by managed gameplay callbacks.", "Consumed only by RenderSystem at its protected frame boundary." },
 			{ kResourceRuntimeRenderSettings, "Effective game-wide runtime rendering settings used to build immutable frame snapshots.", "Published by RenderSystem after draining the managed settings queue." },
+			{ "GraphicsSettingsRequestQueue", "Owned typed graphics settings requests and their target lifetimes.", "The protected renderer admits a copied request for worker validation." },
+			{ "GraphicsSettingsPreparedCandidates", "Immutable validated settings candidates and native resource preparation receipts.", "Workers prepare copied CPU settings. The protected renderer validates native resource receipts before committing." },
+			{ "GraphicsSettingsEffectiveSnapshots", "Immutable game and camera graphics settings used by a sealed view.", "Only protected renderer publication replaces an effective snapshot." },
 			// Transient validation has its own ingress and copied publication. Register
 			// every declared resource so the production startup validator can prove
 			// worker preparation does not read a mutable automation request directly.

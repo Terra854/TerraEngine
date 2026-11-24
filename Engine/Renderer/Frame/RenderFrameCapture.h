@@ -129,6 +129,7 @@ struct RenderSystem::FrameBackendCapture {
 	TerraEngine::Renderer::RenderCaptureViewIdentity pendingDedicatedCaptureIdentity;
 	TerraEngine::Scene::WorldPosition pendingDedicatedCaptureCanonicalOrigin;
 	glm::uvec2 pendingDedicatedCaptureTargetSize{};
+	std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget> pendingDedicatedCaptureGraphicsCamera;
 };
 
 // Owned sky component copy; selection and asset lookup remain protected work.

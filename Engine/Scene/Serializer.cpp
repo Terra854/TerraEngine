@@ -12,6 +12,7 @@
 #include "Components/MeshRenderComponent.h"
 #include "Components/NavigationAgentComponent.h"
 #include "Components/CharacterLocomotionComponent.h"
+#include "PostProcessVolumeComponent.h"
 #include "Components/TerrainComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
@@ -969,6 +970,15 @@ nlohmann::json SerializeObjectRecursive(Object object, bool includeChildren = tr
 				}
 				continue;
 			}
+			if(compName == PostProcessVolumeComponent::kComponentName) {
+				if(const auto* volume = enttRegistry.try_get<PostProcessVolumeComponent>(entity)) {
+					auto guard = volume->acquireReadLock();
+					// Preserve double bounds and all 64 layer bits in the
+					// authored codec, including when the editor saves a prefab.
+					objJson["components"][compName] = PostProcessVolumeComponent::SerializeAuthored(*volume);
+				}
+				continue;
+			}
 			// Collection components need a typed serializer because reflection does
 			// not flatten variants or vectors. Keep this special case at the protected
 			// scene boundary; worker snapshots consume only the decoded typed values.
@@ -1108,6 +1118,14 @@ SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::j
 	settings.ambientOcclusionQuality = json.value("ambientOcclusionQuality", settings.ambientOcclusionQuality);
 
 	return SanitizeSceneRenderSettings(settings);
+}
+
+std::optional<TerraEngine::UUID> Serializer::DeserializeScenePostProcessProfileId(const nlohmann::json& sceneSettings)
+{
+	const auto profile = sceneSettings.find("postProcessProfileId");
+	if(profile == sceneSettings.end()) return TerraEngine::EMPTY_UUID;
+	if(!profile->is_string()) return std::nullopt;
+	return TerraEngine::ParseUUID(profile->get<std::string>());
 }
 
 namespace {
@@ -1470,6 +1488,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	AnimatorComponent::registerType();
 	NavigationAgentComponent::registerType();
 	CharacterLocomotionComponent::registerType();
+	PostProcessVolumeComponent::registerType();
 	AudioSourceComponent::registerType();
 	AudioListenerComponent::registerType();
 	// Scene files can be loaded before an editor window or renderer constructs
@@ -1579,6 +1598,13 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				if(compName == CharacterLocomotionComponent::kComponentName) {
 					CharacterLocomotionComponent* locomotion = enttRegistry.try_get<CharacterLocomotionComponent>(entity);
 					if(locomotion == nullptr || !CharacterLocomotionComponent::DeserializeAuthored(*locomotion, compData)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == PostProcessVolumeComponent::kComponentName) {
+					auto* volume = enttRegistry.try_get<PostProcessVolumeComponent>(entity);
+					if(!volume || !PostProcessVolumeComponent::DeserializeAuthored(*volume, compData)) {
 						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
 					}
 					continue;
@@ -1779,6 +1805,17 @@ TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
 					if (!CharacterLocomotionComponent::DeserializeAuthored(candidate, componentData))
 					{
 						result.reason = "invalid character locomotion authoring at object " + stablePath;
+						return false;
+					}
+				}
+				if(componentName == PostProcessVolumeComponent::kComponentName)
+				{
+					// Reject malformed authored data before publishing any graph
+					// record. The previous scene remains the visible owner.
+					PostProcessVolumeComponent candidate{};
+					if(!PostProcessVolumeComponent::DeserializeAuthored(candidate, componentData))
+					{
+						result.reason = "invalid post-process volume authoring at object " + stablePath;
 						return false;
 					}
 				}

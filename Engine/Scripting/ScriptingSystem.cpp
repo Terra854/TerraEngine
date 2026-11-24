@@ -1693,6 +1693,8 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	// batch. Name that exact scheduler resource so startup validation can prove
 	// the handoff exists instead of relying on an unregistered aggregate label.
 	declaration.reads = { "SceneGraph", "Resources", "RuntimeTime",
+		// Settings queries retain the most recent immutable renderer publication.
+		"GraphicsSettingsEffectiveSnapshots",
 		TerraEngine::Scheduling::kResourceAnimationManagedCallbackBatches,
 		TerraEngine::Scheduling::kResourceLocomotionComponents,
 		TerraEngine::Scheduling::kResourcePhysicsCharacterStatePackets,
@@ -1706,6 +1708,7 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 		TerraEngine::Scheduling::kResourceAnimationRuntimeState,
 		TerraEngine::Scheduling::kResourceAnimationRagdollMappings };
 	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue", "RuntimeTimeQueue",
+		"GraphicsSettingsRequestQueue", TerraEngine::Scheduling::kResourceRuntimeRenderSettingsQueue,
 		TerraEngine::Scheduling::kResourceLocomotionCommands,
 		TerraEngine::Scheduling::kResourceLocomotionAuthority,
 		TerraEngine::Scheduling::kResourceLocomotionObservations,
@@ -1727,7 +1730,7 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, runtime-time request capture, and JSON transaction payload submission.";
+	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, copied graphics settings requests, runtime-time request capture, and JSON transaction payload submission.";
 	declaration.protectedCommit = "Frame-start runtime-time publication, copied animation-event delivery, arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, protected transaction commits, and copied static-collider navigation bridge observation.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;

@@ -82,6 +82,8 @@ namespace TerraEngine::Renderer {
 		std::uint64_t spatialGeneration = 0u;
 		std::uint64_t residencyGeneration = 0u;
 		bool dedicatedCaptureTarget = false;
+		// Physical identity attachment extent used to map from presentation pixels.
+		glm::uvec2 identityExtent{0u};
 
 		[[nodiscard]] bool IsComplete() const noexcept
 		{

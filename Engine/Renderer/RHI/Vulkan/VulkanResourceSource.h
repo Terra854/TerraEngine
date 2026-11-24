@@ -246,6 +246,7 @@ namespace
 			+ mesh.meshMorphDeltaBuffer.size
 			+ mesh.meshDecodeInfoBuffer.size
 			+ mesh.indexBuffer.size
+			+ mesh.indexedCornerBuffer.size
 			+ mesh.meshletBuffer.size
 			+ mesh.meshletSectionBuffer.size
 			+ mesh.meshletBoundsBuffer.size;

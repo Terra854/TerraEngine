@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -405,6 +406,9 @@ namespace {
 		std::uint32_t arrayLengthId = 0;
 		std::vector<std::uint32_t> members;
 		std::uint32_t sampledKind = 0;
+		// Preserved only for explicit fullscreen-image compatibility checks.
+		std::uint32_t imageDimension = UINT32_MAX, imageArrayed = 1, imageMultisampled = 1, imageDepth = 1;
+		std::uint32_t scalarWidth = 0;
 	};
 
 
@@ -421,6 +425,7 @@ namespace {
 		std::uint32_t set = 0;
 		DescriptorBinding binding{};
 		std::string name;
+		bool postProcessCompatible = false;
 	};
 
 
@@ -437,6 +442,7 @@ namespace {
 		std::vector<IoEntry> outputs;
 		std::vector<DescriptorBindingEntry> descriptorBindings;
 		std::vector<PushConstantRange> pushConstants;
+		bool undeclaredResource = false;
 	};
 
 
@@ -524,7 +530,7 @@ namespace {
 					break;
 				case 20: types[words[i + 1]] = { TypeInfo::Kind::Bool, IoComponentType::Bool }; break;
 				case 21: types[words[i + 1]] = { (words[i + 3] == 0) ? TypeInfo::Kind::UInt : TypeInfo::Kind::Int, (words[i + 3] == 0) ? IoComponentType::UInt : IoComponentType::Int }; break;
-				case 22: types[words[i + 1]] = { TypeInfo::Kind::Float, IoComponentType::Float }; break;
+				case 22: types[words[i + 1]] = { TypeInfo::Kind::Float, IoComponentType::Float }; types[words[i + 1]].scalarWidth = words[i + 2]; break;
 				case 23: // Vector
 				{
 					TypeInfo info{}; info.kind = TypeInfo::Kind::Vector; info.typeId = words[i + 2]; info.componentCount = words[i + 3];
@@ -564,7 +570,7 @@ namespace {
 				{
 					TypeInfo info{}; info.kind = TypeInfo::Kind::Image; info.typeId = words[i + 2];
 
-					if (count >= 9) info.sampledKind = words[i + 7];
+					if (count >= 9) { info.sampledKind = words[i + 7]; info.imageDimension = words[i + 3]; info.imageDepth = words[i + 4]; info.imageArrayed = words[i + 5]; info.imageMultisampled = words[i + 6]; }
 					types[words[i + 1]] = info;
 					break;
 				}
@@ -677,6 +683,8 @@ namespace {
 				}
 
 
+				if ((var.storageClass == 0 || var.storageClass == 2 || var.storageClass == 12)
+					&& (!varDeco.binding || !varDeco.descriptorSet)) out.undeclaredResource = true;
 				if (varDeco.binding && varDeco.descriptorSet && (var.storageClass == 2 || var.storageClass == 0 || var.storageClass == 12)) {
 					if (!types.count(var.typeId)) continue;
 					const TypeInfo& ptrType = types[var.typeId];
@@ -691,6 +699,19 @@ namespace {
 					entry.binding.binding = *varDeco.binding;
 					entry.binding.arrayCount = 1;
 					entry.binding.visibility = visibilityMask;
+					// Current native custom inputs are non-array, single-sample float
+					// Texture2D images. Preserve the real SPIR-V shape, not HLSL names.
+					const TypeInfo* image = &pointee;
+					if (pointee.kind == TypeInfo::Kind::SampledImage) {
+						const auto found = types.find(pointee.typeId); image = found == types.end() ? nullptr : &found->second;
+					}
+					if (pointee.kind == TypeInfo::Kind::Sampler) entry.postProcessCompatible = true;
+					else if (image && image->kind == TypeInfo::Kind::Image) {
+						const auto scalar = types.find(image->typeId);
+						entry.postProcessCompatible = image->imageDimension == 1 && image->imageArrayed == 0
+							&& image->imageMultisampled == 0 && image->imageDepth != 1 && image->sampledKind == 1 && scalar != types.end()
+							&& scalar->second.kind == TypeInfo::Kind::Float && scalar->second.scalarWidth == 32;
+					}
 
 
 					if (pointee.kind == TypeInfo::Kind::SampledImage) entry.binding.type = static_cast<uint32_t>(DescriptorType::CombinedImageSampler);
@@ -752,6 +773,57 @@ namespace {
 			[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
 		return path.find("/engine/shaders/") != std::string::npos
 			|| path.find("/editor/shaders/") != std::string::npos;
+	}
+
+	bool ValidatePostProcessContract(const std::filesystem::path& input, ShaderStage stage,
+		const std::vector<std::uint8_t>& bytecode, std::string_view entryPoint, const ReflectionResult& reflected)
+	{
+		auto fail = [&](const char* reason) { std::cerr << "Post-process shader " << reason << ": " << input << "\n"; return false; };
+		if (stage != ShaderStage::Fragment || bytecode.size() < 20 || bytecode.size() % 4)
+			return fail("requires a compiled fragment stage");
+		// Check the actual compiled execution model and selected entry point. A
+		// mismatched --target cannot relabel vertex/compute bytes as a fragment.
+		auto word = [&](std::size_t index) { std::uint32_t value; std::memcpy(&value, bytecode.data() + index * 4, 4); return value; };
+		if (word(0) != kSpirvMagicNumber) return fail("has invalid SPIR-V");
+		bool entryFound = false;
+		for (std::size_t i = 5, count = bytecode.size() / 4; i < count;) {
+			const auto instruction = word(i); const auto words = instruction >> 16; const auto opcode = instruction & 65535u;
+			if (!words || words > count - i) return fail("has malformed instructions");
+			// The current native sampler is a normal filtered sampler. SPIR-V
+			// Depth=2 means unknown for ordinary Texture2D, so reject actual
+			// depth-reference sampling operations rather than guessing from it.
+			if (opcode == 89 || opcode == 90 || opcode == 93 || opcode == 94 || opcode == 97)
+				return fail("uses unsupported comparison sampling");
+			if (opcode == kSpirvOpEntryPoint) {
+				if (words < 4 || word(i + 1) != 4) return fail("contains a non-fragment entry point");
+				const auto* begin = reinterpret_cast<const char*>(bytecode.data() + (i + 3) * 4);
+				const auto* end = reinterpret_cast<const char*>(bytecode.data() + (i + words) * 4);
+				const auto* zero = std::find(begin, end, '\0');
+				if (zero == end || entryFound || std::string_view(begin, zero) != entryPoint) return fail("has ambiguous or mismatched entry points");
+				entryFound = true;
+			} i += words;
+		}
+		if (!entryFound) return fail("has no selected fragment entry point");
+		if (reflected.inputs.size() > 1 || (!reflected.inputs.empty() && (reflected.inputs[0].location != 0
+			|| reflected.inputs[0].componentType != IoComponentType::Float || reflected.inputs[0].componentCount != 2))) return fail("requires only optional float2 UV0 input");
+		if (reflected.outputs.size() != 1 || reflected.outputs[0].location != 0
+			|| reflected.outputs[0].componentType != IoComponentType::Float || reflected.outputs[0].componentCount != 4) return fail("requires exactly float4 color output0");
+		if (reflected.undeclaredResource || reflected.descriptorBindings.size() > 33) return fail("has undeclared or excessive resources");
+		std::set<std::uint32_t> bindings; std::uint32_t samplers = 0;
+		for (const auto& d : reflected.descriptorBindings) {
+			const auto type = static_cast<DescriptorType>(d.binding.type);
+			if (d.set != 0 || !bindings.insert(d.binding.binding).second || d.binding.arrayCount != 1
+				|| d.binding.visibility != StageToMask(ShaderStage::Fragment) || !d.postProcessCompatible
+				|| (type != DescriptorType::SampledImage && type != DescriptorType::CombinedImageSampler && type != DescriptorType::Sampler)) return fail("uses an unsupported set, image shape, array or descriptor access");
+			if (type == DescriptorType::Sampler && ++samplers > 1) return fail("declares more than one separate sampler");
+		}
+		if (reflected.pushConstants.size() > 1) return fail("declares multiple parameter blocks");
+		for (const auto& range : reflected.pushConstants)
+			if (range.offsetBytes != 0 || !range.sizeBytes || range.sizeBytes > 128 || range.sizeBytes % 4
+				|| range.visibility != StageToMask(ShaderStage::Fragment)) return fail("has an unsupported parameter block");
+		// The .teposteffect importer subsequently joins every declared parameter
+		// name/kind/offset and descriptor semantic to this exact immutable binary.
+		return true;
 	}
 
 	bool ValidateAuthoredGeometryContract(
@@ -830,7 +902,7 @@ namespace {
 } // namespace
 
 
-bool CompileShader(const std::filesystem::path& input, const std::filesystem::path& output, const std::string& stage, const std::string& targetProfile, const std::string& entryPoint, const std::filesystem::path& dxcPath) {
+bool CompileShader(const std::filesystem::path& input, const std::filesystem::path& output, const std::string& stage, const std::string& targetProfile, const std::string& entryPoint, const std::filesystem::path& dxcPath, ShaderUse use) {
 	if (!std::filesystem::exists(dxcPath)) {
 		std::cerr << "Cannot find dxc: " << dxcPath << "\n";
 		return false;
@@ -841,6 +913,11 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	if (!stageOpt) {
 		std::cerr << "Unsupported stage: " << stage << "\n";
 		return false;
+	}
+
+	if ((use != ShaderUse::Surface && use != ShaderUse::PostProcess)
+		|| (use == ShaderUse::PostProcess && *stageOpt != ShaderStage::Fragment)) {
+		std::cerr << "Post-process use requires the fragment stage.\n"; return false;
 	}
 
 	const std::filesystem::path tempSpv = std::filesystem::path(output).replace_extension(".spv");
@@ -898,7 +975,9 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 		CleanupTempSpv();
 		return false;
 	}
-	if(!ValidateAuthoredGeometryContract(input, *stageOpt, reflected))
+	if(use == ShaderUse::PostProcess
+		? !ValidatePostProcessContract(input, *stageOpt, bytecode, entryPoint, reflected)
+		: !ValidateAuthoredGeometryContract(input, *stageOpt, reflected))
 	{
 		CleanupTempSpv();
 		return false;

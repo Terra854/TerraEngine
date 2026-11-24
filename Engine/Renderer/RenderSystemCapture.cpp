@@ -378,26 +378,26 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 		result.sourceKind = request.sourceKind;
 		result.sourceName = request.sourceName;
 		result.size = request.targetSize;
-		// Game View captures report the last frame that actually submitted a
-		// Game/runtime view; custom offscreen captures report the frame boundary
-		// that drained the queue. Both values are read-only diagnostics.
-		const std::uint64_t captureFrameId = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
-			&& !request.dedicatedRenderTarget
-			&& latestGameViewFrameId != 0u
+		const bool capturesVisibleView = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			&& !request.dedicatedRenderTarget;
+		const bool capturesSceneView = capturesVisibleView && request.viewType == RenderViewType::Scene;
+		// The visible Scene target owns its own frame and camera. The editor can
+		// still capture that exact output in a project with no Game camera.
+		const auto sceneTarget = capturesSceneView && rhi
+			? rhi->GetConventionalVisibilityIdentityTargetMetadata(RenderViewType::Scene, false)
+			: std::nullopt;
+		const std::uint64_t captureFrameId = sceneTarget ? sceneTarget->frameId
+			: capturesVisibleView && !capturesSceneView && latestGameViewFrameId != 0u
 			? latestGameViewFrameId
 			: activeRenderFrameId;
 		result.frameId = captureFrameId;
 		result.freshness = request.freshness;
 		result.overlaysIncluded = request.includeOverlays;
 
-		// A normal Game View readback needs the last frame published by the dock.
-		// A dedicated request already contains an immutable authored-camera
-		// snapshot, so it remains valid even when the dock has never rendered.
-		if (request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
-			&& !request.dedicatedRenderTarget
-			&& !hasLatestGameViewCamera)
+		if (capturesVisibleView && (capturesSceneView ? !sceneTarget : !hasLatestGameViewCamera))
 		{
-			result.message = "No active Game View camera is available.";
+			result.message = capturesSceneView ? "No completed Scene View is available."
+				: "No active Game View camera is available.";
 			result.errorCategory = "missing_target";
 		}
 		else if (request.format != "image/png")
@@ -652,6 +652,7 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 	TerraEngine::Renderer::RenderCaptureRequest preparedRequest = request;
 	const std::chrono::milliseconds timeout(preparedRequest.timeoutMs > 0u ? preparedRequest.timeoutMs : captureLimits.defaultTimeoutMs);
 	if (preparedRequest.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+		&& preparedRequest.viewType == RenderViewType::Game
 		&& preparedRequest.freshness == "nextFrame"
 		&& !preparedRequest.dedicatedRenderTarget
 		&& hasLatestGameViewCamera)

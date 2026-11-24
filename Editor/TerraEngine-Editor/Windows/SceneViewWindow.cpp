@@ -12,6 +12,7 @@
 #include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RendererRecovery.h"
+#include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/Components/MeshRenderComponent.h"
@@ -910,6 +911,7 @@ nlohmann::json SceneViewWindow::GetAutomationState() const
 	state["largeScene"] = performance.value("largeScene", nlohmann::json::object());
 	state["markers"] = performance.value("markers", nlohmann::json::object());
 	state["stageTimings"] = performance.value("stageTimings", nlohmann::json::array());
+	state["queuedPoseSequence"] = std::to_string(m_QueuedPoseSequence);
 	return state;
 }
 
@@ -935,7 +937,23 @@ bool SceneViewWindow::SetAutomationCamera(
 		return false;
 	}
 	const glm::vec2 euler = CameraEulerFromForward(glm::vec3(localizedFocus.offsetMetres));
-	m_CameraRot = glm::vec3(euler.x, euler.y, 0.0f);
+	const glm::vec3 rotation(euler.x, euler.y, 0.0f);
+	const bool changedPose = !(m_CameraPosition == normalizedPosition.position) || m_CameraRot != rotation;
+	if (changedPose && m_QueuedPoseSequence == std::numeric_limits<std::uint64_t>::max())
+	{
+		outError = "Scene View camera input sequence is exhausted.";
+		return false;
+	}
+	if (changedPose)
+	{
+		++m_QueuedPoseSequence;
+		m_PoseReservationPending = true;
+		m_ReservedPosePosition = normalizedPosition.position;
+		m_ReservedPoseRotation = rotation;
+		m_ReservedPoseOrthographic = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic;
+		m_ReservedPoseFov = m_Fov;
+	}
+	m_CameraRot = rotation;
 	m_CameraPosition = normalizedPosition.position;
 	m_CameraFocus = normalizedFocus.position;
 	m_CameraFocusDistance = std::clamp(glm::length(glm::vec3(localizedFocus.offsetMetres)), 1.0f, 1000.0f);
@@ -1659,6 +1677,98 @@ void SceneViewWindow::DrawSceneToolbar()
 		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::SkinnedBounds, "Skinned bounds");
 		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::VirtualGeometryCoverage, "VG coverage");
 		ImGui::EndPopup();
+	}
+	if (const auto graphics = RenderSystem::Instance().ReadSceneViewGraphicsSettings())
+	{
+		using namespace TerraEngine::Renderer::GraphicsSettings;
+		const auto readMode = [](const std::shared_ptr<const GraphicsSettingsSnapshot>& snapshot) {
+			if (snapshot) for (const auto& value : snapshot->values)
+				if (value.id == GraphicsSettingId::AntiAliasingMode)
+					if (const auto* mode = std::get_if<std::uint32_t>(&value.value)) return *mode;
+			return 0U;
+		};
+		const std::uint32_t effective = readMode(graphics->effective);
+		const std::uint32_t requested = graphics->requested ? readMode(graphics->requested) : effective;
+		constexpr const char* labels[] = {"Off", "FXAA", "SMAA", "CMAA2"};
+		DrawToolbarSeparator();
+		ImGui::SetNextItemWidth(88.0f);
+		const bool open = ImGui::BeginCombo("##scene_spatial_aa", effective < 4U ? labels[effective] : "Unavailable");
+		if (ImGui::IsItemHovered())
+		{
+			m_InteractionContext.hoveredRegion = SceneOverlay::InteractionRegion::Toolbar;
+			ImGui::SetTooltip("Scene View anti-aliasing. Changes become effective after renderer preparation.");
+		}
+		if (open)
+		{
+			m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Toolbar;
+			for (std::uint32_t mode = 0; mode < 4U; ++mode)
+			{
+				const bool supported = (graphics->spatialModeMask & (1U << mode)) != 0;
+				ImGui::BeginDisabled(!supported);
+				if (ImGui::Selectable(labels[mode], requested == mode))
+				{
+					const GraphicsSettingValue patch{GraphicsSettingId::AntiAliasingMode, mode};
+					// The toolbar and automation share the exact typed native queue.
+					const auto receipt = RenderSystem::Instance().QueueSceneViewGraphicsSettings(graphics->lifecycle, graphics->view, graphics->revision, std::span(&patch, 1));
+					m_SceneGraphicsRequestId = receipt.requestId;
+				}
+				ImGui::EndDisabled();
+			}
+			ImGui::EndCombo();
+		}
+		if (requested != effective)
+		{
+			ImGui::SameLine();
+			ImGui::TextDisabled("AA pending");
+		}
+		if (m_SceneGraphicsRequestId != 0)
+		{
+			const auto receipt = RenderSystem::Instance().ReadSceneViewGraphicsSettingsReceipt(m_SceneGraphicsRequestId);
+			if (receipt && (receipt->state == GraphicsRequestState::Rejected || receipt->state == GraphicsRequestState::Cancelled))
+			{
+				ImGui::SameLine(); ImGui::TextDisabled("AA unchanged");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", receipt->detail.c_str());
+			}
+		}
+	}
+	if (auto* vulkan = dynamic_cast<VulkanContext*>(RenderSystem::Instance().GetContext()))
+	{
+		const auto preview = vulkan->GetSceneViewPostProcessPreview();
+		if (preview.postProcessActive)
+		{
+			// The selected output is committed by the renderer. Keep the displayed
+			// label on that effective image while a requested switch is pending.
+			DrawToolbarSeparator();
+			ImGui::SetNextItemWidth(104.0f);
+			bool requestedRaw = preview.requestedRaw;
+			const bool previewOpen = ImGui::BeginCombo("##scene_post_process_preview",
+				preview.effectiveRaw ? "Raw" : "Processed");
+			if (ImGui::IsItemHovered())
+			{
+				m_InteractionContext.hoveredRegion = SceneOverlay::InteractionRegion::Toolbar;
+				ImGui::SetTooltip("Scene View image before or after post-processing.");
+			}
+			if (previewOpen)
+			{
+				m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Toolbar;
+				if (ImGui::Selectable("Processed", !requestedRaw))
+				{
+					requestedRaw = false;
+					vulkan->SetSceneViewRawPreview(false);
+				}
+				if (ImGui::Selectable("Raw", requestedRaw))
+				{
+					requestedRaw = true;
+					vulkan->SetSceneViewRawPreview(true);
+				}
+				ImGui::EndCombo();
+			}
+			if (requestedRaw != preview.effectiveRaw)
+			{
+				ImGui::SameLine();
+				ImGui::TextDisabled("%s pending", requestedRaw ? "Raw" : "Processed");
+			}
+		}
 	}
 	PersistOverlayPreferences();
 }
@@ -2574,8 +2684,26 @@ void SceneViewWindow::OnGui() {
 	TerraEngine::Scene::WorldStreamingSystem::Instance().SubmitObserverInterest(std::move(sceneViewInterest));
 	// Free flight changes the tracked point's depth independently of dolly.
 	const float shadowFocusDistance = ResolveShadowFocusDepth(forward);
+	const glm::vec2 viewportSize(contentSize.x, contentSize.y);
+	const bool orthographic = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic;
+	const bool changedInput = !m_LastSubmittedPoseValid || !(m_LastSubmittedPosePosition == m_CameraPosition)
+		|| m_LastSubmittedView != view || m_LastSubmittedProjection != proj || m_LastSubmittedViewport != viewportSize;
+	if (changedInput)
+	{
+		const bool reservedInputMatches = m_PoseReservationPending && m_ReservedPosePosition == m_CameraPosition
+			&& m_ReservedPoseRotation == m_CameraRot && m_ReservedPoseOrthographic == orthographic && m_ReservedPoseFov == m_Fov
+			&& (!m_LastSubmittedPoseValid || m_LastSubmittedViewport == viewportSize);
+		// A later interactive edit must not inherit an automation pose receipt.
+		if (!reservedInputMatches && m_QueuedPoseSequence != std::numeric_limits<std::uint64_t>::max()) ++m_QueuedPoseSequence;
+		m_LastSubmittedPoseValid = true;
+		m_LastSubmittedPosePosition = m_CameraPosition;
+		m_LastSubmittedView = view;
+		m_LastSubmittedProjection = proj;
+		m_LastSubmittedViewport = viewportSize;
+	}
+	m_PoseReservationPending = false;
 	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPosition,
-		m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic, shadowFocusDistance);
+		orthographic, shadowFocusDistance, m_QueuedPoseSequence);
 	ApplyPrefabContextTintForNextRender();
 
 	// Register the transform gizmo before marker hit testing and object picking.
@@ -3134,7 +3262,15 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	// state applied here on the UI boundary; no worker mutates scene storage.
 	if (m_PendingPick)
 	{
-		if (!m_PendingPick->IsCurrent(currentPick, ImGui::GetTime())
+		// Read attachment metadata only while a click is outstanding. Render scale
+		// can change independently from the image rectangle or camera projection.
+		const auto target = RenderSystem::Instance().GetConventionalVisibilityIdentityPickTarget(RenderViewType::Scene);
+		if (target)
+		{
+			currentPick.identityExtent = target->identityExtent;
+			currentPick.identityTargetGeneration = target->targetGeneration;
+		}
+		if (!target || !m_PendingPick->IsCurrent(currentPick, ImGui::GetTime())
 			|| ImGui::IsMouseClicked(ImGuiMouseButton_Left) || m_IsFlyCamActive
 			|| m_IsSceneViewPanning || m_TerrainBrushCapture || ImGuizmo::IsUsing())
 			m_PendingPick.reset();
@@ -3290,15 +3426,23 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	if (mousePos.x < viewportPos.x || mousePos.x > viewportPos.x + viewportSize.x ||
 		mousePos.y < viewportPos.y || mousePos.y > viewportPos.y + viewportSize.y) return;
 
-	currentPick.pixel = TerraEngine::Editor::SceneViewPickPixel(
-		{mousePos.x - viewportPos.x, mousePos.y - viewportPos.y}, {viewportSize.x, viewportSize.y});
 	// Each click requests fresh proof; never reuse a previous click at this pixel.
 	// Empty space clears selection, while a completed hit is applied next frame.
 	m_Owner->SetSelectedEntity(std::nullopt);
 	currentPick.selection = std::nullopt;
 	currentPick.expiresAt = ImGui::GetTime() + 2.0;
+	const auto target = RenderSystem::Instance().GetConventionalVisibilityIdentityPickTarget(RenderViewType::Scene);
+	if (!target) return;
+	const auto pixel = TerraEngine::Editor::SceneViewPickPixel(
+		{mousePos.x - viewportPos.x, mousePos.y - viewportPos.y},
+		{viewportSize.x, viewportSize.y}, target->identityExtent);
+	if (!pixel) return;
+	currentPick.pixel = *pixel;
+	currentPick.identityExtent = target->identityExtent;
+	currentPick.identityTargetGeneration = target->targetGeneration;
 	const auto requestedFrame = RenderSystem::Instance().GetLatestRenderReferenceFrame(RenderViewType::Scene);
-	if (requestedFrame && RenderSystem::Instance().RequestConventionalVisibilityIdentityPick(RenderViewType::Scene, currentPick.pixel))
+	if (requestedFrame && RenderSystem::Instance().RequestConventionalVisibilityIdentityPick(
+		RenderViewType::Scene, currentPick.pixel, false, *target))
 	{
 		currentPick.referenceFrame = *requestedFrame;
 		m_PendingPick = currentPick;

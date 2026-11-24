@@ -19,6 +19,7 @@ namespace
 		std::string format = "UASTC";
 		bool generateMipmaps = true;
 		TextureFilterType filter = TextureFilterType::Lanczos;
+		TextureStorageFormat storageFormat = TextureStorageFormat::BC7;
 		bool showHelp = false;
 	};
 
@@ -67,7 +68,7 @@ namespace
 
 	void PrintUsage()
 	{
-		std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>] [-q <quality 0-2>] [-f <format>] [--generate-mipmaps|--no-mipmaps] [--filter <Box|Triangle|Lanczos|Kaiser>]\n";
+		std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>] [-q <quality 0-3>] [-f <format>] [--generate-mipmaps|--no-mipmaps] [--filter <Box|Triangle|Lanczos|Kaiser>] [--storage-format <bc7|rgba8>]\n";
 		std::cerr << "Supported texture source formats: " << GetSupportedTextureSourceExtensionsText() << "\n";
 	}
 
@@ -148,6 +149,15 @@ namespace
 			{
 				args.format = argv[++i];
 			}
+			else if(flag == "--storage-format" && i + 1 < argc)
+			{
+				// Keep legacy BC7 behavior unless an importer explicitly requests
+				// the existing linear RGBA8 data-texture transcode target.
+				const std::string_view value = argv[++i];
+				if(value == "rgba8") args.storageFormat = TextureStorageFormat::RGBA8;
+				else if(value == "bc7") args.storageFormat = TextureStorageFormat::BC7;
+				else { std::cerr << "Invalid storage format (expected bc7 or rgba8).\n"; return false; }
+			}
 			else if(flag == "--generate-mipmaps")
 			{
 				args.generateMipmaps = true;
@@ -209,7 +219,7 @@ int main(int argc, char** argv)
 	{
 		EmitProgress(progress, stage, message);
 	};
-	if(CompileTexture(args.input, args.output, args.semantic, args.quality, args.generateMipmaps, args.filter, progressCallback))
+	if(CompileTexture(args.input, args.output, args.semantic, args.quality, args.generateMipmaps, args.filter, progressCallback, args.storageFormat))
 	{
 		std::cout << "Wrote TETF: " << args.output << "\n";
 		return 0;

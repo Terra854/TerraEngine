@@ -85,6 +85,10 @@ namespace TerraEngine::EditorTests
 			context.Expect(data.value("deterministicFallback", false), "Synthetic pixels must disclose deterministic fallback provenance.");
 			context.Expect(!data.value("overlaysIncluded", true), "Black synthetic pixels cannot claim rendered overlays.");
 			context.Expect(!data.contains("backendTarget"), "Synthetic image metadata must not invent a native target identity.");
+			context.ExpectEqual(std::string("legacy"), data.value("imageStage", std::string()), "Default capture must report the delivered legacy stage.");
+			context.ExpectEqual(std::string("legacy"), data.value("sourceEncoding", std::string()), "Legacy provenance comes from the capture result.");
+			context.ExpectEqual(std::string("legacy"), data.value("deliveredEncoding", std::string()), "Legacy delivery retains its conversion contract.");
+			context.ExpectEqual(std::uint64_t{0}, data.value("settingsRevision", std::uint64_t{0}), "Synthetic images cannot invent an applied graphics revision.");
 		}
 
 		void ExpectNoImageContent(TestContext& context, const nlohmann::json& result)
@@ -95,6 +99,81 @@ namespace TerraEngine::EditorTests
 
 	void RegisterEditorMcpCameraImageContractTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.MCP.CameraImages.StageSelectionRejectsInvalidValues", [](TestContext& context) {
+			CameraCaptureSession captureSession;
+			EditorAutomationService service;
+			Object cameraObject = ObjectManager::instance().createObject("Stage Validation Camera");
+			ObjectManager::instance().AddComponent<CameraComponent>(cameraObject);
+			const auto cameraId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(cameraObject));
+			for(const auto& invalid : nlohmann::json::array({nullptr, true, 1, "", "Raw", "postprocess"}))
+			{
+				for(const std::string operation : {"game_view.capture", "scene_view.capture", "camera.capture_object", "camera.capture_custom"})
+				{
+					nlohmann::json arguments = {{"width", 8u}, {"height", 8u}, {"imageStage", invalid}};
+					if(operation == "camera.capture_object") arguments["object"] = cameraId;
+					if(operation == "camera.capture_custom") arguments["camera"] = {{"position", CanonicalPosition(0.0, 0.0, 5.0)}};
+					const auto result = service.HandleTool(operation, arguments, WriteMode::ReadOnly, "invalid-capture-stage");
+					context.Expect(!result.value("ok", true), "Capture must reject an unknown or mistyped imageStage before rendering.");
+					context.ExpectEqual(std::string("validation"), result["error"].value("category", std::string()), "Invalid stage uses the validation category.");
+					ExpectNoImageContent(context, result);
+				}
+			}
+		});
+
+		registry.Add("Editor.MCP.CameraImages.NativeStageCannotBecomeSyntheticFallback", [](TestContext& context) {
+			CameraCaptureSession captureSession;
+			EditorAutomationService service;
+			Object cameraObject = ObjectManager::instance().createObject("Explicit Stage Camera");
+			ObjectManager::instance().AddComponent<CameraComponent>(cameraObject);
+			const auto cameraId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(cameraObject));
+			// A headless renderer can produce legacy black fallback pixels, while
+			// an explicit image stage requires accepted native image provenance.
+			for(const std::string stage : {"raw", "processed", "composited"})
+			{
+				for(const std::string operation : {"game_view.capture", "scene_view.capture", "camera.capture_object", "camera.capture_custom"})
+				{
+					nlohmann::json arguments = {{"width", 8u}, {"height", 8u}, {"imageStage", stage}, {"allowBackendFallback", true}};
+					if(operation == "game_view.capture") arguments["freshness"] = "nextFrame";
+					if(operation == "camera.capture_object") arguments["object"] = cameraId;
+					if(operation == "camera.capture_custom") arguments["camera"] = {{"position", CanonicalPosition(0.0, 0.0, 5.0)}};
+					const auto result = service.HandleTool(operation, arguments, WriteMode::ReadOnly, "native-stage-headless");
+					context.Expect(!result.value("ok", true), "Explicit native stage must fail when the backend cannot supply its image.");
+					ExpectNoImageContent(context, result);
+				}
+			}
+		});
+
+		registry.Add("Editor.MCP.CameraImages.SceneCaptureRequiresNativeCompletedSurface", [](TestContext& context) {
+			CameraCaptureSession captureSession;
+			EditorAutomationService service;
+			const auto nextFrame = service.HandleTool("scene_view.capture",
+				{{"freshness", "nextFrame"}}, WriteMode::ReadOnly, "scene-next-frame-rejected");
+			context.Expect(!nextFrame.value("ok", true), "Visible Scene capture cannot replace its camera with a next-frame authored capture.");
+			context.ExpectEqual(std::string("validation"), nextFrame["error"].value("category", std::string()), "Scene freshness rejection must be a validation error.");
+			ExpectNoImageContent(context, nextFrame);
+			const auto unavailable = service.HandleTool("scene_view.capture", nlohmann::json::object(),
+				WriteMode::ReadOnly, "scene-native-unavailable");
+			context.Expect(!unavailable.value("ok", true), "Scene capture needs an actual visible native surface.");
+			ExpectNoImageContent(context, unavailable);
+			bool discovered = false;
+			for(const auto& entry : service.GetRegistry().Snapshot())
+			{
+				const auto& descriptor = entry.descriptor;
+				if(descriptor.name != "scene_view.capture") continue;
+				discovered = true;
+				context.Expect(descriptor.mutationMode == MutationMode::ReadOnly
+					&& descriptor.permission == AutomationPermission::Read,
+					"Scene capture discovery must retain read-only authorization.");
+				context.Expect(descriptor.inputSchema["properties"]["imageStage"]["enum"]
+					== nlohmann::json::array({"legacy", "raw", "processed", "composited"}),
+					"Discovery must advertise the same optional imageStage choices validated by the handler.");
+				context.Expect(descriptor.inputSchema["properties"]["freshness"]["enum"]
+					== nlohmann::json::array({"latestCompleted"}),
+					"Scene discovery must permit only existing completed output.");
+			}
+			context.Expect(discovered, "The existing diagnostics provider must register native Scene capture.");
+		});
+
 		registry.Add("Editor.MCP.CameraImages.AvailabilityResourceHasContractShape", [](TestContext& context) {
 			CameraCaptureSession captureSession;
 			EditorMcpBridge bridge;

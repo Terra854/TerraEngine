@@ -10,6 +10,33 @@ namespace TerraEngine
 	// Camera is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Camera : Component
 	{
+		private GraphicsSettingsTarget _graphicsTarget;
+		private bool _hasGraphicsTarget;
+
+		internal override void OnObjectAssigned()
+		{
+			_graphicsTarget = default;
+			_hasGraphicsTarget = false;
+		}
+
+		internal GraphicsSettingsTarget GetGraphicsSettingsTarget()
+		{
+			// A camera can be queried before its protected publication is ready.
+			// Retry until the first successful bind, then keep that identity so a
+			// retired managed wrapper cannot silently target a replacement camera.
+			if (Object is null) return new(new NativeGraphicsSettingsTargetPacket { Scope = 1U, Flags = 1U });
+			if (!_hasGraphicsTarget)
+			{
+				if (Graphics.TryResolveGraphicsCamera(Object.ID, out var target))
+				{
+					_graphicsTarget = target;
+					_hasGraphicsTarget = true;
+				}
+				else return new(new NativeGraphicsSettingsTargetPacket { Scope = 1U, Flags = 1U });
+			}
+			return _graphicsTarget;
+		}
+
 		// These wrappers translate the engine's reflected property names into the
 		// shorter camera vocabulary gameplay scripts expect to write by hand.
 		public float FieldOfView

@@ -5,11 +5,14 @@
 // This module serves as the foundational layer for building more complex shader collections and graphics pipelines.
 
 #include "Resource/ResourceManager.h"
+#include "Runtime/ContentMount/ContentMount.h"
+#include "Resource/ShaderPackage.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <exception>
 #include <optional>
 #include <vector>
 
@@ -18,6 +21,22 @@
 
 namespace
 {
+	struct ShaderDecodeDiagnostics
+	{
+		const std::filesystem::path& path;
+		std::string* error = nullptr;
+		bool emitLogs = false;
+		bool Fail(std::string_view message) const
+		{
+			if(error) *error = std::string(message) + (path.empty() ? "" : ": " + path.generic_string());
+			if(emitLogs) TERRAENGINE_LOG(LogLevel::Error, message << ": " << path);
+			return false;
+		}
+		void Warn(std::string_view message) const
+		{
+			if(emitLogs) TERRAENGINE_LOG(LogLevel::Warning, message << ": " << path);
+		}
+	};
 	std::string_view ShaderStringAt(
 		const Shader& shader,
 		std::uint32_t offset)
@@ -34,9 +53,7 @@ namespace
 			: std::string_view{};
 	}
 
-	bool ValidateRuntimeGeometryContract(
-		const Shader& shader,
-		const std::filesystem::path& path)
+	bool ValidateShaderStructure(const Shader& shader, const ShaderDecodeDiagnostics& diagnostics)
 	{
 		if(shader.reflection.descriptorSetCount != shader.header.descriptorSetCount
 			|| shader.reflection.pushConstantCount
@@ -47,9 +64,7 @@ namespace
 				!= static_cast<std::uint32_t>(ShaderBinaryFormat::SPIRV)
 			|| shader.bytecode.empty())
 		{
-			TERRAENGINE_LOG(LogLevel::Error,
-				"Shader reflection is incomplete for " << path);
-			return false;
+			return diagnostics.Fail("Shader reflection or SPIR-V payload is incomplete");
 		}
 		for(const DescriptorSetLayoutDesc& set : shader.descriptorSets)
 		{
@@ -57,11 +72,15 @@ namespace
 				|| set.bindingCount
 					> shader.descriptorBindings.size() - set.firstBinding)
 			{
-				TERRAENGINE_LOG(LogLevel::Error,
-					"Shader descriptor reflection is out of range for " << path);
-				return false;
+				return diagnostics.Fail("Shader descriptor reflection is out of range");
 			}
 		}
+		return true;
+	}
+
+	bool ValidateRuntimeGeometryContract(const Shader& shader, const std::filesystem::path& path)
+	{
+		if(!ValidateShaderStructure(shader, {path, nullptr, true})) return false;
 
 		std::string source(ShaderStringAt(
 			shader, shader.reflection.source.pathOffset));
@@ -163,19 +182,20 @@ namespace
 	// Validate the range described by a file offset and size and return a
 	// pointer into the payload. Returning nullptr signals that the range
 	// would overrun the buffer.
-	const std::uint8_t* ValidateRange(const std::filesystem::path& path, const ShaderHeader& header, const std::uint8_t* payload, std::size_t payloadSize, std::size_t fileOffset, std::size_t requiredSize)
+	const std::uint8_t* ValidateRange(const ShaderDecodeDiagnostics& diagnostics, const ShaderHeader& header, const std::uint8_t* payload, std::size_t payloadSize, std::size_t fileOffset, std::size_t requiredSize)
 	{
 		if (fileOffset < header.headerSize)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF offset underflows header for " << path);
+			diagnostics.Fail("TSPF offset underflows header");
 			return nullptr;
 		}
 
 		const std::size_t relativeOffset = fileOffset - header.headerSize;
 
-		if (relativeOffset + requiredSize > payloadSize)
+		// Subtraction avoids wrapping an attacker-controlled offset/length sum.
+		if (relativeOffset > payloadSize || requiredSize > payloadSize - relativeOffset)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF offset overruns payload for " << path);
+			diagnostics.Fail("TSPF offset overruns payload");
 			return nullptr;
 		}
 
@@ -186,21 +206,20 @@ namespace
 	// header. Unknown trailing data is retained for forward compatibility, but a
 	// record that identifies itself as TSPV must be internally valid.
 	bool LoadShaderProvenance(
-		const std::filesystem::path& path,
-		const std::vector<std::uint8_t>& fileBytes,
+		const ShaderDecodeDiagnostics& diagnostics,
+		std::span<const std::uint8_t> fileBytes,
 		std::size_t knownPayloadEnd,
 		std::optional<ShaderProvenanceBackendVariantExtension>& provenance)
 	{
 		if(knownPayloadEnd >= fileBytes.size())
 		{
-			return knownPayloadEnd == fileBytes.size();
+			return knownPayloadEnd == fileBytes.size() || diagnostics.Fail("TSPF known payload ranges exceed the file");
 		}
 
 		const std::size_t remainingBytes = fileBytes.size() - knownPayloadEnd;
 		if(remainingBytes < sizeof(ShaderProvenanceExtensionHeader))
 		{
-			TERRAENGINE_LOG(LogLevel::Warning,
-				"Ignoring unrecognized trailing TSPF bytes in " << path);
+			diagnostics.Warn("Ignoring unrecognized trailing TSPF bytes");
 			return true;
 		}
 
@@ -209,16 +228,13 @@ namespace
 			sizeof(extensionHeader));
 		if(extensionHeader.magic != kShaderProvenanceExtensionMagicValue)
 		{
-			TERRAENGINE_LOG(LogLevel::Warning,
-				"Ignoring unknown trailing TSPF extension in " << path);
+			diagnostics.Warn("Ignoring unknown trailing TSPF extension");
 			return true;
 		}
 		if(extensionHeader.payloadSize != sizeof(ShaderProvenanceBackendVariantExtension)
 			|| remainingBytes < sizeof(extensionHeader) + extensionHeader.payloadSize)
 		{
-			TERRAENGINE_LOG(LogLevel::Error,
-				"TSPV extension size is invalid in " << path);
-			return false;
+			return diagnostics.Fail("TSPV extension size is invalid");
 		}
 
 		ShaderProvenanceBackendVariantExtension parsed{};
@@ -227,9 +243,7 @@ namespace
 			sizeof(parsed));
 		if(!IsValidShaderProvenanceExtension(parsed))
 		{
-			TERRAENGINE_LOG(LogLevel::Error,
-				"TSPV extension is invalid in " << path);
-			return false;
+			return diagnostics.Fail("TSPV extension is invalid");
 		}
 
 		provenance = parsed;
@@ -238,13 +252,11 @@ namespace
 
 	// Parse a TSPF shader stage container into a runtime-friendly structure.
 
-	std::unique_ptr<Shader> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
+	std::unique_ptr<Shader> DecodeShaderBytes(std::span<const std::uint8_t> fileBytes, const ShaderDecodeDiagnostics& diagnostics)
 	{
-		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
-
 		if (fileBytes.size() < sizeof(ShaderHeader))
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF file is too small: " << resolvedPath);
+			diagnostics.Fail("TSPF file is too small");
 			return nullptr;
 		}
 
@@ -256,21 +268,21 @@ namespace
 
 		if (magic != kShaderMagicValue)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF magic mismatch in " << resolvedPath);
+			diagnostics.Fail("TSPF magic mismatch");
 			return nullptr;
 		}
 
 
 		if (header.version != kShaderCurrentVersion)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF version mismatch in " << resolvedPath << " (expected " << kShaderCurrentVersion << ")");
+			diagnostics.Fail("TSPF version mismatch");
 			return nullptr;
 		}
 
 
-		if (header.headerSize > fileBytes.size())
+		if (header.headerSize < sizeof(ShaderHeader) || header.headerSize > fileBytes.size())
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF headerSize exceeds file length for " << resolvedPath);
+			diagnostics.Fail("TSPF headerSize is invalid for the file");
 			return nullptr;
 		}
 
@@ -286,11 +298,11 @@ namespace
 
 		if (payloadSize == 0)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF payload is empty for " << resolvedPath);
+			diagnostics.Fail("TSPF payload is empty");
 			return nullptr;
 		}
 
-		const std::uint8_t* reflectionPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.reflectionOffset, sizeof(ShaderReflection));
+		const std::uint8_t* reflectionPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.reflectionOffset, sizeof(ShaderReflection));
 
 		if (!reflectionPtr)
 		{
@@ -298,7 +310,7 @@ namespace
 		}
 		std::memcpy(&shader->reflection, reflectionPtr, sizeof(ShaderReflection));
 
-		const std::uint8_t* binaryPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.compiledBinaryOffset, sizeof(CompiledStageBinary));
+		const std::uint8_t* binaryPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.compiledBinaryOffset, sizeof(CompiledStageBinary));
 
 		if (!binaryPtr)
 		{
@@ -310,7 +322,7 @@ namespace
 		if (header.descriptorSetCount > 0)
 		{
 			const std::size_t descriptorSize = header.descriptorSetCount * sizeof(DescriptorSetLayoutDesc);
-			const std::uint8_t* descriptorPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.descriptorSetsOffset, descriptorSize);
+			const std::uint8_t* descriptorPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.descriptorSetsOffset, descriptorSize);
 
 			if (!descriptorPtr)
 			{
@@ -324,7 +336,7 @@ namespace
 		if (header.descriptorBindingCount > 0)
 		{
 			const std::size_t bindingsSize = header.descriptorBindingCount * sizeof(DescriptorBinding);
-			const std::uint8_t* bindingsPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.descriptorBindingsOffset, bindingsSize);
+			const std::uint8_t* bindingsPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.descriptorBindingsOffset, bindingsSize);
 
 			if (!bindingsPtr)
 			{
@@ -338,7 +350,7 @@ namespace
 		if (header.pushConstantCount > 0)
 		{
 			const std::size_t pushConstantSize = header.pushConstantCount * sizeof(PushConstantRange);
-			const std::uint8_t* pushPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.pushConstantsOffset, pushConstantSize);
+			const std::uint8_t* pushPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.pushConstantsOffset, pushConstantSize);
 
 			if (!pushPtr)
 			{
@@ -352,7 +364,7 @@ namespace
 		if (header.stageInputCount > 0)
 		{
 			const std::size_t inputSize = header.stageInputCount * sizeof(StageIOAttribute);
-			const std::uint8_t* inputPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.stageInputsOffset, inputSize);
+			const std::uint8_t* inputPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.stageInputsOffset, inputSize);
 
 			if (!inputPtr)
 			{
@@ -366,7 +378,7 @@ namespace
 		if (header.stageOutputCount > 0)
 		{
 			const std::size_t outputSize = header.stageOutputCount * sizeof(StageIOAttribute);
-			const std::uint8_t* outputPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.stageOutputsOffset, outputSize);
+			const std::uint8_t* outputPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.stageOutputsOffset, outputSize);
 
 			if (!outputPtr)
 			{
@@ -379,7 +391,7 @@ namespace
 
 		if (header.stringTableSize > 0)
 		{
-			const std::uint8_t* stringPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.stringTableOffset, header.stringTableSize);
+			const std::uint8_t* stringPtr = ValidateRange(diagnostics, header, payload, payloadSize, header.stringTableOffset, header.stringTableSize);
 
 			if (!stringPtr)
 			{
@@ -389,7 +401,7 @@ namespace
 			shader->stringTable = std::string_view(reinterpret_cast<const char*>(stringPtr), header.stringTableSize);
 		}
 
-		const std::uint8_t* bytecodePtr = ValidateRange(resolvedPath, header, payload, payloadSize, shader->binary.bytecodeOffset, shader->binary.bytecodeSize);
+		const std::uint8_t* bytecodePtr = ValidateRange(diagnostics, header, payload, payloadSize, shader->binary.bytecodeOffset, shader->binary.bytecodeSize);
 
 		if (!bytecodePtr)
 		{
@@ -399,7 +411,7 @@ namespace
 
 		if (header.compiledBinarySize != shader->binary.bytecodeSize)
 		{
-			TERRAENGINE_LOG(LogLevel::Warning, "TSPF compiledBinarySize does not match bytecodeSize in " << resolvedPath);
+			diagnostics.Warn("TSPF compiledBinarySize does not match bytecodeSize");
 		}
 
 		shader->bytecode = std::span<const std::uint8_t>(bytecodePtr, shader->binary.bytecodeSize);
@@ -425,12 +437,12 @@ namespace
 		IncludeRange(header.stageOutputsOffset,
 			static_cast<std::size_t>(header.stageOutputCount) * sizeof(StageIOAttribute));
 		IncludeRange(header.stringTableOffset, header.stringTableSize);
-		if(!LoadShaderProvenance(resolvedPath, fileBytes, knownPayloadEnd,
+		if(!LoadShaderProvenance(diagnostics, fileBytes, knownPayloadEnd,
 			shader->provenance))
 		{
 			return nullptr;
 		}
-		if(!ValidateRuntimeGeometryContract(*shader, resolvedPath))
+		if(!ValidateShaderStructure(*shader, diagnostics))
 		{
 			return nullptr;
 		}
@@ -438,6 +450,25 @@ namespace
 		return shader;
 	}
 
+
+	// Existing resource loads retain their cache/publication and geometry policy.
+	// Only the shared byte parser is reused by detached package consumers.
+	std::unique_ptr<Shader> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
+	{
+		const auto bytes = manager.ReadFileBytes(resolvedPath);
+		auto shader = DecodeShaderBytes(bytes, {resolvedPath, nullptr, true});
+		if(shader && !ValidateRuntimeGeometryContract(*shader, resolvedPath)) return nullptr;
+		return shader;
+	}
+
+	bool IsPostProcessFragment(const Shader& shader) noexcept
+	{
+		if(shader.reflection.source.stage != static_cast<std::uint32_t>(ShaderStage::Fragment)
+			|| shader.binary.format != static_cast<std::uint32_t>(ShaderBinaryFormat::SPIRV)
+			|| shader.bytecode.size() < 5u * sizeof(std::uint32_t) || shader.bytecode.size() % sizeof(std::uint32_t)) return false;
+		std::uint32_t magic = 0u; std::memcpy(&magic, shader.bytecode.data(), sizeof(magic));
+		return magic == 0x07230203u;
+	}
 
 	bool IsCompiledShaderPath(const std::filesystem::path& path)
 	{
@@ -447,6 +478,122 @@ namespace
 		});
 		return extension == ".tspf";
 	}
+}
+
+
+namespace TerraEngine::Resource
+{
+	std::shared_ptr<const Shader> DecodeShaderPackage(std::span<const std::uint8_t> checkedBytes,
+		const std::filesystem::path& diagnosticPath, std::string& error)
+	{
+		error.clear();
+		const ShaderDecodeDiagnostics diagnostics{diagnosticPath, &error, false};
+		if(checkedBytes.size() > kMaximumShaderPackageBytes)
+		{
+			diagnostics.Fail("TSPF package exceeds the 64 MiB checked-input limit");
+			return {};
+		}
+		try
+		{
+			// This owner has generation0 and no ResourceManager association. Export
+			// and custom registration bind verified metadata identity separately.
+			return std::shared_ptr<const Shader>(DecodeShaderBytes(checkedBytes, diagnostics));
+		}
+		catch(const std::exception& exception)
+		{
+			error = std::string("TSPF package decoding failed: ") + exception.what();
+			return {};
+		}
+	}
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessShaderStageRequest(
+	const TerraEngine::UUID& id, bool reload, bool inlineDispatch)
+{
+	if(id == TerraEngine::EMPTY_UUID) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	std::filesystem::path capturedRoot, path;
+	std::uint64_t capturedEpoch = 0u;
+	bool mountedAuthority = false, qualifiedOwner = false;
+	{
+		std::lock_guard gate(m_PublicationGate);
+		std::shared_lock registrations(postProcessShaderStagePaths.mutex);
+		const auto entry = postProcessShaderStagePaths.idToPath.find(id);
+		if(entry == postProcessShaderStagePaths.idToPath.end()) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		const auto alias = postProcessShaderStagePaths.pathToId.find(entry->second);
+		if(alias == postProcessShaderStagePaths.pathToId.end() || alias->second != id) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		path = entry->second;
+		if(!IsCompiledShaderPath(path)) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		capturedRoot = assetRoot; capturedEpoch = m_RequestEpoch;
+		mountedAuthority = IsExportRuntime() || ContentMount::Instance().IsMounted();
+		std::shared_lock cache(shaderCache.mutex);
+		const auto preferred = shaderCache.idToPath.find(id);
+		const auto mapped = shaderCache.pathToId.find(entry->second);
+		const auto accepted = shaderCache.acceptedPayloads.find(entry->second);
+		const auto owner = shaderCache.resources.find(id);
+		qualifiedOwner = preferred != shaderCache.idToPath.end() && preferred->second == entry->second
+			&& mapped != shaderCache.pathToId.end() && mapped->second == id
+			&& accepted != shaderCache.acceptedPayloads.end() && accepted->second.ownerId == id
+			&& owner != shaderCache.resources.end() && owner->second
+			&& accepted->second.immutableOwner.lock() == owner->second && owner->second->publicationGeneration > 0u
+			&& IsPostProcessFragment(*owner->second);
+	}
+	const LoaderFunction<Shader> loader = [this, capturedRoot, capturedEpoch, mountedAuthority](const std::filesystem::path& absolutePath) {
+		{
+			std::lock_guard gate(m_PublicationGate);
+			if(capturedEpoch != m_RequestEpoch) return std::unique_ptr<Shader>{};
+		}
+		const auto bytes = ReadPostProcessAssetBytes(absolutePath, capturedRoot, mountedAuthority,
+			TerraEngine::Resource::kMaximumShaderPackageBytes, "shader");
+		// Reuse the exact detached structural parser as export, retaining unique
+		// backing storage so every reflected span stays attached to this owner.
+		// Fullscreen stages intentionally bypass only geometry's TerraSurface ABI.
+		auto shader = DecodeShaderBytes(bytes, {absolutePath, nullptr, true});
+		if(!shader || !IsPostProcessFragment(*shader)) return std::unique_ptr<Shader>{};
+		return shader;
+	};
+	// An unqualified old geometry owner must not satisfy a cached fullscreen
+	// request. Genuine publication assigns generation only after this decode.
+	return LoadOrSchedule<Shader>(path, shaderCache, loader, false, reload || !qualifiedOwner,
+		true, {}, inlineDispatch, id);
+}
+
+TerraEngine::UUID ResourceManager::LoadPostProcessShaderStage(const TerraEngine::UUID& id)
+{
+	return LoadPostProcessShaderStageRequest(id, false, true).get();
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadPostProcessShaderStageAsync(const TerraEngine::UUID& id)
+{
+	return LoadPostProcessShaderStageRequest(id, false, false);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::ReloadPostProcessShaderStageAsync(const TerraEngine::UUID& id)
+{
+	return LoadPostProcessShaderStageRequest(id, true, false);
+}
+
+std::shared_ptr<const Shader> ResourceManager::AcquirePostProcessShaderStageSnapshot(const TerraEngine::UUID& id) const
+{
+	// This typed query cannot promote a legacy path-generated shader UUID into
+	// an authored stage asset. Registration and accepted bytes must both agree.
+	std::lock_guard gate(m_PublicationGate);
+	std::shared_lock registrations(postProcessShaderStagePaths.mutex);
+	const auto entry = postProcessShaderStagePaths.idToPath.find(id);
+	if(entry == postProcessShaderStagePaths.idToPath.end()) return {};
+	const auto alias = postProcessShaderStagePaths.pathToId.find(entry->second);
+	if(alias == postProcessShaderStagePaths.pathToId.end() || alias->second != id) return {};
+	std::shared_lock cache(shaderCache.mutex);
+	const auto preferred = shaderCache.idToPath.find(id);
+	const auto mapped = shaderCache.pathToId.find(entry->second);
+	const auto accepted = shaderCache.acceptedPayloads.find(entry->second);
+	const auto owner = shaderCache.resources.find(id);
+	if(preferred == shaderCache.idToPath.end() || preferred->second != entry->second
+		|| mapped == shaderCache.pathToId.end() || mapped->second != id
+		|| accepted == shaderCache.acceptedPayloads.end() || accepted->second.ownerId != id
+		|| owner == shaderCache.resources.end() || !owner->second || accepted->second.immutableOwner.lock() != owner->second
+		|| !owner->second->publicationGeneration
+		|| !IsPostProcessFragment(*owner->second)) return {};
+	return owner->second;
 }
 
 

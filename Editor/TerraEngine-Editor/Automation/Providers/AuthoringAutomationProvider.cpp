@@ -230,6 +230,63 @@ namespace TerraEngine::Editor::Automation
 		result.push_back(Make(resolveHandler, "scene_view.state", "scene_view", {}, {"state"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(MakeSceneViewSettings(resolveHandler, false));
 		result.push_back(MakeSceneViewSettings(resolveHandler, true));
+		// These controls affect only the transient editor Scene output. The native
+		// settings controller owns validation/preparation and the protected publish.
+		const nlohmann::json wide = {{"type", "string"}, {"pattern", "^(0|[1-9][0-9]{0,19})$"}};
+		const nlohmann::json lifecycle = {{"type", "object"}, {"additionalProperties", false},
+			{"required", {"projectGeneration", "playSessionGeneration", "rendererSessionGeneration", "backendResourceGeneration"}},
+			{"properties", {{"projectGeneration", wide}, {"playSessionGeneration", wide}, {"rendererSessionGeneration", wide}, {"backendResourceGeneration", wide}}}};
+		const nlohmann::json view = {{"type", "object"}, {"additionalProperties", false},
+			{"required", {"outputKind", "viewType", "outputId", "lifetimeGeneration"}},
+			{"properties", {{"outputKind", {{"type", "integer"}, {"minimum", 0}}}, {"viewType", {{"type", "integer"}, {"minimum", 0}}},
+				{"outputId", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295ULL}}}, {"lifetimeGeneration", wide}}}};
+		for (const std::string operation : {"get", "request", "receipt"})
+		{
+			const bool write = operation == "request";
+			auto graphics = Make(resolveHandler, "scene_view.graphics." + operation, "scene_view", {},
+				write || operation == "receipt" ? std::vector<std::string>{"receipt"} : std::vector<std::string>{"affectedScope", "lifecycle", "view", "revision", "spatialModeMask", "effective", "requested"},
+				write ? AutomationPermission::ProjectWrite : AutomationPermission::Read, AutomationApprovalPolicy::None, true, true, true);
+			graphics.descriptor.description = "Read or queue typed transient Scene View graphics settings; affected scope is EditorSceneView.";
+			graphics.descriptor.mutationMode = write ? MutationMode::EditorSelection : MutationMode::ReadOnly;
+			graphics.descriptor.execution.preparationReads = {"EditorAutomationSession", "SceneViewGraphicsSnapshot"};
+			graphics.descriptor.execution.commitWrites = write ? std::vector<std::string>{"SceneViewGraphicsRequests", "EditorAutomationSession"} : std::vector<std::string>{};
+			graphics.descriptor.execution.visibilityBoundary = write ? "graphics_settings_protected_publication" : "immutable_snapshot";
+			if (write)
+			{
+				nlohmann::json variants = nlohmann::json::array();
+				for (const std::uint32_t id : {64U, 65U, 67U, 72U, 91U})
+				{
+					const nlohmann::json value = id == 65U ? nlohmann::json{{"type", "number"}}
+						: nlohmann::json{{"type", "integer"}, {"minimum", 0}, {"maximum", id == 64U ? 3 : (id == 91U ? 1 : 2)}};
+					variants.push_back({{"type", "object"}, {"additionalProperties", false}, {"required", {"id", "value"}},
+						{"properties", {{"id", {{"const", id}}}, {"value", value}}}});
+				}
+				graphics.descriptor.inputSchema["required"] = {"lifecycle", "view", "baseRevision", "values"};
+				graphics.descriptor.inputSchema["properties"] = {{"lifecycle", lifecycle}, {"view", view}, {"baseRevision", wide},
+					{"values", {{"type", "array"}, {"minItems", 1}, {"maxItems", 5}, {"items", {{"oneOf", std::move(variants)}}}}}};
+			}
+			else if (operation == "receipt")
+			{
+				graphics.descriptor.inputSchema["required"] = {"graphicsRequestId"};
+				graphics.descriptor.inputSchema["properties"] = {{"graphicsRequestId", wide}};
+			}
+			result.push_back(std::move(graphics));
+		}
+
+		for (const std::string operation : {"start", "stop", "get"})
+		{
+			const bool read = operation == "get";
+			auto trace = Make(resolveHandler, "scene_view.trace." + operation, "scene_view", {}, {"trace"},
+				read ? AutomationPermission::Read : AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true);
+			trace.descriptor.description = "Opt-in bounded Scene descriptor/accepted UI submit/actual WSI provenance; no display-scanout claim.";
+			trace.descriptor.mutationMode = read ? MutationMode::ReadOnly : MutationMode::EditorSelection;
+			trace.descriptor.execution.preparationReads = {"EditorAutomationSession", "SceneViewPresentationTrace"};
+			trace.descriptor.execution.commitWrites = read ? std::vector<std::string>{} : std::vector<std::string>{"SceneViewPresentationTrace"};
+			trace.descriptor.execution.visibilityBoundary = read ? "protected_trace_snapshot" : "editor_protected_frame";
+			if (read)
+				trace.descriptor.inputSchema["properties"] = {{"afterSequence", wide}, {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}}}};
+			result.push_back(std::move(trace));
+		}
 		auto setSceneCamera = Make(resolveHandler, "scene_view.camera.set", "scene_view", {"position", "focus"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true);
 		// This is deliberately a breaking canonical-only command: accepting a
 		// three-number world vector would discard the cell component of a far-away

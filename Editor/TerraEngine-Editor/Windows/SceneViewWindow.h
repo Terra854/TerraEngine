@@ -44,6 +44,7 @@ public:
 	// These methods run on the editor's protected update boundary, so they may
 	// safely share the same state and validation rules as the visible toolbar.
 	[[nodiscard]] nlohmann::json GetAutomationState() const;
+	[[nodiscard]] std::uint64_t GetQueuedPoseSequence() const noexcept { return m_QueuedPoseSequence; }
 	// Project workspace persistence captures the viewport camera independently of
 	// scene objects. Restore validates the whole record before changing live state.
 	[[nodiscard]] nlohmann::json SerializeWorkspaceState() const;
@@ -129,6 +130,22 @@ private:
 	TerraEngine::Scene::WorldPosition m_CameraPosition{{}, {0.0, 5.0, 10.0}};
 	glm::vec3 m_CameraRot{ -0.35f, 0.0f, 0.0f }; // ~20 degrees down in radians
 	float m_Fov = 60.0f;
+	// This is a queued camera-input sequence, not evidence of rendered pixels.
+	// Automation reserves a sequence; the viewport forwards it only for the same
+	// final pose. Navigation/projection/extent changes receive their own sequence.
+	std::uint64_t m_QueuedPoseSequence = 0;
+	bool m_PoseReservationPending = false;
+	TerraEngine::Scene::WorldPosition m_ReservedPosePosition{};
+	glm::vec3 m_ReservedPoseRotation{0.0f};
+	bool m_ReservedPoseOrthographic = false;
+	float m_ReservedPoseFov = 0.0f;
+	bool m_LastSubmittedPoseValid = false;
+	TerraEngine::Scene::WorldPosition m_LastSubmittedPosePosition{};
+	glm::mat4 m_LastSubmittedView{1.0f};
+	glm::mat4 m_LastSubmittedProjection{1.0f};
+	glm::vec2 m_LastSubmittedViewport{0.0f};
+	std::uint64_t m_SceneGraphicsRequestId = 0;
+
 	float m_CameraSpeed = 10.0f;
 	float m_MouseSensitivity = 0.1f;
 	bool m_IsFlyCamActive = false;

@@ -81,6 +81,9 @@ public:
 	// Scenes may omit the sceneSettings block entirely, so deserialization falls
 	// back to sanitized defaults for the remaining non-sky settings.
 	static SceneRenderSettings DeserializeSceneRenderSettings(const nlohmann::json& json);
+	// The scene's optional authored profile remains separate from legacy
+	// renderer values so scalar C# scene settings cannot clear its asset link.
+	static std::optional<TerraEngine::UUID> DeserializeScenePostProcessProfileId(const nlohmann::json& sceneSettings);
 
 	// Navigation profiles and limits are durable project values rather than live
 	// provider state. Deserializers build and validate a detached candidate first;

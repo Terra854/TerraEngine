@@ -5,6 +5,7 @@
 
 #include "Components/Transform.h"
 #include "Components/AudioSourceComponent.h"
+#include "Components/CameraComponent.h"
 #include "Components/ScriptComponent.h"
 #include "Components/AnimatorComponent.h"
 #include "Components/NavigationAgentComponent.h"
@@ -1909,6 +1910,10 @@ namespace TerraEngine::Scene {
 						// A value edit, including a same-value authored edit, supersedes
 						// runtime settings without replacing the source or managed facade.
 						objects.notifyObjectComponentValueChanged(*target, AudioSourceComponent::kComponentName);
+					} else if (operation.componentName == CameraComponent::kComponentName && operation.propertyName == "PostProcessProfileId") {
+						// Assigning a profile changes authored values while preserving
+						// the running camera and its exact managed/render view binding.
+						objects.notifyObjectComponentValueChanged(*target, CameraComponent::kComponentName);
 					} else if (operation.componentName != Transform::kComponentName) {
 						// The reflected Transform setter already publishes one
 						// spatial revision. Avoid double-incrementing it while

@@ -296,6 +296,17 @@ namespace TerraEngine::Tests {
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterRenderInstanceAbiTests(TestRegistry& registry);
 	void RegisterRendererEfficiencyContractTests(TestRegistry& registry);
+	void RegisterPostProcessFoundationTests(TestRegistry& registry);
+	void RegisterPostProcessColorTests(TestRegistry& registry);
+	void RegisterPostProcessAATests(TestRegistry& registry);
+	void RegisterVulkanIndexedGeometryTests(TestRegistry& registry);
+	void RegisterPostProcessHistoryTests(TestRegistry& registry);
+	void RegisterPostProcessTemporalTests(TestRegistry& registry);
+	void RegisterPostProcessLightingTests(TestRegistry& registry);
+	void RegisterPostProcessAuthoringTests(TestRegistry& registry);
+	void RegisterPostProcessCameraTests(TestRegistry& registry);
+	void RegisterPostProcessCameraAuthoringTransactionTests(TestRegistry& registry);
+	void RegisterPostProcessingStressTests(TestRegistry& registry);
 	void RegisterRendererEfficiencyEvidenceTests(TestRegistry& registry);
 	void RegisterLightingUploadPlanTests(TestRegistry& registry);
 	void RegisterLightingUploadOwnershipTests(TestRegistry& registry);
@@ -461,6 +472,7 @@ namespace TerraEngine::Tests {
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
 	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
 	void RegisterScriptingComponentAccessTests(TestRegistry& registry);
+	void RegisterGraphicsSettingsContractTests(TestRegistry& registry);
 	void RegisterAnimationAbiTests(TestRegistry& registry);
 	void RegisterAnimationManagedLifecycleTests(TestRegistry& registry);
 	void RegisterAnimationManagedParityTests(TestRegistry& registry);
@@ -781,6 +793,17 @@ int main() {
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterRenderInstanceAbiTests(registry);
 	TerraEngine::Tests::RegisterRendererEfficiencyContractTests(registry);
+	TerraEngine::Tests::RegisterPostProcessFoundationTests(registry);
+	TerraEngine::Tests::RegisterPostProcessColorTests(registry);
+	TerraEngine::Tests::RegisterPostProcessAATests(registry);
+	TerraEngine::Tests::RegisterVulkanIndexedGeometryTests(registry);
+	TerraEngine::Tests::RegisterPostProcessHistoryTests(registry);
+	TerraEngine::Tests::RegisterPostProcessTemporalTests(registry);
+	TerraEngine::Tests::RegisterPostProcessLightingTests(registry);
+	TerraEngine::Tests::RegisterPostProcessAuthoringTests(registry);
+	TerraEngine::Tests::RegisterPostProcessCameraTests(registry);
+	TerraEngine::Tests::RegisterPostProcessCameraAuthoringTransactionTests(registry);
+	TerraEngine::Tests::RegisterPostProcessingStressTests(registry);
 	TerraEngine::Tests::RegisterRendererEfficiencyEvidenceTests(registry);
 	// These cases prove payload and physical-owner safety before GPU acceptance.
 	TerraEngine::Tests::RegisterLightingUploadPlanTests(registry);
@@ -948,6 +971,7 @@ int main() {
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);
 	TerraEngine::Tests::RegisterScriptingComponentAccessTests(registry);
+	TerraEngine::Tests::RegisterGraphicsSettingsContractTests(registry);
 	TerraEngine::Tests::RegisterAnimationAbiTests(registry);
 	TerraEngine::Tests::RegisterAnimationManagedLifecycleTests(registry);
 	TerraEngine::Tests::RegisterAnimationManagedParityTests(registry);

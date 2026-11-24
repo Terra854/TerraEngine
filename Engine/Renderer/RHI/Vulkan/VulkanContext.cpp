@@ -13,6 +13,7 @@
 #include "Core/Logger/Logger.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsCatalog.h"
 #define VMA_LEAK_LOG_FORMAT(format, ...) do { \
 		char _vma_buf[1024]; \
 		std::snprintf(_vma_buf, sizeof(_vma_buf), (format), __VA_ARGS__); \
@@ -22,6 +23,9 @@
 #include "VulkanCommonIncludes.h"
 #include "VulkanContextImpl.h"
 #include "VulkanFrameDiagnostics.h"
+#include "VulkanPostProcessPasses.h"
+#include "Renderer/GraphicsSettings/PostProcessEffectSettings.h"
+#include "VulkanPostProcessCmaa2.h"
 #include "VulkanReadbackConversion.h"
 
 #include "VulkanRendererWorkCache.h"
@@ -794,6 +798,271 @@ void VulkanContext::SetValidationLayersRequested(bool enabled)
 	impl->validationLayersEnabled = enabled;
 }
 
+TerraEngine::Renderer::GraphicsSettings::GraphicsCatalogCapabilities VulkanContext::ReadGraphicsCatalogCapabilities(
+	bool runtimeViews) const
+{
+	std::lock_guard lock(impl->deviceStateMutex);
+	TerraEngine::Renderer::GraphicsSettings::GraphicsCatalogCapabilities result;
+	if(!impl->initialized) return result;
+	result.vrsSupported = runtimeViews && impl->vrsFeatures.attachmentFragmentShadingRate
+		&& impl->vrsFeatures.pipelineFragmentShadingRate;
+	result.validationSupported = impl->CheckValidationLayerSupport();
+	result.maxAnisotropy = static_cast<std::uint32_t>(impl->maximumSamplerAnisotropy);
+	result.maxUploadedLights = Impl::MAX_GLOBAL_LIGHTS;
+	if (!impl->UsesVrsAttachment() && !impl->deviceLost)
+	{
+		if (impl->indexedRasterShaderGeneration != impl->backendResourceGeneration)
+		{
+			// An install can expose the explicit route only when it contains its
+			// typed shader. Exact view resources are still prepared at activation.
+			impl->indexedRasterShaderInstalled = false;
+			try
+			{
+				auto& resources = ResourceManager::Instance();
+				const auto bytes = resources.ReadFileBytes(resources.ResolveEngineAssetPath("Shaders/DefaultIndexed.vert.tspf"));
+				impl->indexedRasterShaderInstalled = bytes.size() >= 4u && std::memcmp(bytes.data(), "TSPF", 4u) == 0;
+			}
+			catch (const std::exception&) { }
+			impl->indexedRasterShaderGeneration = impl->backendResourceGeneration;
+		}
+		result.indexedRasterSupported = impl->indexedRasterShaderInstalled;
+	}
+	VkPhysicalDeviceProperties properties{};
+	vkGetPhysicalDeviceProperties(impl->physicalDevice, &properties);
+	result.maxShadowResolution = properties.limits.maxImageDimension2D;
+	// Advertise only the same format usage the lazy color target factory will
+	// request. The protected rebuild still checks actual extents and pipelines.
+	const auto format = impl->offscreenColorFormat != VK_FORMAT_UNDEFINED
+		? impl->offscreenColorFormat
+		: TerraEngine::Renderer::Vulkan::SelectOffscreenCameraColorFormat(impl->physicalDevice);
+	if(format != VK_FORMAT_R16G16B16A16_SFLOAT && format != VK_FORMAT_R32G32B32A32_SFLOAT)
+		return result;
+	VkFormatProperties formatProperties{};
+	vkGetPhysicalDeviceFormatProperties(impl->physicalDevice, format, &formatProperties);
+	TerraEngine::Renderer::Vulkan::PostProcessFormatSupport color;
+	color.optimalFeatures = formatProperties.optimalTilingFeatures;
+	constexpr auto usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+		| VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	color.imageQueryResult = vkGetPhysicalDeviceImageFormatProperties(impl->physicalDevice, format,
+		VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0, &color.imageProperties);
+	result.postProcessColorSupported = properties.limits.maxComputeWorkGroupInvocations >= 256u
+		&& properties.limits.maxComputeWorkGroupSize[0] >= 16u && properties.limits.maxComputeWorkGroupSize[1] >= 16u
+		&& TerraEngine::Renderer::Vulkan::QualifiesPostProcessFormat(color, {1, 1}, usage);
+	result.spatialAAModeMask = ReadSpatialAAModeMask({1u, 1u});
+	result.msaa4Supported = result.indexedRasterSupported && result.postProcessColorSupported
+		&& impl->SupportsIndexedMsaa4(format);
+	if(result.indexedRasterSupported && result.postProcessColorSupported)
+	{
+		if(impl->temporalShaderGeneration != impl->backendResourceGeneration)
+		{
+			impl->temporalShadersReady = false;
+			try
+			{
+				auto& resources = ResourceManager::Instance();
+				const auto available = [&](const char* name) {
+					const auto bytes = resources.ReadFileBytes(resources.ResolveEngineAssetPath(std::string("Shaders/PostProcess/") + name));
+					std::uint32_t signature = 0u;
+					if(bytes.size() < 5u * sizeof(signature) || bytes.size() % sizeof(signature) != 0u) return false;
+					std::memcpy(&signature, bytes.data(), sizeof(signature));
+					return signature == 0x07230203u;
+				};
+				const bool wide = format == VK_FORMAT_R32G32B32A32_SFLOAT;
+				impl->temporalShadersReady = available("IndexedMotionTotal.vert.spv") && available("IndexedMotionTotal.frag.spv")
+					&& available(wide ? "TemporalResolve32.comp.spv" : "TemporalResolve16.comp.spv")
+					&& available(wide ? "TemporalSharpen32.comp.spv" : "TemporalSharpen16.comp.spv");
+			}
+			catch(const std::exception&) {}
+			impl->temporalShaderGeneration = impl->backendResourceGeneration;
+		}
+		// Only the actual single-sample indexed variant is currently admitted.
+		// Candidate preparation still proves every exact surface and pipeline.
+		const auto depth = impl->FindDepthFormat();
+		result.taaSupported = impl->temporalShadersReady && (depth == VK_FORMAT_D32_SFLOAT || depth == VK_FORMAT_D16_UNORM);
+		result.temporalUpscalingSupported = result.taaSupported;
+		result.temporalSharpeningSupported = result.temporalUpscalingSupported;
+	}
+	if(result.postProcessColorSupported && !impl->deviceLost)
+	{
+		if(impl->lensShaderGeneration != impl->backendResourceGeneration)
+		{
+			using Effect = TerraEngine::Renderer::GraphicsSettings::PostProcessEffectCapability;
+			impl->installedCameraEffectMask = 0u;
+			try
+			{
+				auto& resources = ResourceManager::Instance();
+				const auto available = [&](const char* path) {
+					const auto bytes = resources.ReadFileBytes(resources.ResolveEngineAssetPath(path));
+					if(bytes.size() < 5u * sizeof(std::uint32_t) || bytes.size() % sizeof(std::uint32_t)) return false;
+					std::uint32_t signature = 0;
+					std::memcpy(&signature, bytes.data(), sizeof(signature));
+					return signature == 0x07230203u;
+				};
+				const auto qualify = [&](Effect effect, bool ready) {
+					if(ready) impl->installedCameraEffectMask |= static_cast<std::uint32_t>(effect);
+				};
+				// These are installed/device preconditions. Each enable request
+				// also validates the actual image owners before publication.
+				qualify(Effect::Presentation, available("Shaders/PostProcess/LensPresentation.frag.spv"));
+				const auto depth = impl->FindDepthFormat();
+				VkFormatProperties depthFeatures{};
+				vkGetPhysicalDeviceFormatProperties(impl->physicalDevice, depth, &depthFeatures);
+				qualify(Effect::Atmosphere, (depth == VK_FORMAT_D32_SFLOAT || depth == VK_FORMAT_D16_UNORM)
+					&& (depthFeatures.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
+					&& available("Shaders/PostProcess/VolumetricFog.frag.spv"));
+				qualify(Effect::OutputDithering, available("Shaders/PostProcess/OutputDither.frag.spv"));
+				const auto format = impl->offscreenColorFormat == VK_FORMAT_UNDEFINED
+					? TerraEngine::Renderer::Vulkan::SelectOffscreenCameraColorFormat(impl->physicalDevice) : impl->offscreenColorFormat;
+				qualify(Effect::DepthOfField, (depth == VK_FORMAT_D32_SFLOAT || depth == VK_FORMAT_D16_UNORM)
+					&& available("Shaders/PostProcess/LinearViewDepth.comp.spv")
+					&& available(format == VK_FORMAT_R32G32B32A32_SFLOAT
+						? "Shaders/PostProcess/DepthOfField32.comp.spv" : "Shaders/PostProcess/DepthOfField16.comp.spv"));
+				qualify(Effect::LensDirt, available("Shaders/PostProcess/LensDirt.frag.spv"));
+				qualify(Effect::LensFlare, available("Shaders/PostProcess/LensFlare.frag.spv"));
+				qualify(Effect::MotionBlur, result.taaSupported
+					&& available("Shaders/PostProcess/IndexedMotionCamera.vert.spv")
+					&& available("Shaders/PostProcess/IndexedMotionCamera.frag.spv")
+					&& available("Shaders/PostProcess/MotionBlurInputs.comp.spv")
+					&& available(format == VK_FORMAT_R32G32B32A32_SFLOAT
+						? "Shaders/PostProcess/MotionBlur32.comp.spv" : "Shaders/PostProcess/MotionBlur16.comp.spv"));
+				VkPhysicalDeviceProperties properties{};
+				vkGetPhysicalDeviceProperties(impl->physicalDevice, &properties);
+				const bool screenMrt = result.indexedRasterSupported && properties.limits.maxColorAttachments >= 7u
+					&& properties.limits.maxFragmentOutputAttachments >= 7u
+					&& (depth == VK_FORMAT_D32_SFLOAT || depth == VK_FORMAT_D16_UNORM)
+					&& available("Shaders/DefaultScreenSpace.frag.spv");
+				const bool fp32 = format == VK_FORMAT_R32G32B32A32_SFLOAT;
+				qualify(Effect::GTAO, screenMrt && available("Shaders/DefaultScreenSpaceAo.frag.spv")
+					&& available("Shaders/PostProcess/GTAOView.comp.spv")
+					&& available("Shaders/PostProcess/GTAOBlurView.comp.spv")
+					&& available(fp32 ? "Shaders/PostProcess/ScreenSpaceComposite-Mask4-32.comp.spv"
+						: "Shaders/PostProcess/ScreenSpaceComposite-Mask4-16.comp.spv"));
+				qualify(Effect::SSR, screenMrt && available(fp32 ? "Shaders/PostProcess/ScreenSpaceReflections32.comp.spv"
+						: "Shaders/PostProcess/ScreenSpaceReflections16.comp.spv")
+					&& available(fp32 ? "Shaders/PostProcess/ScreenSpaceComposite-Mask1-32.comp.spv"
+						: "Shaders/PostProcess/ScreenSpaceComposite-Mask1-16.comp.spv"));
+				qualify(Effect::SSGI, screenMrt && available(fp32 ? "Shaders/PostProcess/ScreenSpaceIndirect32.comp.spv"
+						: "Shaders/PostProcess/ScreenSpaceIndirect16.comp.spv")
+					&& available(fp32 ? "Shaders/PostProcess/ScreenSpaceComposite-Mask2-32.comp.spv"
+						: "Shaders/PostProcess/ScreenSpaceComposite-Mask2-16.comp.spv"));
+			}
+			catch(const std::exception&) {}
+			impl->lensShaderGeneration = impl->backendResourceGeneration;
+		}
+		result.postProcessEffectMask = impl->installedCameraEffectMask;
+		// Swapchains can change format independently of the installed shaders.
+		if(!TerraEngine::Renderer::Vulkan::SupportsOutputDithering(impl->swapchainImageFormat))
+			result.postProcessEffectMask &= ~static_cast<std::uint32_t>(TerraEngine::Renderer::GraphicsSettings::PostProcessEffectCapability::OutputDithering);
+	}
+	return result;
+}
+
+std::uint32_t VulkanContext::ReadSpatialAAModeMask(glm::uvec2 extent) const
+{
+	using namespace TerraEngine::Renderer::Vulkan;
+	using TerraEngine::Renderer::GraphicsSettings::GraphicsAntiAliasingMode;
+	constexpr auto bit = [](GraphicsAntiAliasingMode mode) { return 1u << static_cast<std::uint32_t>(mode); };
+	constexpr auto off = bit(GraphicsAntiAliasingMode::Off);
+	if(!impl) return off;
+	std::lock_guard lock(impl->deviceStateMutex);
+	if(!impl->initialized || impl->deviceLost || extent.x == 0 || extent.y == 0) return off;
+	const auto physical = impl->physicalDevice;
+	const auto format = impl->offscreenColorFormat == VK_FORMAT_UNDEFINED
+		? SelectOffscreenCameraColorFormat(physical) : impl->offscreenColorFormat;
+	if(format != VK_FORMAT_R16G16B16A16_SFLOAT && format != VK_FORMAT_R32G32B32A32_SFLOAT) return off;
+	if(impl->spatialAAShaderGeneration != impl->backendResourceGeneration)
+	{
+		impl->spatialAAExtentModes.clear();
+		impl->spatialAAInstalledModes = off;
+		// Use the installed/package-aware reader. A physical device with an
+		// incomplete shader install cannot advertise the affected mode.
+		try
+		{
+			auto& resources = ResourceManager::Instance();
+			const auto hasModule = [&](const std::string& relative) {
+				const auto bytes = resources.ReadFileBytes(resources.ResolveEngineAssetPath("Shaders/PostProcess/" + relative));
+				std::uint32_t magic = 0;
+				if(bytes.size() < 5u * sizeof(magic) || bytes.size() % sizeof(magic) != 0u) return false;
+				std::memcpy(&magic, bytes.data(), sizeof(magic));
+				return magic == 0x07230203u;
+			};
+			if(hasModule("PostProcessFullscreen.vert.spv") && hasModule("PostProcessExposure.frag.spv"))
+			{
+				if(hasModule("FXAA.frag.spv")) impl->spatialAAInstalledModes |= bit(GraphicsAntiAliasingMode::FXAA);
+				if(hasModule("SMAAEdges.frag.spv") && hasModule("SMAAWeights.frag.spv") && hasModule("SMAAResolve.frag.spv"))
+					impl->spatialAAInstalledModes |= bit(GraphicsAntiAliasingMode::SMAA);
+				const auto suffix = format == VK_FORMAT_R16G16B16A16_SFLOAT ? "16.comp.spv" : "32.comp.spv";
+				constexpr std::array entries{"DetectEdges", "CountRows", "PrefixRows", "CompactRows", "Classify", "Resolve"};
+				if(std::all_of(entries.begin(), entries.end(), [&](const char* entry) {
+					return hasModule(std::string("CMAA2") + entry + suffix);
+				})) impl->spatialAAInstalledModes |= bit(GraphicsAntiAliasingMode::CMAA2);
+			}
+		}
+		catch(const std::exception&) { impl->spatialAAInstalledModes = off; }
+		impl->spatialAAShaderGeneration = impl->backendResourceGeneration;
+	}
+	const auto cached = std::find_if(impl->spatialAAExtentModes.begin(), impl->spatialAAExtentModes.end(),
+		[&](const auto& item) { return item.first == extent; });
+	if(cached != impl->spatialAAExtentModes.end()) return cached->second;
+	const VkExtent2D native{extent.x, extent.y};
+	const auto hasImage = [&](VkFormat imageFormat, VkImageUsageFlags usage, VkFormatFeatureFlags additional = 0u) {
+		VkFormatProperties features{};
+		vkGetPhysicalDeviceFormatProperties(physical, imageFormat, &features);
+		PostProcessFormatSupport support;
+		support.optimalFeatures = features.optimalTilingFeatures;
+		support.imageQueryResult = vkGetPhysicalDeviceImageFormatProperties(physical, imageFormat, VK_IMAGE_TYPE_2D,
+			VK_IMAGE_TILING_OPTIMAL, usage, 0, &support.imageProperties);
+		return (support.optimalFeatures & additional) == additional && QualifiesPostProcessFormat(support, native, usage);
+	};
+	constexpr auto colorUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	constexpr auto chainUsage = colorUsage | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	std::uint32_t modes = off;
+	VkPhysicalDeviceProperties deviceProperties{};
+	vkGetPhysicalDeviceProperties(physical, &deviceProperties);
+	const auto& limits = deviceProperties.limits;
+	if(extent.x <= limits.maxFramebufferWidth && extent.y <= limits.maxFramebufferHeight
+		&& extent.x <= limits.maxViewportDimensions[0] && extent.y <= limits.maxViewportDimensions[1]
+		&& limits.maxPushConstantsSize >= 32u && hasImage(format, chainUsage))
+	{
+		if(hasImage(format, chainUsage, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+			modes |= bit(GraphicsAntiAliasingMode::FXAA);
+		if(hasImage(VK_FORMAT_R8G8_UNORM, colorUsage) && hasImage(VK_FORMAT_R16G16B16A16_SFLOAT, colorUsage))
+			modes |= bit(GraphicsAntiAliasingMode::SMAA);
+		if((impl->spatialAAInstalledModes & bit(GraphicsAntiAliasingMode::CMAA2)) && SupportsCmaa2View(physical, native, format))
+			modes |= bit(GraphicsAntiAliasingMode::CMAA2);
+	}
+	modes &= impl->spatialAAInstalledModes;
+	if(impl->spatialAAExtentModes.size() == 16u) impl->spatialAAExtentModes.erase(impl->spatialAAExtentModes.begin());
+	impl->spatialAAExtentModes.emplace_back(extent, modes);
+	return modes;
+}
+
+std::pair<bool, bool> VulkanContext::ReadGraphicsStartupFlags() const
+{
+	std::lock_guard lock(impl->deviceStateMutex);
+	return {impl->validationLayersEnabled, impl->UsesVrsAttachment()};
+}
+
+std::vector<VulkanContext::RecordedGraphicsView> VulkanContext::ReadRecordedGraphicsViews(std::uint64_t frameId) const
+{
+	std::lock_guard lock(impl->deviceStateMutex);
+	if(impl->deviceLost || impl->recordedGraphicsFrameId != frameId) return {};
+	return impl->recordedGraphicsViews;
+}
+
+std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> VulkanContext::ReadAcceptedRenderFramePublication(
+	std::uint64_t expectedFrameId) const
+{
+	std::lock_guard lock(impl->deviceStateMutex);
+	const auto& publication = impl->activeRenderFramePublication;
+	// A later frame or recovered backend cannot certify the inputs to an old
+	// capture, even if the underlying scene and view were unchanged.
+	if(!impl->initialized || impl->deviceLost || !expectedFrameId || !publication
+		|| publication->frameId != expectedFrameId || publication->rendererSessionGeneration != impl->renderSessionGeneration
+		|| publication->backendResourceGeneration != impl->backendResourceGeneration
+		|| impl->recordedGraphicsFrameId != expectedFrameId || impl->recordedGraphicsViews.empty()) return {};
+	return publication;
+}
+
 void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
 {
 	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
@@ -1001,6 +1270,17 @@ void VulkanContext::BeginFrame() {
 		impl->skipFrame = true;
 		return;
 	}
+	// Capture target completion before any subsequent reset or acquire failure
+	// can recycle a fence handle. Runtime waited all slots; editor waited one.
+	if (!impl->postProcessTargets.empty() || !impl->retiredPostProcessTargets.empty()) {
+		if (impl->editorMode) {
+			impl->ObservePostProcessFrameCompletion(impl->currentFrame, impl->inFlightFences[impl->currentFrame]);
+		} else {
+			for (std::uint32_t slot = 0; slot < impl->inFlightFences.size(); ++slot)
+				impl->ObservePostProcessFrameCompletion(slot, impl->inFlightFences[slot]);
+		}
+		impl->DrainRetiredPostProcessTargets();
+	}
 	impl->renderSnapshotSlotsUsed[impl->currentFrame].fill(false);
 	// A decoded page was uploaded while this frame slot last recorded. The fence
 	// is the first point at which both its bytes and bindless descriptor are
@@ -1110,9 +1390,11 @@ void VulkanContext::BeginFrame() {
 			return; // The signal was not consumed; retain its submitted ownership.
 		}
 		impl->CompleteShadowWrites(impl->currentFrame); // Successful drain plus queue idle.
+		impl->CompletePostProcessDeviceIdle();
 		impl->editorRenderSubmitted = false;
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
+			impl->DiscardPostProcessCommands(impl->pendingPrimaryCommandBuffers[impl->currentFrame]);
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 		}
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
@@ -1237,6 +1519,7 @@ void VulkanContext::BeginFrame() {
 
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 			impl->DiscardRecordedShadowWrites(impl->currentFrame);
+			impl->DiscardPostProcessCommands(impl->pendingPrimaryCommandBuffers[impl->currentFrame]);
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 		}
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
@@ -1504,6 +1787,12 @@ RenderStatsSnapshot VulkanContext::GetLatestRenderStats(RenderViewType viewType)
 	return impl->GetLatestStats(viewType);
 }
 
+std::vector<TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample> VulkanContext::GetCompletedPostProcessTimings() const
+{
+	return impl ? impl->GetCompletedPostProcessTimings()
+		: std::vector<TerraEngine::Renderer::GraphicsSettings::PostProcessTimingSample>{};
+}
+
 
 FrameBudgetDiagnosticsSnapshot VulkanContext::GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const {
 	if (!impl) {
@@ -1658,6 +1947,8 @@ bool VulkanContext::ConsumeRenderFramePublication(
 	}
 	// Retain the root before descriptor and command preparation.  This is the
 	// sole backend-visible owner for view selections and presentation inputs.
+	impl->recordedGraphicsFrameId = publication->frameId;
+	impl->recordedGraphicsViews.clear();
 	impl->activeRenderFramePublication = std::move(publication);
 	return true;
 }
@@ -1992,6 +2283,9 @@ void VulkanContext::WaitIdle() {
 		// observing completion here adds no synchronization of its own.
 		for (std::uint32_t frame = 0; frame < impl->MAX_FRAMES_IN_FLIGHT; ++frame)
 			impl->CompleteShadowWrites(frame);
+		// Successful device idle also completes accepted post-process queries and
+		// image uses. Recorded-but-unsubmitted work keeps its existing ownership.
+		impl->CompletePostProcessDeviceIdle();
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::DeviceIdleWait, TerraEngine::Renderer::BackendSubmitStage::ForcedIdle, RenderViewType::Game, 0u, "Explicit Vulkan WaitIdle", true, false },

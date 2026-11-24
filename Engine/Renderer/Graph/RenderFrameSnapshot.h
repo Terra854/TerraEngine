@@ -4,6 +4,7 @@
 
 #include "Renderer/VirtualGeometry/Selection/RenderViewSelectionData.h"
 #include "Renderer/ShadowWorkPlan.h"
+#include "Renderer/GraphicsSettings/GraphicsSettingsTypes.h"
 
 namespace TerraEngine::Renderer
 {
@@ -54,6 +55,16 @@ namespace TerraEngine::Renderer
 		bool staleReferenceFrame = false;
 	};
 
+	// Evidence from an accepted camera presentation. The protected owner assigns
+	// a stable view lifetime and keeps these registrations only while eligible.
+	struct PublishedGraphicsCameraView
+	{
+		GraphicsSettings::GraphicsTarget target{};
+		std::uint32_t width = 0, height = 0;
+		std::uint32_t publicationIndex = 0;
+		std::uint32_t spatialAAModeMask = 1u;
+	};
+
 	struct RenderFrameSnapshot
 	{
 		std::uint64_t frameId = 0u;
@@ -79,6 +90,21 @@ namespace TerraEngine::Renderer
 		std::vector<DeformationPageDemand> animatedGeometryPageDemands;
 		std::size_t animatedGeometryPageDemandCount = 0u;
 		RenderSettings renderSettings;
+		// Strong const owners keep a frame's effective settings stable while the
+		// next boundary prepares another revision. Camera identity lives inside
+		// each snapshot, so preparation can select it without a live ECS lookup.
+		std::shared_ptr<const GraphicsSettings::GraphicsSettingsSnapshot> graphicsSettings;
+		// Scene View owns independent preview options over the current Game color.
+		std::shared_ptr<const GraphicsSettings::GraphicsSettingsSnapshot> sceneGraphicsSettings;
+		std::uint64_t sceneAaRevision = 0u;
+		std::optional<GraphicsSettings::GraphicsViewIdentity> sceneGraphicsView;
+		std::vector<std::shared_ptr<const GraphicsSettings::GraphicsSettingsSnapshot>> cameraGraphicsSettings;
+		std::vector<std::shared_ptr<const GraphicsSettings::PostProcessAuthoringFrame>> cameraPostProcessAuthoring;
+		std::vector<GraphicsSettings::GraphicsCameraTarget> graphicsCameraIdentities;
+		std::vector<PublishedGraphicsCameraView> publishedGraphicsCameraViews;
+		// Committed values can outlive a backend rebuild. The current captured
+		// lifecycle is needed to reject older native resource qualifications.
+		GraphicsSettings::GraphicsLifecycleStamp graphicsSettingsLifecycle{};
 		RendererEfficiencyOptionsSnapshot efficiencyOptions{};
 		RendererEfficiencyFixtureIntent efficiencyFixtureIntent{};
 		std::uint64_t resourceRevision = 0u;

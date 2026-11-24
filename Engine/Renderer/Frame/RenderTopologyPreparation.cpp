@@ -390,6 +390,17 @@ bool RenderSystem::PrepareFramePersistentTopology(
 		renderFrameSnapshot.conventionalVisibilityIdentityTable =
 			retainedRenderTopology.conventionalVisibilityIdentityTable;
 		renderGraphPasses = TerraEngine::Renderer::BuildDefaultRenderPasses(renderFrameSnapshot, backendCapabilities);
+		// Effect topology is view-owned and never enters geometry slot/cache keys.
+		// The typed mapper retains unavailable execution until Vulkan qualifies it,
+		// so existing frames add no effect declarations or resource allocations.
+		for(const auto& view : renderFrameSnapshot.viewRequests)
+		{
+			const auto settings = TerraEngine::Renderer::SelectGraphicsSettingsForView(
+				renderFrameSnapshot, view);
+			if(!settings || settings->lifecycle != renderFrameSnapshot.graphicsSettingsLifecycle) continue;
+			TerraEngine::Renderer::AppendPostProcessRenderPasses(renderGraphPasses,
+				view, TerraEngine::Renderer::BuildPostProcessGraphSettings(*settings));
+		}
 
 	}
 	return renderTopologyRebuilt;

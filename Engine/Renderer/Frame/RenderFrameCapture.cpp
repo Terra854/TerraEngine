@@ -20,8 +20,20 @@
 #include "UI/UISystem.h"
 #include "Renderer/Terrain/TerrainMaterialRuntimeRegistry.h"
 #include "Renderer/Graph/RenderFrameScratchValidation.h"
+#include "Renderer/GraphicsSettings/PostProcessEffectSettings.h"
 #include "Core/Logger/Logger.h"
 #include "Profiling/ProfilerScope.h"
+
+namespace
+{
+	// Called only during protected ECS collection. Workers retain this complete
+	// identity value rather than resolving UUIDs or component pointers later.
+	TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget CaptureGraphicsCameraIdentity(ObjectManager& manager, const Object& object)
+	{
+		return {manager.getUUID(object), manager.GetSceneGeneration(), manager.getObjectLifetimeGeneration(object),
+			manager.getObjectComponentGeneration(object), manager.getObjectBindingGeneration(object)};
+	}
+}
 
 // Copies authored cameras only at the existing protected collection boundary.
 void RenderSystem::CollectFrameCameraInputs(std::pmr::vector<CameraEntry>& cameras)
@@ -36,7 +48,7 @@ void RenderSystem::CollectFrameCameraInputs(std::pmr::vector<CameraEntry>& camer
 			reflectedCamera.nearPlane = cameraComp.nearPlane;
 			reflectedCamera.farPlane = cameraComp.farPlane;
 			reflectedCamera.up = cameraComp.up;
-			cameras.push_back({ object.EntityId(), reflectedCamera });
+			cameras.push_back({ object.EntityId(), reflectedCamera, CaptureGraphicsCameraIdentity(objManager, object) });
 		}
 	);
 }
@@ -1709,6 +1721,12 @@ RenderSystem::FrameBackendCapture RenderSystem::CaptureFrameBackendInputs()
 					TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(
 						captureRequest.viewType);
 				pendingDedicatedCaptureTargetSize = captureRequest.targetSize;
+				// Custom matrices never establish authored ownership, and a camera-object
+				// request must retain the exact admitted source UUID and lifetime.
+				if(captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::CustomCamera
+					&& (captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::CameraObject
+						|| (captureRequest.graphicsCamera && captureRequest.graphicsCamera->cameraId == captureRequest.sourceObjectId)))
+					result.pendingDedicatedCaptureGraphicsCamera = captureRequest.graphicsCamera;
 				pendingDedicatedCaptureCanonicalOrigin =
 					captureRequest.cameraCanonicalPosition;
 				break;
@@ -1776,6 +1794,20 @@ RenderSystem::FrameSkyCapture RenderSystem::CaptureFrameSky(std::uint64_t captur
 						component->sourceAsset, AssetType::Texture);
 				}
 			}
+		}
+	}
+	// Authoring and runtime exposure are independent. Mirror the same resolved
+	// sky owner already captured for rendering without another scene walk.
+	if(graphicsSettingsState->nativeCatalog)
+	{
+		const float exposure = capturedSkyComponent
+			? ClampSkyExposure(capturedSkyComponent->exposure)
+			: FrameSkyData{}.exposure;
+		std::lock_guard lock(graphicsSettingsState->mutex);
+		if(graphicsSettingsState->sceneSky.skyExposure != exposure)
+		{
+			graphicsSettingsState->sceneSky.skyExposure = exposure;
+			graphicsSettingsState->observedNativeGeneration = 0;
 		}
 	}
 	return result;
@@ -2374,6 +2406,107 @@ RenderSystem::FrameSnapshotCapture RenderSystem::CaptureFrameSnapshotHeader(
 		&& renderableResourcePublicationsComplete
 		&& !detailedRenderableEvidenceRequested && rendererResourceOwnerCohortStable;
 	renderFrameSnapshot.renderSettings = capturedRenderSettings;
+	// Inactive authored cameras may be explicitly captured without activating
+	// them. Copy identities only; this adds no camera render or live setter.
+	renderFrameSnapshot.graphicsCameraIdentities.clear();
+	objManager.forEachObjectWithComponentsIncludingInactive<Transform, CameraComponent>(
+		[&](Object object, Transform&, CameraComponent&) {
+			renderFrameSnapshot.graphicsCameraIdentities.push_back(CaptureGraphicsCameraIdentity(objManager, object));
+		});
+	// A dedicated authored-camera capture may be the first render of this
+	// physical output. Copy its admitted immutable intent before taking the
+	// settings lock; never hold statsMutex while acquiring the settings owner.
+	struct PlannedCameraCapture
+	{
+		TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget camera;
+		TerraEngine::Renderer::RenderCaptureViewIdentity view;
+		glm::uvec2 extent;
+	};
+	std::vector<PlannedCameraCapture> plannedCaptures;
+	if(backendCapture.backendCapabilities.supportsImageReadback)
+	{
+		std::lock_guard lock(statsMutex);
+		for(const auto& request : pendingCaptureRequests)
+		{
+			if(request.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::CameraObject || request.format != "image/png"
+				|| !request.graphicsCamera || request.graphicsCamera->cameraId != request.sourceObjectId
+				|| request.targetSize.x == 0 || request.targetSize.y == 0
+				|| std::find(renderFrameSnapshot.graphicsCameraIdentities.begin(),renderFrameSnapshot.graphicsCameraIdentities.end(),
+					*request.graphicsCamera) == renderFrameSnapshot.graphicsCameraIdentities.end()) continue;
+			const auto view=TerraEngine::Renderer::ResolveDedicatedCaptureViewIdentity(request.viewType);
+			const bool duplicate=std::any_of(plannedCaptures.begin(),plannedCaptures.end(),[&](const auto& prior) {
+				return prior.camera == *request.graphicsCamera && prior.view.viewType == view.viewType && prior.view.outputId == view.outputId
+					&& prior.extent == request.targetSize;
+			});
+			if(!duplicate) plannedCaptures.push_back({*request.graphicsCamera,view,request.targetSize});
+		}
+	}
+	{
+		std::lock_guard lock(graphicsSettingsState->mutex);
+		renderFrameSnapshot.graphicsSettings = graphicsSettingsState->controller.Snapshot();
+		renderFrameSnapshot.graphicsSettingsLifecycle = graphicsSettingsState->lifecycle;
+		renderFrameSnapshot.publishedGraphicsCameraViews = graphicsSettingsState->publishedCameraViews;
+		renderFrameSnapshot.cameraPostProcessAuthoring = graphicsSettingsState->preparedAuthoringViews;
+		renderFrameSnapshot.cameraGraphicsSettings.clear();
+		for(const auto& target : graphicsSettingsState->targets)
+		{
+			const auto snapshot = graphicsSettingsState->controller.Snapshot(target);
+			if(snapshot) renderFrameSnapshot.cameraGraphicsSettings.push_back(snapshot);
+		}
+		using namespace TerraEngine::Renderer::GraphicsSettings;
+		for(const auto& capture : plannedCaptures)
+		{
+			const auto registered=std::find_if(renderFrameSnapshot.publishedGraphicsCameraViews.begin(),
+				renderFrameSnapshot.publishedGraphicsCameraViews.end(),[&](const auto& prior) {
+					return prior.target.camera == capture.camera && prior.target.view
+						&& prior.target.view->outputKind == RenderOutputKind::OffscreenTexture && prior.target.view->viewType == capture.view.viewType
+						&& prior.target.view->outputId == capture.view.outputId && prior.width == capture.extent.x && prior.height == capture.extent.y;
+				});
+			// The owning camera keeps its overrides even when a previous frame
+			// submitted no view. This private copy never advertises an effective view.
+			std::shared_ptr<const PostProcessAuthoringFrame> authoring;
+			for(const auto& candidate : graphicsSettingsState->preparedAuthoringViews)
+			{
+				if(candidate->target.camera != capture.camera || candidate->lifecycle != renderFrameSnapshot.graphicsSettingsLifecycle) continue;
+				// A CameraObject request supplies no choice among normal outputs.
+				// An ambiguous camera cannot donate one arbitrary view's authoring.
+				if(authoring) { authoring.reset(); break; }
+				authoring = candidate;
+			}
+			if(!authoring && registered != renderFrameSnapshot.publishedGraphicsCameraViews.end()) continue;
+			auto source=authoring ? authoring->settings : graphicsSettingsState->controller.CameraOwnerSnapshot(capture.camera);
+			if(!source) source=renderFrameSnapshot.graphicsSettings;
+			if(!source || source->lifecycle != renderFrameSnapshot.graphicsSettingsLifecycle
+				|| graphicsSettingsState->nextCameraViewLifetime == 0
+				|| graphicsSettingsState->nextCameraViewLifetime == std::numeric_limits<std::uint64_t>::max()) continue;
+			auto projected=std::make_shared<GraphicsSettingsSnapshot>(*source);
+			projected->target=registered != renderFrameSnapshot.publishedGraphicsCameraViews.end() ? registered->target
+				: GraphicsTarget{GraphicsScope::Camera,capture.camera,
+					GraphicsViewIdentity{capture.view.viewType,capture.view.outputId,graphicsSettingsState->nextCameraViewLifetime++,RenderOutputKind::OffscreenTexture}};
+			projected->outputWidth=capture.extent.x;
+			projected->outputHeight=capture.extent.y;
+			GraphicsAAConfiguration aa;
+			if(ResolveGraphicsAAConfiguration(projected->values, aa) != GraphicsRequestReason::None) continue;
+			projected->internalWidth=ResolveGraphicsAAInternalDimension(capture.extent.x, aa);
+			projected->internalHeight=ResolveGraphicsAAInternalDimension(capture.extent.y, aa);
+			// Zero is a private planning marker, never accepted-view evidence. The
+			// retained same-backend certificate authorizes trying these settings;
+			// Vulkan must still prepare this exact destination before its first draw.
+			projected->publishedFrameId=0;
+			if(projected->postProcessResourceGeneration != projected->lifecycle.backendResourceGeneration)
+				projected->postProcessResourceGeneration=0;
+			if(authoring)
+			{
+				// Share immutable parameters with the source camera and plan the
+				// actual dedicated stage graph under the capture's separate lifetime.
+				auto prepared = std::make_shared<PostProcessAuthoringFrame>(*authoring);
+				prepared->target = projected->target;
+				prepared->settings = projected;
+				renderFrameSnapshot.cameraPostProcessAuthoring.push_back(std::move(prepared));
+			}
+			renderFrameSnapshot.cameraGraphicsSettings.push_back(std::move(projected));
+		}
+	}
 	renderFrameSnapshot.efficiencyOptions = capturedEfficiencyOptions;
 	{
 		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
@@ -2386,6 +2519,42 @@ RenderSystem::FrameSnapshotCapture RenderSystem::CaptureFrameSnapshotHeader(
 	renderFrameSnapshot.sceneRevision = capturedSpatialRevision;
 
 	return {std::move(renderFrameSnapshot), std::move(previousViewRequests), reuseRenderableRecords};
+}
+
+void RenderSystem::PlanGameViewHistory(TerraEngine::Renderer::RenderFrameSnapshot& snapshot,
+	TerraEngine::Renderer::RenderFrameViewRequest& request)
+{
+	using namespace TerraEngine::Renderer;
+	using namespace TerraEngine::Renderer::GraphicsSettings;
+	if(request.outputKind != RenderOutputKind::GameView || request.graphicsView || !request.graphicsCamera
+		|| request.targetSize.x == 0 || request.targetSize.y == 0) return;
+
+	// Temporal rendering needs a lifetime to record its first frame, even when a
+	// resize retired the previous native target. Allocate one at the protected
+	// boundary and expose it publicly only after the backend records this output.
+	auto& owner = *graphicsSettingsState;
+	std::lock_guard lock(owner.mutex);
+	if(owner.nextCameraViewLifetime == 0 || owner.nextCameraViewLifetime == std::numeric_limits<std::uint64_t>::max()) return;
+	auto source = owner.controller.CameraOwnerSnapshot(*request.graphicsCamera);
+	if(!source) source = snapshot.graphicsSettings;
+	if(!source || source->lifecycle != snapshot.graphicsSettingsLifecycle) return;
+	GraphicsAAConfiguration aa;
+	PostProcessEffectSettings effects;
+	if(ResolveGraphicsAAConfiguration(source->values, aa) != GraphicsRequestReason::None
+		|| ResolvePostProcessEffectSettings(source->values, effects) != GraphicsRequestReason::None
+		|| (aa.antiAliasing != GraphicsAntiAliasingMode::TAA && aa.upscaling != GraphicsUpscalingMode::Temporal
+			&& !effects.motionBlur.Active())) return;
+
+	auto planned = std::make_shared<GraphicsSettingsSnapshot>(*source);
+	planned->target = {GraphicsScope::Camera, request.graphicsCamera,
+		GraphicsViewIdentity{request.viewType, request.outputId, owner.nextCameraViewLifetime++, request.outputKind}};
+	planned->publishedFrameId = 0;
+	planned->outputWidth = request.targetSize.x;
+	planned->outputHeight = request.targetSize.y;
+	planned->internalWidth = ResolveGraphicsAAInternalDimension(request.targetSize.x, aa);
+	planned->internalHeight = ResolveGraphicsAAInternalDimension(request.targetSize.y, aa);
+	snapshot.cameraGraphicsSettings.push_back(std::move(planned));
+	BindGraphicsCameraViewProvenance(request, snapshot, request.graphicsCamera);
 }
 
 // Validate only copied fixture controls against this exact protected input membership.

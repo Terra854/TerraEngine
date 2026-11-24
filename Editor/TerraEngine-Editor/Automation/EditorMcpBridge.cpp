@@ -26,6 +26,7 @@ namespace TerraEngine::Editor::Automation
 		bool IsCaptureTool(std::string_view name)
 		{
 			return name == "game_view.capture"
+				|| name == "scene_view.capture"
 				|| name == "camera.capture_object"
 				|| name == "camera.capture_custom"
 				|| name == "animation.camera.capture";

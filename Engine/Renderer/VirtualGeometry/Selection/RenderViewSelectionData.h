@@ -72,6 +72,12 @@
 		// Reference-frame identity is copied with the request so per-view workers
 		// can reject stale origins before producing culling or draw matrices.
 		RenderReferenceFrame referenceFrame{};
+		// Only protected copied authored camera identities may select an override.
+		std::optional<GraphicsSettings::GraphicsCameraTarget> graphicsCamera;
+		std::optional<GraphicsSettings::GraphicsViewIdentity> graphicsView;
+		// A frame-local planning ordinal disambiguates cameras sharing one physical
+		// output. It is neither an authored camera identity nor a view lifetime.
+		std::uint32_t viewInstanceIndex = 0;
 	};
 
 	enum class AnimationRenderEvaluationSource : std::uint8_t

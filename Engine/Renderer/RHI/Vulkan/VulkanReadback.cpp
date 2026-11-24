@@ -4,6 +4,7 @@
 // so the split changes compilation boundaries without changing resource lifetime or synchronization.
 
 #include "VulkanContextSource.h"
+#include "VulkanPostProcessPasses.h"
 
 namespace
 {
@@ -191,6 +192,7 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	result.frameId = request.submittedFrameId;
 	result.freshness = request.freshness;
 	result.overlaysIncluded = false;
+	result.imageStage = request.imageStage;
 	result.errorCategory = "backend_readback_unavailable";
 	if (!impl || impl->device == VK_NULL_HANDLE || impl->allocator == VK_NULL_HANDLE)
 	{
@@ -233,15 +235,74 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		return result;
 	}
 
-	const std::uint32_t sourceWidth = target.extent.width;
-	const std::uint32_t sourceHeight = target.extent.height;
+	VkImage sourceImage = target.image;
+	VkFormat sourceFormat = impl->offscreenColorFormat;
+	VkImageLayout sourceLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	VkExtent2D sourceExtent = target.extent;
+	std::uint64_t sourceGeneration = target.generation;
+	if(request.imageStage != TerraEngine::Renderer::RenderCaptureImageStage::Legacy)
+	{
+		using namespace TerraEngine::Renderer;
+		bool selected = false;
+		for(const auto& [key, bundle] : impl->postProcessTargets)
+		{
+			if(!bundle || !bundle->passes) continue;
+			// A shared physical output never authorizes reading another camera's
+			// private raw/processed image, even when both used the same frame ID.
+			if(request.graphicsCamera && !TerraEngine::Renderer::Vulkan::MatchesPostProcessCamera(key, *request.graphicsCamera)) continue;
+			const auto& output = bundle->passes->output;
+			// Recording a new pass is insufficient. The original view image,
+			// generation, and frame must still identify its accepted publication.
+			if(!TerraEngine::Renderer::Vulkan::IsPostProcessOutputCurrent(output,
+					target.image, target.generation, target.colorFrameId)
+				|| bundle->key.rendererGeneration != impl->renderSessionGeneration) continue;
+			if(request.imageStage == RenderCaptureImageStage::Raw
+				|| request.imageStage == RenderCaptureImageStage::Processed)
+			{
+				const auto& image = request.imageStage == RenderCaptureImageStage::Raw
+					? bundle->sceneColor : bundle->processing[bundle->passes->finalProcessingImage];
+				sourceImage = image.image;
+				sourceFormat = image.format;
+				sourceLayout = image.layout;
+				sourceExtent = image.extent;
+				sourceGeneration = bundle->generation;
+				result.sourceColorEncoding = RenderCaptureColorEncoding::Linear;
+			}
+			else if(request.imageStage == RenderCaptureImageStage::Composited)
+			{
+				sourceImage = output.compositedImage;
+				sourceFormat = output.compositedFormat;
+				sourceLayout = output.compositedLayout;
+				sourceExtent = output.compositedExtent;
+				result.sourceColorEncoding = output.compositedEncoding;
+				result.overlaysIncluded = output.overlaysIncluded;
+			}
+			else break;
+			result.deliveredColorEncoding = RenderCaptureColorEncoding::Srgb;
+			result.graphicsSettingsRevision = output.settingsRevision;
+			result.frameId = output.publicationFrameId;
+			selected = sourceImage != VK_NULL_HANDLE
+				&& sourceLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+				&& (result.sourceColorEncoding == RenderCaptureColorEncoding::Linear
+					|| result.sourceColorEncoding == RenderCaptureColorEncoding::Srgb);
+			break;
+		}
+		if(!selected)
+		{
+			result.errorCategory = "capture_stage_unavailable";
+			result.message = "The requested camera image stage has no matching accepted native output.";
+			return result;
+		}
+	}
+	const std::uint32_t sourceWidth = sourceExtent.width;
+	const std::uint32_t sourceHeight = sourceExtent.height;
 	if (sourceWidth == 0u || sourceHeight == 0u)
 	{
 		result.message = "Vulkan readback skipped because the source render target has zero size.";
 		return result;
 	}
 
-	const std::uint32_t bytesPerPixel = TerraEngine::Renderer::VulkanReadback::BytesPerPixel(impl->offscreenColorFormat);
+	const std::uint32_t bytesPerPixel = TerraEngine::Renderer::VulkanReadback::BytesPerPixel(sourceFormat);
 	if (bytesPerPixel == 0u)
 	{
 		result.errorCategory = "unsupported_readback";
@@ -266,7 +327,7 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	// extent. Editor resize evidence must distinguish a rebuilt target from an
 	// unchanged source whose pixels were merely scaled to the requested size.
 	result.backendTarget = TerraEngine::Renderer::RenderCaptureBackendTargetObservation{
-		impl->renderSessionGeneration, target.generation, sourceWidth, sourceHeight, captureDedicatedView };
+		impl->renderSessionGeneration, sourceGeneration, sourceWidth, sourceHeight, captureDedicatedView };
 	VulkanBuffer stagingBuffer{};
 	try
 	{
@@ -307,7 +368,7 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 			commandBuffer = VK_NULL_HANDLE;
 		}
 	};
-	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	RecordCaptureImageBarrier(commandBuffer, sourceImage, sourceLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	VkBufferImageCopy copyRegion{};
 	copyRegion.bufferOffset = 0u;
 	copyRegion.bufferRowLength = 0u;
@@ -320,12 +381,12 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	copyRegion.imageExtent = { sourceWidth, sourceHeight, 1u };
 	vkCmdCopyImageToBuffer(
 		commandBuffer,
-		target.image,
+		sourceImage,
 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		stagingBuffer.buffer,
 		1u,
 		&copyRegion);
-	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	RecordCaptureImageBarrier(commandBuffer, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sourceLayout);
 	const VkResult endResult = vkEndCommandBuffer(commandBuffer);
 	if (endResult != VK_SUCCESS)
 	{
@@ -391,7 +452,7 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		readbackRequest.validationTracked = impl->readbackValidationGate != VK_NULL_HANDLE
 			&& impl->readbackValidationSnapshot.operationId == request.requestId;
 		if (readbackRequest.validationTracked) {
-			impl->readbackValidationSourceImage = target.image;
+			impl->readbackValidationSourceImage = sourceImage;
 			impl->readbackValidationCommandPool = commandPool;
 		}
 #endif
@@ -400,9 +461,9 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		readbackRequest.completion.backendReadback = true;
 		readbackRequest.completion.deterministicFallback = false;
 		readbackRequest.completion.pendingAsync = false;
-		readbackRequest.completion.overlaysIncluded = false;
+		readbackRequest.completion.overlaysIncluded = result.overlaysIncluded;
 		readbackRequest.viewType = request.viewType;
-		readbackRequest.sourceImage = target.image;
+		readbackRequest.sourceImage = sourceImage;
 		readbackRequest.stagingBuffer = stagingBuffer.buffer;
 		readbackRequest.stagingAllocation = stagingBuffer.allocation;
 		readbackRequest.fence = readbackFence;
@@ -412,15 +473,19 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		readbackRequest.height = sourceHeight;
 		readbackRequest.requestedWidth = request.targetSize.x > 0u ? request.targetSize.x : sourceWidth;
 		readbackRequest.requestedHeight = request.targetSize.y > 0u ? request.targetSize.y : sourceHeight;
-		readbackRequest.sourceFormat = impl->offscreenColorFormat;
+		readbackRequest.sourceFormat = sourceFormat;
 		readbackRequest.submittedAt = std::chrono::steady_clock::now();
 		readbackRequest.timeout = std::chrono::milliseconds(request.timeoutMs > 0u ? request.timeoutMs : 2000u);
 		readbackRequest.dedicatedRenderTarget = captureDedicatedView;
-		if (impl->offscreenColorFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
+		if (sourceFormat == VK_FORMAT_R16G16B16A16_SFLOAT
+			|| sourceFormat == VK_FORMAT_R32G32B32A32_SFLOAT)
 		{
-			readbackRequest.completion.warnings.push_back("HDR render target pixels were tone-clamped and gamma encoded into an 8-bit PNG.");
+			readbackRequest.completion.warnings.push_back(
+				request.imageStage == TerraEngine::Renderer::RenderCaptureImageStage::Legacy
+					? "HDR render target pixels were tone-clamped and gamma encoded into an 8-bit PNG."
+					: "Floating-point camera pixels were clamped to display range and encoded once into an sRGB PNG.");
 		}
-		if (request.includeOverlays)
+		if (request.includeOverlays && !result.overlaysIncluded)
 		{
 			readbackRequest.completion.warnings.push_back("Vulkan render-target readback captures the renderer color target before editor overlay composition.");
 		}
@@ -626,9 +691,10 @@ void VulkanContext::Impl::PublishCaptureReadbackTerminal(
 			? captureView
 			: (captureSceneView ? sceneView : gameView);
 
-		if (request.sourceImage != target.image
+		if (request.completion.imageStage == TerraEngine::Renderer::RenderCaptureImageStage::Legacy
+			&& (request.sourceImage != target.image
 			|| request.width != target.extent.width
-			|| request.height != target.extent.height)
+			|| request.height != target.extent.height))
 		{
 			request.completion.ok = false;
 			request.completion.errorCategory = "resize_aborted";
@@ -689,7 +755,8 @@ void VulkanContext::Impl::PublishCaptureReadbackTerminal(
 					readbackBytes,
 					request.width,
 					request.height,
-					request.sourceFormat);
+					request.sourceFormat,
+					request.completion.sourceColorEncoding);
 				const std::uint32_t outputWidth = request.requestedWidth > 0u ? request.requestedWidth : request.width;
 				const std::uint32_t outputHeight = request.requestedHeight > 0u ? request.requestedHeight : request.height;
 				if (outputWidth != request.width || outputHeight != request.height)
@@ -953,6 +1020,9 @@ VulkanContext::GetConventionalVisibilityIdentityTargetMetadata(
 	metadata.spatialGeneration = target.identitySpatialGeneration;
 	metadata.residencyGeneration = target.identityResidencyGeneration;
 	metadata.dedicatedCaptureTarget = dedicatedCaptureTarget;
+	// Picking consumes the actual identity attachment grid, which can differ
+	// from both display size and requested capture resampling dimensions.
+	metadata.identityExtent = {target.extent.width, target.extent.height};
 	return metadata.IsComplete()
 		? std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>(
 			metadata)

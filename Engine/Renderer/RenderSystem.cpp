@@ -304,6 +304,7 @@ RenderSystem::RenderSystem()
 	: lifetimeState(std::make_unique<RenderSystemLifetimeState>()),
 	objManager(ObjectManager::instance())
 {
+	graphicsSettingsState = std::make_shared<RenderGraphicsSettingsState>();
 	(void)FinalCaptureBackendOwner();
 	latestGameStats.viewType = RenderViewType::Game;
 	latestSceneStats.viewType = RenderViewType::Scene;
@@ -616,9 +617,29 @@ RenderSystem::PickVirtualGeometryVisibilityRecord(
 	return pick;
 }
 
+std::optional<TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata>
+RenderSystem::GetConventionalVisibilityIdentityPickTarget(
+	RenderViewType viewType, bool dedicatedCaptureTarget) const
+{
+	if (!rhi) return std::nullopt;
+	const auto metadata = rhi->GetConventionalVisibilityIdentityTargetMetadata(
+		viewType, dedicatedCaptureTarget);
+	return metadata && metadata->IsComplete() ? metadata : std::nullopt;
+}
+
 bool RenderSystem::RequestConventionalVisibilityIdentityPick(
 	RenderViewType viewType, const glm::uvec2& pixel,
 	bool dedicatedCaptureTarget)
+{
+	const auto target = GetConventionalVisibilityIdentityPickTarget(viewType, dedicatedCaptureTarget);
+	return target && RequestConventionalVisibilityIdentityPick(
+		viewType, pixel, dedicatedCaptureTarget, *target);
+}
+
+bool RenderSystem::RequestConventionalVisibilityIdentityPick(
+	RenderViewType viewType, const glm::uvec2& pixel,
+	bool dedicatedCaptureTarget,
+	const TerraEngine::Renderer::ConventionalVisibilityIdentityTargetMetadata& expectedTarget)
 {
 	if (!rhi) return false;
 	TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest request{};
@@ -629,6 +650,14 @@ bool RenderSystem::RequestConventionalVisibilityIdentityPick(
 		rhi->GetConventionalVisibilityIdentityTargetMetadata(
 			viewType, dedicatedCaptureTarget);
 	if(!targetMetadata || !targetMetadata->IsComplete()) return false;
+	// Normalization and queue admission are separate UI calls. Reject a target
+	// replacement before the old pixel can be read from the new attachment.
+	if (expectedTarget.viewType != viewType
+		|| expectedTarget.dedicatedCaptureTarget != dedicatedCaptureTarget
+		|| expectedTarget.rendererGeneration != targetMetadata->rendererGeneration
+		|| expectedTarget.targetGeneration != targetMetadata->targetGeneration
+		|| expectedTarget.identityExtent != targetMetadata->identityExtent)
+		return false;
 	CaptureConventionalVisibilityIdentitySnapshot requestSnapshot{};
 	std::vector<GpuVirtualGeometryPacketRecord> requestVisibilityRecords;
 	{
@@ -1158,25 +1187,7 @@ void RenderSystem::Initialize()
 	RetireCaptureJobs();
 	if (!TryReleaseCaptureBackend()) throw std::runtime_error("Previous renderer backend still owns native readbacks or an unproven device; initialization is deferred.");
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing RenderSystem...");
-	if (const auto startupSettings = ResourceManager::Instance().GetConfiguredRenderSettings()) {
-		// Editor direct-project and export profiles are resolved before system
-		// initialization. Do not rediscover settings from the process cwd here.
-		SetRenderSettings(*startupSettings);
-	} else {
-		LoadSettings();
-	}
-
-	auto vulkanContext = std::make_unique<VulkanContext>();
-	// Vulkan validation is controlled by project/export render settings rather
-	// than by the compiler configuration. Request it before instance creation so
-	// Release and packaged builds can use validation layers when developers turn
-	// the profile flag on, while machines without the SDK still fall back cleanly.
-	vulkanContext->SetValidationLayersRequested(ResourceManager::Instance().IsRenderValidationEnabled());
-	// VRS is a render-pass attachment decision in Vulkan. Apply the startup
-	// render profile before backend initialization so exported builds that
-	// declare VRS disabled never create or load a shading-rate attachment.
-		vulkanContext->SetVariableRateShadingEnabled(SanitizeRenderSettings(currentSettings).variableRateShading > 0u);
-	rhi = std::move(vulkanContext);
+	PrepareGraphicsStartupAtProtectedBoundary();
 	rendererRecoveryPolicy = ResourceManager::Instance().GetRendererRecoveryPolicy();
 	WindowSystem::Instance().SetResizeCallback([](int width, int height) {
 		try {
@@ -1192,8 +1203,8 @@ void RenderSystem::Initialize()
 		}
 	});
 
-	rhi->Initialize(WindowSystem::Instance());
-	initialized = static_cast<VulkanContext*>(rhi.get())->IsReady();
+	InitializeConfiguredVulkan();
+	FinalizeGraphicsStartupAtProtectedBoundary();
 }
 
 
@@ -1271,12 +1282,17 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		if (auto* native = dynamic_cast<VulkanContext*>(rhi.get()); native && native->IsInitializationDeferred()) {
 			// Both direct Update and scheduled capture resume under the existing
 			// protected boundary, before any worker borrows presentation owners.
-			native->Initialize(WindowSystem::Instance());
-			initialized = native->IsReady();
+			InitializeConfiguredVulkan();
 		}
 	}
-	if (!initialized) {
-		co_return;
+	// Initialization can have a ready device while worker texture decoding is
+	// pending for the claimed launch profile. Keep later views unpublished and
+	// retry at this protected boundary without waiting on the render thread.
+	if(!initialized) co_return;
+	if(!graphicsSettingsState->startupFinalized && dynamic_cast<VulkanContext*>(rhi.get()))
+	{
+		FinalizeGraphicsStartupAtProtectedBoundary();
+		if(!initialized || !graphicsSettingsState->startupFinalized) co_return;
 	}
 	if (!editorModeEnabled)
 	{
@@ -1290,6 +1306,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	// Runtime C# settings become visible only at this protected render boundary.
 	// Applying before snapshot construction gives every view one coherent profile.
 	ApplyQueuedRuntimeRenderSettings();
+	CaptureGraphicsSettingsAtProtectedBoundary();
+	SettlePostProcessAuthoringSceneWrites(nextRenderFrameId);
+	CaptureSceneViewGraphicsSettingsAtProtectedBoundary();
 	DrainCaptureReadbacks();
 
 	// Standalone runtime UI should track the real framebuffer size. In the
@@ -1422,6 +1441,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const auto* fixedGameCamera = sealedCamera(RenderViewType::Game,2);
 	const bool sealedCameraRecipeActive = renderFrameSnapshot.efficiencyFixtureIntent.controlsApplied && !sealedFixtureCameras.empty();
 	const glm::uvec2 effectiveSceneTargetSize = fixedSceneCamera ? fixedSceneCamera->nativeExtent : sceneViewTargetSize;
+	if(editorModeEnabled)
+		renderFrameSnapshot.sceneGraphicsSettings = GetMergedSceneViewGraphicsSettingsSnapshot(
+			&renderFrameSnapshot.sceneAaRevision, &renderFrameSnapshot.sceneGraphicsView, effectiveSceneTargetSize);
 	const glm::uvec2 effectiveGameTargetSize = fixedGameCamera ? fixedGameCamera->nativeExtent : gameViewTargetSize;
 	// Capture the renderer lifetime once. Every animated record in this immutable
 	// frame must agree with it; querying recovery state per renderable could mix a
@@ -1431,16 +1453,28 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 		RenderViewType viewType,
 		const glm::uvec2& targetSize,
 		std::uint32_t outputId,
-		const TerraEngine::Scene::WorldPosition& canonicalOrigin)
+		const TerraEngine::Scene::WorldPosition& canonicalOrigin,
+		std::optional<TerraEngine::Renderer::GraphicsSettings::GraphicsCameraTarget> graphicsCamera = {})
 	{
 		TerraEngine::Renderer::RenderFrameViewRequest request{};
 		request.outputKind = outputKind;
 		request.viewType = viewType;
 		request.targetSize = targetSize;
 		request.outputId = outputId;
+		request.viewInstanceIndex = static_cast<std::uint32_t>(std::count_if(
+			renderFrameSnapshot.viewRequests.begin(),renderFrameSnapshot.viewRequests.end(),[&](const auto& prior) {
+				return prior.outputKind == outputKind && prior.viewType == viewType && prior.outputId == outputId;
+			}));
 		request.viewGeneration = activeRenderFrameId;
 		request.referenceFrame.frameId = activeRenderFrameId;
-		request.referenceFrame.viewId = static_cast<std::uint64_t>(outputId);
+		// Reference-frame identities distinguish every camera even when several
+		// render into physical output2. Keep ordinal0 equal to the legacy output
+		// ID, and put later per-output request ordinals in disjoint upper32 bits.
+		// Count across kinds/types too: validation requires frame-wide uniqueness.
+		const std::uint64_t referenceOrdinal = static_cast<std::uint64_t>(std::count_if(
+			renderFrameSnapshot.viewRequests.begin(), renderFrameSnapshot.viewRequests.end(),
+			[&](const auto& prior) { return prior.referenceFrame.outputId == outputId; }));
+		request.referenceFrame.viewId = (referenceOrdinal << 32u) | static_cast<std::uint64_t>(outputId);
 		request.referenceFrame.outputId = outputId;
 		request.referenceFrame.canonicalOrigin = canonicalOrigin;
 		const auto* fixedCamera = sealedCamera(viewType,outputId);
@@ -1458,6 +1492,9 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			std::max<std::uint64_t>(1U, capturedSpatialRevision);
 		request.referenceFrame.residencyGeneration = std::max<std::uint64_t>(
 			1U, capturedVirtualGeometryResidencyGeneration);
+		TerraEngine::Renderer::BindGraphicsCameraViewProvenance(request, renderFrameSnapshot,
+			fixedCamera ? std::nullopt : graphicsCamera);
+		PlanGameViewHistory(renderFrameSnapshot, request);
 		return request;
 	};
 	renderFrameSnapshot.viewRequests.reserve(3u + gameViewCameras.size() + cameras.size());
@@ -1469,23 +1506,29 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	}
 	if (fixedGameCamera || (!sealedCameraRecipeActive && !gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u))))
 	{
-		if (fixedGameCamera || !gameViewCameras.empty())
+		if(fixedGameCamera)
 		{
-			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
-				RenderOutputKind::GameView, RenderViewType::Game,
-				effectiveGameTargetSize, 2U, fixedGameCamera ? fixedGameCamera->cameraPosition : gameViewCameras.front().canonicalPosition));
+			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(RenderOutputKind::GameView,
+				RenderViewType::Game,effectiveGameTargetSize,2u,fixedGameCamera->cameraPosition));
 		}
-		else if (!cameras.empty())
+		else if(!gameViewCameras.empty())
 		{
-			TerraEngine::Scene::WorldPosition runtimeCameraPosition{};
-			const auto runtimeCamera = worldTransforms->find(cameras.front().entity);
-			if (runtimeCamera != worldTransforms->end())
+			// Planning describes each existing authored view, including cameras that
+			// share physical output2. It does not add render submissions.
+			for(const auto& camera : gameViewCameras)
+				renderFrameSnapshot.viewRequests.push_back(makeViewRequest(RenderOutputKind::GameView,
+					RenderViewType::Game,effectiveGameTargetSize,2u,camera.canonicalPosition,camera.graphicsCamera));
+		}
+		else
+		{
+			for(const auto& camera : cameras)
 			{
-				runtimeCameraPosition = runtimeCamera->second.position;
+				TerraEngine::Scene::WorldPosition runtimeCameraPosition{};
+				const auto transform=worldTransforms->find(camera.entity);
+				if(transform != worldTransforms->end()) runtimeCameraPosition=transform->second.position;
+				renderFrameSnapshot.viewRequests.push_back(makeViewRequest(RenderOutputKind::MainRuntimeView,
+					RenderViewType::Game,effectiveGameTargetSize,2u,runtimeCameraPosition,camera.graphicsCamera));
 			}
-			renderFrameSnapshot.viewRequests.push_back(makeViewRequest(
-				RenderOutputKind::MainRuntimeView, RenderViewType::Game,
-				effectiveGameTargetSize, 2U, runtimeCameraPosition));
 		}
 	}
 	if (hasPendingDedicatedCaptureRender)
@@ -1495,7 +1538,7 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 			pendingDedicatedCaptureIdentity.viewType,
 			pendingDedicatedCaptureTargetSize,
 			pendingDedicatedCaptureIdentity.outputId,
-			pendingDedicatedCaptureCanonicalOrigin));
+			pendingDedicatedCaptureCanonicalOrigin, backendCapture.pendingDedicatedCaptureGraphicsCamera));
 	}
 	if(renderFrameSnapshot.viewRequests.empty()) {
 		CompleteFrameWithoutViews(renderFrameSnapshot, protectedSceneGeneration,
@@ -1878,10 +1921,36 @@ void RenderSystem::Shutdown()
 	{
 		std::lock_guard lock(runtimeRenderSettingsMutex);
 		rendererEfficiencyOptionsQueue.ResetForNewLifetime();
+		pendingRuntimeRenderSettings.reset();
 		pendingRendererEfficiencyFixtureIntent.reset();
 		capturedRendererEfficiencyFixtureIntent = {};
 		pendingRendererResourceInvalidations.clear();
 		efficiencyObservedBackendSession = 0U;
+	}
+	{
+		// Revoke settings ownership without waiting for a worker. Its shared CPU
+		// owner survives until the copied work has settled and records cancellation.
+		std::lock_guard lock(graphicsSettingsState->mutex);
+		++graphicsSettingsState->epoch;
+		++graphicsSettingsState->lifecycle.projectGeneration;
+		graphicsSettingsState->lifecycle.rendererSessionGeneration = 0;
+		graphicsSettingsState->lifecycle.backendResourceGeneration = 0;
+		graphicsSettingsState->targets.clear();
+		graphicsSettingsState->requestedTargets.clear();
+		graphicsSettingsState->publishedCameraViews.clear();
+		graphicsSettingsState->boundTargets.clear();
+		graphicsSettingsState->publishedGameExtent = {};
+		graphicsSettingsState->publishedGameSpatialAAModeMask.reset();
+		graphicsSettingsState->pendingPreferenceRestores.clear();
+		graphicsSettingsState->persistence.reset();
+		graphicsSettingsState->startup.reset();
+		graphicsSettingsState->startupFinalized = false;
+		const TerraEngine::Renderer::GraphicsSettings::GraphicsPreparationContext context{
+			graphicsSettingsState->lifecycle, *graphicsSettingsState->catalog, {}, 0};
+		graphicsSettingsState->controller.Invalidate(context);
+		graphicsSettingsState->pendingRebuild.reset();
+		graphicsSettingsState->pendingPostProcessLookups.clear();
+		graphicsSettingsState->resourceCompletions.clear();
 	}
 	{
 		std::lock_guard lock(statsMutex);
@@ -1980,6 +2049,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
 		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
 		TerraEngine::Scheduling::kResourceRuntimeRenderSettingsQueue,
+		"GraphicsSettingsRequestQueue", "GraphicsSettingsPreparedCandidates",
+		"PostProcessAuthoringRequestQueue", "PostProcessAuthoringSceneReceipts",
 		TerraEngine::Scheduling::kResourceAnimatedGeometryPageDemands,
 		TerraEngine::Scheduling::kResourceAnimatedGeometryOutputs,
 		TerraEngine::Scheduling::kResourceAnimatedGeometryDynamicBounds,
@@ -1987,6 +2058,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	};
 	declaration.writes = {
 		"RendererEfficiencyOptions", "RendererEfficiencyEvidence",
+		"PostProcessAuthoringPublications",
 		// Protected capture may admit a deduplicated async mesh/material request;
 		// accepting a ready resource also changes its publication cohort.
 		"Resources", "StreamingNeeds",
@@ -2028,6 +2100,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
 		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
 		TerraEngine::Scheduling::kResourceRuntimeRenderSettings,
+		"GraphicsSettingsEffectiveSnapshots", "GraphicsSettingsPreparedCandidates",
 		TerraEngine::Scheduling::kResourceAnimatedGeometryPageDemands,
 		TerraEngine::Scheduling::kResourceAnimatedGeometryDeformationPlans,
 		TerraEngine::Scheduling::kResourceAnimatedGeometryOutputs,
@@ -2050,6 +2123,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.safeSubwork = "Immutable render snapshots, exact shadowcaster membership preparation from copied input proofs, generation-validated animation pose bindings, frame-wide animated page demand union, checked morph-before-skin deformation prefix planning, history compatibility lookup, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
 	declaration.protectedCommit = "Runtime render-settings queue application, protected deduplicated async admission of missing mesh/material publications, live hierarchy/AnimatorComponent/deformable-resource and immutable shadowcaster lifetime/resource/deformation proof capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, animated geometry allocation and atomic geometry/history/bounds publication with one cross-view generation, descriptor writes, deformation command recording, fence-delayed animated output retirement, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
 	declaration.safeSubwork += " Canonical lighting payload serialization from immutable copied final/analysis records and exact physical dirty-range planning.";
+	declaration.safeSubwork += " Typed graphics settings validation and candidate construction use a ThreadPool job with copied catalog, lifecycle, and target inputs.";
+	declaration.protectedCommit += " Records atmosphere from sealed HDR color and depth, then dithers the final camera color on qualified SDR outputs.";
 	declaration.protectedCommit += " Lighting allocation/frame/snapshot/purpose owner validation, fence-proven host map/write/atom-flush, success-only mirror publication and completion-qualified lighting evidence.";
 	declaration.writes.push_back("LightingUploadMirrors");
 	// BeginFrame and submission failure paths also update the fence-backed
@@ -2108,6 +2183,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.activationPredicateKey = "render-system-frame";
 	snapshot.reads = {
 		"Window", "SceneGraph", "Resources",
+		"GraphicsSettingsRequestQueue", "GraphicsSettingsPreparedCandidates",
+		"PostProcessAuthoringRequestQueue", "PostProcessAuthoringSceneReceipts",
 		kResourceRuntimeRenderSettingsQueue, "RendererEfficiencyOptionsQueue",
 		kResourceSceneChangePublication,
 		kResourceAnimationPresentationFrame,
@@ -2118,6 +2195,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	};
 	snapshot.writes = {
 		kResourceRuntimeRenderSettings, "RendererEfficiencyOptions",
+		"GraphicsSettingsEffectiveSnapshots", "GraphicsSettingsPreparedCandidates",
+		"PostProcessAuthoringPublications", "SceneMutationQueue",
 		kResourceRendererFrameScratch,
 		// Request admission stays at this protected boundary; workers consume
 		// only the captured owners and never request or wait for a live load.
@@ -2135,6 +2214,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.protectedCommit = "Admits deduplicated async requests for missing mesh/material publications, then captures the already-published scene change packet, exact transforms, resources, immutable shadowcaster lifetime/resource/deformation inputs, animation presentation, page publication, readback, requested views, backend capabilities, and renderer generations without lowering the crowd.";
 	snapshot.protectedCommit += " Retires the previous continuation before allocating/resetting the exclusive renderer-owned camera/light scratch episode.";
 	snapshot.protectedCommit += " Retries zero-extent startup before capture; unready presentation publishes no render work.";
+	snapshot.protectedCommit += " Captures typed graphics context and publishes completed CPU candidates without waiting for worker or backend preparation.";
 	snapshot.protectedReason = snapshot.protectedCommit;
 	snapshot.profilingLabel = "RenderSystem.RenderPublicationCapture";
 
@@ -2212,6 +2292,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		"RendererEfficiencyOptions",
 		kResourceRendererFrameScratch,
 		"LightingDepthPreparedInputs", "LightingDepthQueryOwners",
+		"SceneGraph", "Resources", "GraphicsSettingsEffectiveSnapshots",
 		kResourcePersistentRenderSceneState, kResourceDynamicRenderFrameState,
 		kResourceRenderViewSelections, kResourceVirtualGeometryClusterPackets,
 		kResourceVirtualGeometryBatchPlans,
@@ -2219,6 +2300,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	};
 	commit.writes = {
 		"LightingDepthQueryOwners", "LightingDepthEvidence",
+		"PostProcessAuthoringPublications", "Resources",
 		kResourceRenderFramePublication, kResourceRenderInstanceStreamPublication,
 		kResourceVirtualGeometryGpuPacketFrameSets, kResourceVirtualGeometryGeneratedSubmissions,
 		kResourceVirtualGeometryCounterReadbacks, kResourceVirtualGeometryVisibilitySnapshots
@@ -2240,6 +2322,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.protectedCommit = "Validates and seals one render-frame publication, then owns backend resource mutation, typed-range recording, queue submission, pending counters, and visibility targets.";
 	commit.protectedCommit += " Depth query recording, actual submit/completion ownership and optional completed validation copies stay here; workers do not issue Vulkan commands or mutate the scene.";
 	commit.protectedCommit += " Consumes captured camera/light scratch collections without reclaiming their resource while borrowed.";
+	commit.protectedCommit += " Records atmosphere, output dithering, and their GPU timestamps from the sealed view resources.";
 	commit.protectedReason = commit.protectedCommit;
 	commit.profilingLabel = "RenderSystem.BackendCommit";
 
