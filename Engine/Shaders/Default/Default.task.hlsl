@@ -731,19 +731,13 @@ float3 DecodePageLocalMeshletPosition(PageLocalPayloadDescriptor descriptor, con
 		+ decodedVertex.normalizedPosition * decode.positionScale.xyz;
 }
 
-bool TryProjectMeshletVertex(const MeshDecodeInfo decode, const MeshletRecord record, const uint vertexIndex, out float2 uv, out float depth)
+bool TryProjectLocalMeshletPosition(const float3 localPosition, const column_major float4x4 modelMatrix, out float2 uv, out float depth)
 {
 	uv = float2(0.0f, 0.0f);
 	depth = 1.0f;
 
-	uint globalVertexIndex = 0u;
-	if (!TryLoadMeshletGlobalVertexIndex(decode, record, vertexIndex, globalVertexIndex))
-	{
-		return false;
-	}
-
-	const float3 localPosition = DecodeMeshletPosition(decode, globalVertexIndex);
-	const float3 worldPosition = mul(SceneUniforms.model, float4(localPosition, 1.0f)).xyz;
+	// Match rasterization, including the per-instance model in a grouped draw.
+	const float3 worldPosition = mul(modelMatrix, float4(localPosition, 1.0f)).xyz;
 	const float4 clipPosition = mul(SceneUniforms.viewProj, float4(worldPosition, 1.0f));
 	if (clipPosition.w <= 0.0f)
 	{
@@ -751,15 +745,29 @@ bool TryProjectMeshletVertex(const MeshDecodeInfo decode, const MeshletRecord re
 	}
 
 	const float3 ndcPosition = clipPosition.xyz / clipPosition.w;
-	if (!all(isfinite(ndcPosition)))
+	// Meshlets crossing a depth clip plane need clipping before a screen-space
+	// occlusion proof is usable. Keep them for rasterization.
+	if (!all(isfinite(ndcPosition)) || ndcPosition.z < 0.0f || ndcPosition.z > 1.0f)
 	{
 		return false;
 	}
 
 	// Projection is already Y-flipped on CPU for Vulkan, so do not flip again here.
 	uv = ndcPosition.xy * 0.5f + 0.5f;
-	depth = saturate(ndcPosition.z);
+	depth = ndcPosition.z;
 	return true;
+}
+
+bool TryProjectMeshletVertex(const MeshDecodeInfo decode, const MeshletRecord record, const uint vertexIndex, const column_major float4x4 modelMatrix, out float2 uv, out float depth)
+{
+	uv = float2(0.0f, 0.0f);
+	depth = 1.0f;
+	uint globalVertexIndex = 0u;
+	if (!TryLoadMeshletGlobalVertexIndex(decode, record, vertexIndex, globalVertexIndex))
+	{
+		return false;
+	}
+	return TryProjectLocalMeshletPosition(DecodeMeshletPosition(decode, globalVertexIndex), modelMatrix, uv, depth);
 }
 
 bool TryProjectResolvedMeshletVertex(
@@ -768,12 +776,13 @@ bool TryProjectResolvedMeshletVertex(
 	const uint vertexIndex,
 	const PageLocalPayloadDescriptor pageDescriptor,
 	const bool pageLocal,
+	const column_major float4x4 modelMatrix,
 	out float2 uv,
 	out float depth)
 {
 	if (!pageLocal)
 	{
-		return TryProjectMeshletVertex(decode, record, vertexIndex, uv, depth);
+		return TryProjectMeshletVertex(decode, record, vertexIndex, modelMatrix, uv, depth);
 	}
 
 	uv = float2(0.0f, 0.0f);
@@ -784,26 +793,10 @@ bool TryProjectResolvedMeshletVertex(
 		return false;
 	}
 
-	const float3 localPosition = DecodePageLocalMeshletPosition(pageDescriptor, decode, globalVertexIndex);
-	const float3 worldPosition = mul(SceneUniforms.model, float4(localPosition, 1.0f)).xyz;
-	const float4 clipPosition = mul(SceneUniforms.viewProj, float4(worldPosition, 1.0f));
-	if (clipPosition.w <= 0.0f)
-	{
-		return false;
-	}
-
-	const float3 ndcPosition = clipPosition.xyz / clipPosition.w;
-	if (!all(isfinite(ndcPosition)))
-	{
-		return false;
-	}
-
-	uv = ndcPosition.xy * 0.5f + 0.5f;
-	depth = saturate(ndcPosition.z);
-	return true;
+	return TryProjectLocalMeshletPosition(DecodePageLocalMeshletPosition(pageDescriptor, decode, globalVertexIndex), modelMatrix, uv, depth);
 }
 
-bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const PageLocalPayloadDescriptor pageDescriptor, const bool pageLocal, out float2 uvMin, out float2 uvMax, out float meshletClosestDepth)
+bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const PageLocalPayloadDescriptor pageDescriptor, const bool pageLocal, const column_major float4x4 modelMatrix, out float2 uvMin, out float2 uvMax, out float meshletClosestDepth)
 {
 	uvMin = float2(1.0f, 1.0f);
 	uvMax = float2(0.0f, 0.0f);
@@ -841,7 +834,7 @@ bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCou
 
 		float2 projectedUv = float2(0.0f, 0.0f);
 		float projectedDepth = 1.0f;
-		if (!TryProjectResolvedMeshletVertex(decode, record, vertexIndex, pageDescriptor, pageLocal, projectedUv, projectedDepth))
+		if (!TryProjectResolvedMeshletVertex(decode, record, vertexIndex, pageDescriptor, pageLocal, modelMatrix, projectedUv, projectedDepth))
 		{
 			return false;
 		}
@@ -926,7 +919,7 @@ bool IsMeshletVertexCoverageOccluded(
 
 		float2 uv = float2(0.0f, 0.0f);
 		float depth = 1.0f;
-		if (!TryProjectMeshletVertex(decode, record, vertexIndex, uv, depth))
+		if (!TryProjectMeshletVertex(decode, record, vertexIndex, SceneUniforms.model, uv, depth))
 		{
 			return false;
 		}
@@ -1007,9 +1000,9 @@ bool IsMeshletTriangleCoverageOccluded(
 		float depth0 = 1.0f;
 		float depth1 = 1.0f;
 		float depth2 = 1.0f;
-		if (!TryProjectMeshletVertex(decode, record, index0, uv0, depth0)
-			|| !TryProjectMeshletVertex(decode, record, index1, uv1, depth1)
-			|| !TryProjectMeshletVertex(decode, record, index2, uv2, depth2))
+		if (!TryProjectMeshletVertex(decode, record, index0, SceneUniforms.model, uv0, depth0)
+			|| !TryProjectMeshletVertex(decode, record, index1, SceneUniforms.model, uv1, depth1)
+			|| !TryProjectMeshletVertex(decode, record, index2, SceneUniforms.model, uv2, depth2))
 		{
 			return false;
 		}
@@ -1121,12 +1114,12 @@ bool IsSmallMeshletCenterOccluded(
 	return meshletClosestDepth > (sampledDepth + occlusionBias);
 }
 
-bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const uint hiZViewIndex, inout MeshletCullingCounters counters, const float epsilon, const PageLocalPayloadDescriptor pageDescriptor, const bool pageLocal)
+bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const uint hiZViewIndex, inout MeshletCullingCounters counters, const float epsilon, const PageLocalPayloadDescriptor pageDescriptor, const bool pageLocal, const column_major float4x4 modelMatrix)
 {
 	float2 uvMin = float2(0.0f, 0.0f);
 	float2 uvMax = float2(0.0f, 0.0f);
 	float meshletClosestDepth = 1.0f;
-	if (!TryBuildProjectedMeshletRect(meshletIndex, meshletCount, decode, frameData, pageDescriptor, pageLocal, uvMin, uvMax, meshletClosestDepth))
+	if (!TryBuildProjectedMeshletRect(meshletIndex, meshletCount, decode, frameData, pageDescriptor, pageLocal, modelMatrix, uvMin, uvMax, meshletClosestDepth))
 	{
 		counters.hiZProjectionFailed += 1u;
 		return false;
@@ -1524,7 +1517,7 @@ void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex)
 					{
 						activeDecode = LoadPageLocalDecodeInfo(activePageDescriptor);
 					}
-					if (IsOccluded(meshletIndex, activeMeshletCount, activeDecode, frameData, hiZViewIndex, localCounters, epsilon, activePageDescriptor, pageLocalGeometry))
+					if (IsOccluded(meshletIndex, activeMeshletCount, activeDecode, frameData, hiZViewIndex, localCounters, epsilon, activePageDescriptor, pageLocalGeometry, cullingModelMatrix))
 					{
 						localCounters.meshletsCulledHiZ += 1u;
 						culled = true;

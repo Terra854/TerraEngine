@@ -378,9 +378,13 @@ TerraEngine::Renderer::Frame::VisibleCommandBuildResult RenderSystem::PrepareFra
 		HashCombine(signature, retainedRenderTopology.topology.generation);
 		HashCombine(signature, static_cast<std::uint64_t>(
 			TerraEngine::Scene::WorldPositionHash{}(referenceFrame.canonicalOrigin)));
-		HashCombine(signature, referenceFrame.originGeneration);
 		HashCombine(signature, referenceFrame.spatialGeneration);
 		HashCombine(signature, referenceFrame.residencyGeneration);
+		// The origin generation identifies the publication frame even when its
+		// canonical origin is unchanged. Keep that receipt in the cache key, but
+		// publish geometry evidence that can match across frames with equal inputs.
+		const std::uint64_t packetEvidenceSignature = signature;
+		HashCombine(signature, referenceFrame.originGeneration);
 		const auto materializeCachedCommands = [&](const VisibleCommandCacheRecord& record)
 		{
 			std::vector<RenderItemRecord> commands;
@@ -488,7 +492,7 @@ TerraEngine::Renderer::Frame::VisibleCommandBuildResult RenderSystem::PrepareFra
 				// and a second crowd-sized overlay allocation on every hit.
 				cachedResult.cachedRecord = &existing->second;
 				cachedResult.commands = std::move(cachedCommands);
-				cachedResult.packetEvidenceSignature = existing->second.signature;
+				cachedResult.packetEvidenceSignature = packetEvidenceSignature;
 				cachedResult.streamingTouchSet = existing->second.streamingTouchSet;
 				cachedResult.terrainTextureTouches = existing->second.terrainTextureTouches;
 				cachedResult.reuseTelemetry = BuildFrameVisibleCommandTelemetry(viewType, outputId, true, true, existing->second.streamingTouchSet);
@@ -511,7 +515,7 @@ TerraEngine::Renderer::Frame::VisibleCommandBuildResult RenderSystem::PrepareFra
 		const TerraEngine::Scene::SpatialReferenceFrame indexedFrame =
 			spatialIndex.GetReferenceFrame();
 		VisibleCommandBuildResult result;
-		result.packetEvidenceSignature = signature;
+		result.packetEvidenceSignature = packetEvidenceSignature;
 		if (indexedFrame.canonicalOrigin == referenceFrame.canonicalOrigin
 			&& indexedFrame.generation == referenceFrame.spatialGeneration)
 		{

@@ -42,6 +42,26 @@ Build/test evidence for this repair is retained under
 `out/validation/coderabbit-fixes-20261112-round6/`; source inspection and native
 regressions do not constitute a new long soak or AAA performance qualification.
 
+## Scene View occlusion during navigation
+
+Build and install as above, then run
+`ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.VirtualGeometryRenderer$' --output-on-failure`.
+The Scene View regression covers rejection of an older camera pose, including
+translation in a rebased view, and resumption when a completed depth pyramid
+matches the current view again.
+
+In the installed editor, orbit and strafe around a scene with overlapping
+opaque meshes. Check that newly exposed surfaces stay visible during movement.
+When depth history lags behind the camera, Scene View should draw the uncertain
+meshlets. After the camera settles, its meshlet counters should show Hi-Z
+culling again.
+
+Repeat at street level with an odd-sized viewport and several copies of a mesh
+placed on opposite sides of an occluder. Test while peeking past the occluder
+and when geometry intersects the near plane. Compare a settled capture with a
+reference running the same renderer with only the task shader's Hi-Z test
+disabled. The visible mesh and its silhouette should agree in both captures.
+
 ## Editor directional shadow reuse
 
 Build and install as above, then run

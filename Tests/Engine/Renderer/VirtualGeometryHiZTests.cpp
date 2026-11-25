@@ -612,11 +612,82 @@ namespace TerraEngine::Tests
 			context.Expect(cameraCut.occlusionAllowed, "Camera movement should keep Hi-Z active so virtual geometry does not lose occlusion while navigating.");
 			context.Expect(!cameraCut.projectionMatches, "Diagnostics should still show that the sampled pyramid came from a different view-projection.");
 			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(cameraCut.invalidReason), "Projection movement is diagnostic-only in the always-active Hi-Z path.");
-			context.Expect(multiViewReuse.occlusionAllowed, "Scene/Game view switches should keep Hi-Z active so editor interaction cannot permanently disable occlusion.");
+			context.Expect(!multiViewReuse.occlusionAllowed, "Scene View cannot sample depth from another view.");
 			context.Expect(!multiViewReuse.sameViewHistory, "Diagnostics should still reveal that the previous pyramid owner was another view.");
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(multiViewReuse.invalidReason), "View mismatch is diagnostic-only for the always-active editor Hi-Z path.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::ViewMismatch), static_cast<std::uint32_t>(multiViewReuse.invalidReason), "Scene View should report the mismatched owner.");
 			context.Expect(shadowView.occlusionAllowed, "Shadow-view metadata should not latch the shared Hi-Z validation state off.");
 			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(shadowView.invalidReason), "Shadow-view metadata should stay diagnostic-only in validation.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.Validation.SceneViewSkipsStaleDepthUntilTheSlotCatchesUp", [](TestContext& context) {
+			const glm::mat4 projection(1.0f);
+			VulkanHiZHistoryMetadata history = MakeValidHistory(1u, 1920u, 1080u, projection);
+			history.viewClass = VulkanHiZViewClass::Scene;
+			VulkanHiZValidationInput input = MakeValidationInput(1u, 1920u, 1080u, projection);
+			input.viewClass = VulkanHiZViewClass::Scene;
+
+			// Each step moves the reference origin while leaving the relative
+			// matrix unchanged. An older slot still contains the previous view.
+			for (std::uint64_t origin = 1u; origin <= 4u; ++origin)
+			{
+				input.projectionSignature = BuildVulkanHiZProjectionSignature(projection);
+				HashCombineVulkanHiZ(input.projectionSignature, origin);
+				const auto moved = ValidateVulkanHiZHistory(history, input);
+				context.Expect(!moved.occlusionAllowed && moved.failOpen
+					&& moved.invalidReason == VulkanHiZInvalidReason::ProjectionChanged,
+					"An older camera pose cannot hide meshlets in the current scene image.");
+				history.projectionSignature = input.projectionSignature;
+				const auto recovered = ValidateVulkanHiZHistory(history, input);
+				context.Expect(recovered.occlusionAllowed && recovered.historyValid && !recovered.failOpen,
+					"Completed depth from the matching camera resumes occlusion immediately.");
+			}
+
+			// A moved occluder or a different target invalidates even an exact
+			// camera match. An allocated, cleared image has no completed proof.
+			++input.depthSceneSignature;
+			const auto movedOccluder = ValidateVulkanHiZHistory(history, input);
+			context.Expect(!movedOccluder.occlusionAllowed
+				&& movedOccluder.invalidReason == VulkanHiZInvalidReason::DepthSceneChanged,
+				"Scene View must skip depth from an older set of occluders.");
+			history.depthSceneSignature = input.depthSceneSignature;
+			++input.targetId;
+			const auto changedTarget = ValidateVulkanHiZHistory(history, input);
+			context.Expect(!changedTarget.occlusionAllowed
+				&& changedTarget.invalidReason == VulkanHiZInvalidReason::TargetMismatch,
+				"One Scene View target cannot borrow another target's depth.");
+			const auto firstFrame = ValidateVulkanHiZHistory({}, input);
+			context.Expect(!firstFrame.occlusionAllowed && firstFrame.invalidReason == VulkanHiZInvalidReason::FirstFrame,
+				"An allocated pyramid must finish its first write before Scene View samples it.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.Projection.CoversOddMipFootprintsAndGroupedInstances", [](TestContext& context) {
+			const std::string taskShader = ReadSourceFile("Engine/Shaders/Default/Default.task.hlsl");
+			const std::string reduceShader = ReadSourceFile("Engine/Shaders/PostProcess/HiZGenerate.comp.hlsl");
+			context.Expect(ContainsText(taskShader, "activePageDescriptor, pageLocalGeometry, cullingModelMatrix"),
+				"The live Hi-Z check must use the same instance transform as frustum culling and rasterization.");
+			context.Expect(ContainsText(taskShader, "modelMatrix, projectedUv, projectedDepth")
+				&& ContainsText(taskShader, "ndcPosition.z < 0.0f || ndcPosition.z > 1.0f"),
+				"Projected meshlet vertices must use the instance transform and reject a depth clip crossing.");
+			context.Expect(ContainsText(reduceShader, "outputCoords * 2u")
+				&& ContainsText(reduceShader, "oddWidth ? 2u : 1u, oddHeight ? 2u : 1u"),
+				"The shader must include the third source texel independently for each odd dimension.");
+
+			// Check the reduction interval against the exact normalized texel
+			// footprint. A missed source texel could contain an uncovered pixel.
+			// Testing one axis at a time also covers the Cartesian product in 2D.
+			for (const std::uint32_t input : {1u, 2u, 3u, 5u, 6u, 7u, 151u, 303u, 711u, 1920u})
+			{
+				const std::uint32_t output = std::max(input / 2u, 1u);
+				for (std::uint32_t texel = 0u; texel < output; ++texel)
+				{
+					const std::uint32_t first = texel * 2u;
+					const std::uint32_t last = std::min(first + 1u + (input & 1u), input - 1u);
+					const std::uint32_t exactFirst = texel * input / output;
+					const std::uint32_t exactLast = ((texel + 1u) * input - 1u) / output;
+					context.Expect(first == exactFirst && last == exactLast,
+						"The Hi-Z mip must represent the full footprint sampled by normalized UV.");
+				}
+			}
 		});
 
 		registry.Add("VirtualGeometry.HiZ.Validation.ReportsWarmCurrentPyramidAcrossResizeAndCameraCut", [](TestContext& context) {

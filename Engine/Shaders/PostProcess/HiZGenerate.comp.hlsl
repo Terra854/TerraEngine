@@ -36,20 +36,28 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
-	// Mip reduction: sample a 2x2 area of the previous level. Odd-sized mips
-	// need clamping so the final texel never reads outside the source image.
-	uint2 inputCoords = outputCoords * 2;
-	uint2 maxInputCoords = max(config.inputSize, uint2(1, 1)) - uint2(1, 1);
+	// Consumers address mips by normalized UV. In an odd-sized source, each
+	// destination texel overlaps a third source texel on that axis. Reducing
+	// only a 2x2 block would miss coverage at those boundaries and at the edge.
+	const uint2 first = outputCoords * 2u;
+	const uint2 lastInput = config.inputSize - 1u;
+	const bool oddWidth = config.inputSize.x > 1u && (config.inputSize.x & 1u) != 0u;
+	const bool oddHeight = config.inputSize.y > 1u && (config.inputSize.y & 1u) != 0u;
+	const uint2 last = min(first + uint2(oddWidth ? 2u : 1u, oddHeight ? 2u : 1u), lastInput);
 
-	// For conservative occlusion culling in Standard Z (0=Near, 1=Far):
-	// We want the furthest depth in the region to test against.
-	// Furthest depth in Standard Z is the MAXIMUM value.
-	float d0 = inputDepth.Load(uint3(min(inputCoords + uint2(0, 0), maxInputCoords), 0));
-	float d1 = inputDepth.Load(uint3(min(inputCoords + uint2(1, 0), maxInputCoords), 0));
-	float d2 = inputDepth.Load(uint3(min(inputCoords + uint2(0, 1), maxInputCoords), 0));
-	float d3 = inputDepth.Load(uint3(min(inputCoords + uint2(1, 1), maxInputCoords), 0));
-
-	float furthestDepth = max(max(d0, d1), max(d2, d3));
+	// Standard Z uses 1 for the far plane and for uncovered depth. Carry
+	// the maximum forward so one uncovered pixel keeps the region visible.
+	float furthestDepth = 0.0f;
+	[unroll]
+	for (uint y = 0u; y < 3u; ++y) {
+		[unroll]
+		for (uint x = 0u; x < 3u; ++x) {
+			const uint2 inputCoords = first + uint2(x, y);
+			if (all(inputCoords <= last)) {
+				furthestDepth = max(furthestDepth, inputDepth.Load(uint3(inputCoords, 0)));
+			}
+		}
+	}
 
 	outputMip[outputCoords] = furthestDepth;
 }

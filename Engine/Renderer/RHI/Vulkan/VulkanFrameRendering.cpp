@@ -2408,10 +2408,14 @@ void VulkanContext::RenderFrame(
 		// global Hi-Z descriptors for the current frame slot.
 		impl->desiredHiZExtentByView[hiZViewIndex] = glm::uvec2(hiZTargetWidth, hiZTargetHeight);
 	}
-	const std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(currentViewProjection);
+	std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(cameraRasterViewProjection);
+	// The raster matrix is relative to the renderer origin. A camera and its
+	// origin can translate together while leaving every matrix element equal.
+	HashCombineVulkanHiZ(hiZProjectionSignature, static_cast<std::uint64_t>(
+		TerraEngine::Scene::WorldPositionHash{}(presentation.referenceFrame.canonicalOrigin)));
 	// Visibility preparation already hashes the exact view, world/resource
 	// revisions, selected route/LOD evidence, and stable command membership. Reuse
-	// that sealed proof for Hi-Z diagnostics instead of resolving and hashing every
+	// that sealed proof for Hi-Z history instead of resolving and hashing every
 	// visible command again on the protected Vulkan recording path. Legacy callers
 	// without publication evidence retain the complete fail-open scan.
 	const std::uint64_t hiZDepthSceneSignature =

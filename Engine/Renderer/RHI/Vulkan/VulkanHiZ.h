@@ -48,8 +48,8 @@ enum class VulkanHiZInvalidReason : std::uint32_t
 struct VulkanHiZHistoryMetadata
 {
 	// The history owner is the renderer output/view that produced the pyramid.
-	// The current implementation keeps one warm pyramid per frame slot, so
-	// ownership mismatches are diagnostic-only for editor camera/game views.
+	// Each frame slot keeps a completed pyramid. Scene View qualifies its
+	// owner before sampling, including views that share the same index.
 	uint32_t viewId = 0u;
 	VulkanHiZViewClass viewClass = VulkanHiZViewClass::Unknown;
 	// targetId separates Scene View, Game View, export, and future render-texture
@@ -57,13 +57,10 @@ struct VulkanHiZHistoryMetadata
 	uint32_t targetId = 0u;
 	uint32_t width = 0u;
 	uint32_t height = 0u;
-	// The projection signature includes the view-projection matrix for
-	// diagnostics. Interactive editor movement must not hard-disable Hi-Z,
-	// because virtual geometry needs occlusion feedback while the camera moves.
+	// Identifies the camera transform used to put depth in screen space.
 	std::uint64_t projectionSignature = 0u;
 	// Identifies the draw list and transforms that produced this depth pyramid.
-	// This stays diagnostic-only: the task shader already fails open when the
-	// sampled depth cannot conservatively prove the meshlet is hidden.
+	// Scene View compares it to reject depth left by changed occluders.
 	std::uint64_t depthSceneSignature = 0u;
 	std::uint64_t frameId = 0u;
 	uint32_t warmupFrames = 0u;
@@ -210,10 +207,26 @@ inline VulkanHiZValidationResult ValidateVulkanHiZHistory(const VulkanHiZHistory
 		return result;
 	}
 
-	// All other validation inputs are diagnostics only. The task shader already
-	// fails open per meshlet when the pyramid cannot conservatively prove
-	// occlusion, so quality toggles, ownership, camera motion, guard metadata,
-	// and first-frame history must not latch Hi-Z off for the running editor.
+	// A completed Scene View pyramid belongs to an earlier use of this frame
+	// slot. The task shader projects bounds with the live camera, so even a
+	// valid depth sample can hide visible geometry when the two views differ.
+	// Rendering proceeds without occlusion on a mismatch and produces depth
+	// for the next use of the slot. Frustum and cone culling still run.
+	if (input.viewClass == VulkanHiZViewClass::Scene)
+	{
+		if (input.cameraCut) result.invalidReason = VulkanHiZInvalidReason::CameraCut;
+		else if (!history.valid) result.invalidReason = VulkanHiZInvalidReason::FirstFrame;
+		else if (!result.sameViewHistory) result.invalidReason = VulkanHiZInvalidReason::ViewMismatch;
+		else if (!result.sameTargetHistory) result.invalidReason = VulkanHiZInvalidReason::TargetMismatch;
+		else if (history.width != input.width || history.height != input.height) result.invalidReason = VulkanHiZInvalidReason::Resize;
+		else if (!result.projectionMatches) result.invalidReason = VulkanHiZInvalidReason::ProjectionChanged;
+		else if (!result.depthSceneMatches) result.invalidReason = VulkanHiZInvalidReason::DepthSceneChanged;
+		else result.invalidReason = VulkanHiZInvalidReason::None;
+		if (result.invalidReason != VulkanHiZInvalidReason::None)
+			return result;
+	}
+
+	// The other view classes keep their existing resource-availability policy.
 
 	result.historyValid = true;
 	result.occlusionAllowed = true;
