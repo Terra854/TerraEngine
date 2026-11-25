@@ -13,6 +13,7 @@
 #include "Resource/ResourceManager.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
 #include "File Formats/TerraEngineMeshFile.h"
+#include "File Formats/TerraEngineMaterialFile.h"
 #include "Animation/Assets/SkeletonAsset.h"
 #include "Components/TerrainComponent.h"
 #include "Components/AnimatorComponent.h"
@@ -971,9 +972,10 @@ void RenderSystem::CollectFrameRenderableInputs(
 						// off-camera shadow casters. The frame map deduplicates this ID; native
 						// admission owns budgeting and job coalescing without blocking capture.
 						renderableResourcePublicationsComplete = false;
-						(void)resourceManager.RequestStreamableLoad(meshId, AssetType::Mesh,
-							TerraEngine::Resource::StreamingNeedType::Visible, nextRenderFrameId,
-							"renderer-missing-mesh-publication", cached.objectId);
+						if (!lifetimeState->initialScene.warming)
+							(void)resourceManager.RequestStreamableLoad(meshId, AssetType::Mesh,
+								TerraEngine::Resource::StreamingNeedType::Visible, nextRenderFrameId,
+								"renderer-missing-mesh-publication", cached.objectId);
 					}
 					retainedRuntimeMeshOwners[meshId] = owner;
 					lastRuntimeMesh = owner.get();
@@ -1001,9 +1003,10 @@ void RenderSystem::CollectFrameRenderableInputs(
 						// Retain the missing result honestly for this immutable frame. A later
 						// accepted publication, rather than the request itself, enables reuse.
 						renderableResourcePublicationsComplete = false;
-						(void)resourceManager.RequestStreamableLoad(materialId, AssetType::Material,
-							TerraEngine::Resource::StreamingNeedType::Visible, nextRenderFrameId,
-							"renderer-missing-material-publication", cached.objectId);
+						if (!lifetimeState->initialScene.warming)
+							(void)resourceManager.RequestStreamableLoad(materialId, AssetType::Material,
+								TerraEngine::Resource::StreamingNeedType::Visible, nextRenderFrameId,
+								"renderer-missing-material-publication", cached.objectId);
 					}
 					retainedRuntimeMaterialOwners[materialId] = owner;
 					frameMaterialResources.emplace(materialId, owner.get());
@@ -1038,6 +1041,65 @@ void RenderSystem::CollectFrameRenderableInputs(
 				cached.objectStatic, &cached.mesh, runtimeMesh,
 				std::move(animationBinding) });
 		}
+}
+
+// Queue each registered startup dependency once. ResourceManager owns the
+// immutable IO/decode jobs; this capture boundary only polls shared receipts.
+bool RenderSystem::WarmInitialSceneResourcesAtProtectedBoundary()
+{
+	auto& startup = lifetimeState->initialScene;
+	auto& resources = ResourceManager::Instance();
+	bool pending = false;
+	const auto requestMissing = [&](AssetType type, const TerraEngine::UUID& id, auto loader, auto acquire) {
+		const auto key = std::pair{type, id};
+		auto request = startup.requests.find(key);
+		if (request == startup.requests.end())
+		{
+			const auto path = resources.GetRegisteredAssetPath(id, type);
+			if (path.empty()) return; // A dangling reference cannot produce a load receipt.
+			request = startup.requests.emplace(key, (resources.*loader)(path)).first;
+		}
+		auto& receipt = request->second;
+		if (!receipt.valid()) return; // Previously settled without a usable payload.
+		if (receipt.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+		{
+			pending = true;
+			return;
+		}
+		// If a worker published after this frame captured the missing owner,
+		// wait for the next capture to include it and its material dependencies.
+		if (receipt.get() != TerraEngine::EMPTY_UUID && (resources.*acquire)(id))
+		{
+			pending = true;
+			return;
+		}
+		TERRAENGINE_LOG(LogLevel::Warning, "Initial scene resource could not be loaded: " << ToHexString(id));
+		receipt = {};
+	};
+	for (const auto& [id, mesh] : retainedRuntimeMeshOwners)
+	{
+		if (!mesh) requestMissing(AssetType::Mesh, id, &ResourceManager::LoadMeshAsync, &ResourceManager::AcquireMeshSnapshot);
+	}
+	std::unordered_set<TerraEngine::UUID> checkedTextures;
+	for (const auto& [id, material] : retainedRuntimeMaterialOwners)
+	{
+		if (!material)
+		{
+			requestMissing(AssetType::Material, id, &ResourceManager::LoadMaterialAsync, &ResourceManager::AcquireMaterialSnapshot);
+			continue;
+		}
+		for (const auto& binding : material->textures)
+		{
+			const auto texture = binding.textureUuid;
+			if (texture != TerraEngine::EMPTY_UUID && checkedTextures.insert(texture).second
+				&& !resources.AcquireTextureSnapshot(texture))
+				requestMissing(AssetType::Texture, texture, &ResourceManager::LoadTextureAsync, &ResourceManager::AcquireTextureSnapshot);
+		}
+	}
+	if (pending) return false;
+	startup.warming = false;
+	startup.requests.clear();
+	return true;
 }
 
 // Acquire exact immutable scene and animation owners at the existing protected boundary.

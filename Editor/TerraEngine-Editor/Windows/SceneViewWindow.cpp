@@ -4,6 +4,7 @@
 // It handles editor-specific rendering features like the grid, selection outlines, and camera movement controls.
 
 #include "SceneViewWindow.h"
+#include "ViewportLoadingIndicator.h"
 #include "NavigationWindow.h"
 #include "TerrainWindow.h"
 #include "../Core/EditorContext.h"
@@ -2366,7 +2367,8 @@ void SceneViewWindow::OnGui() {
 	DrawSceneToolbar();
 	ImGui::SameLine();
 
-	void* texID = m_Owner->GetSceneTextureID();
+	const bool initialSceneHidden = RenderSystem::Instance().IsInitialSceneViewHidden(RenderViewType::Scene);
+	void* texID = initialSceneHidden ? nullptr : m_Owner->GetSceneTextureID();
 
 	constexpr std::uint32_t kSceneViewVirtualGeometryOutputId = 1u;
 	if (!m_VirtualGeometryDebugModeInitialized)
@@ -2457,7 +2459,9 @@ void SceneViewWindow::OnGui() {
 	}
 	
 
-	if (texID) {
+	if (initialSceneHidden) {
+		TerraEngine::Editor::DrawViewportLoadingIndicator(contentSize);
+	} else if (texID) {
 		ImGui::Image((ImTextureID)texID, contentSize);
 	} else {
 		ImGui::Text("Scene rendering not available.");

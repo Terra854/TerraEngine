@@ -204,6 +204,8 @@ public:
 
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
+	// The editor keeps running and requesting views while their first scene image is withheld.
+	bool IsInitialSceneViewHidden(RenderViewType viewType) const;
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot GetLatestSpatialDiagnostics(RenderViewType viewType) const;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
@@ -711,6 +713,8 @@ private:
 		const std::shared_ptr<const TerraEngine::Scene::SceneChangePacket>& protectedSceneChanges,
 		bool renderableMetadataCaptureCurrent, std::uint64_t protectedTerrainProxyGeneration);
 
+	// Published by the protected renderer boundary and read by editor viewport UI.
+	std::atomic<std::uint8_t> initialSceneHiddenViews{0U};
 	mutable std::mutex statsMutex;
 	TerraEngine::Scene::SpatialIndex spatialIndex;
 	RenderStatsSnapshot latestGameStats{};
@@ -1258,6 +1262,7 @@ void PublishFrameDiagnostics(TerraEngine::Renderer::RenderFrameSnapshot& renderF
 	TerraEngine::Renderer::RenderDiagnosticsSummary& renderGraphDiagnostics);
 
 	struct FrameRenderableCaptureState;
+	bool WarmInitialSceneResourcesAtProtectedBoundary();
 	FrameRenderableCaptureState CaptureFrameRenderableInputs(
 	const FrameCaptureRoots& roots, std::pmr::vector<CameraEntry>& cameras, std::pmr::vector<LightEntry>& lights,
 	const std::shared_ptr<const TerraEngine::Renderer::RenderFrameScratchValidationCallbacks>& scratchValidation);

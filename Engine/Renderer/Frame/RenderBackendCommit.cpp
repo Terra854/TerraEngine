@@ -133,6 +133,21 @@ std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> RenderSyste
 	auto* vulkan = dynamic_cast<VulkanContext*>(rhi.get());
 	const auto recorded = backendAccepted && vulkan && sealedPublication
 		? vulkan->ReadRecordedGraphicsViews(sealedPublication->frameId) : std::vector<VulkanContext::RecordedGraphicsView>{};
+	// A withheld editor viewport can sample its target only after Vulkan has
+	// recorded a matching normal view. Indexed topology preparation can leave a
+	// view unrecorded for several frames while its workers and uploads settle.
+	if (editorModeEnabled && initialSceneHiddenViews.load(std::memory_order_relaxed) != 0u)
+	{
+		using State = RenderSystemLifetimeState::InitialSceneState;
+		std::uint8_t readyViews = 0u;
+		for (const auto& view : recorded)
+		{
+			const auto kind = sealedPublication->presentationInputs[view.publicationIndex].output.kind;
+			if (kind == RenderOutputKind::SceneView) readyViews |= State::SceneView;
+			if (kind == RenderOutputKind::GameView) readyViews |= State::GameView;
+		}
+		initialSceneHiddenViews.fetch_and(static_cast<std::uint8_t>(~readyViews), std::memory_order_release);
+	}
 	const bool hasDedicatedCapture = sealedPublication && std::any_of(sealedPublication->presentationInputs.begin(),
 		sealedPublication->presentationInputs.end(), [](const auto& view) {
 			return view.output.kind == RenderOutputKind::OffscreenTexture;

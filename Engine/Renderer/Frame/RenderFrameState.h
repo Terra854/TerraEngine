@@ -17,6 +17,7 @@
 #include <utility>
 #include <future>
 #include <filesystem>
+#include <map>
 
 namespace TerraEngine::Renderer::GraphicsSettings { class GraphicsSettingsPersistence; }
 
@@ -239,6 +240,17 @@ struct RenderSystemLifetimeState
 	// and strong lease before this lifetime can release the stable scratch owner.
 	std::shared_ptr<TerraEngine::Renderer::RenderFrameScratch> frameScratch;
 	FramePhaseState framePhase;
+	// Protected renderer-owned state. Workers only own native resource requests;
+	// they cannot change which scene or viewport the renderer reveals.
+	struct InitialSceneState
+	{
+		static constexpr std::uint8_t SceneView = 1u;
+		static constexpr std::uint8_t GameView = 2u;
+		std::uint64_t sceneGeneration = 0u;
+		TerraEngine::UUID sceneId = TerraEngine::EMPTY_UUID;
+		bool warming = false;
+		std::map<std::pair<AssetType, TerraEngine::UUID>, std::shared_future<TerraEngine::UUID>> requests;
+	} initialScene;
 	RetainedRenderTopologyState retainedRenderTopology;
 	GroupedSubmissionMembershipCacheState groupedSubmissionMembershipCache;
 	TerraEngine::Renderer::Vulkan::VulkanRendererPreparationCache rendererPreparationCache;

@@ -1276,6 +1276,13 @@ void RenderSystem::UpdateAtExecutionBoundary(float deltaTime)
 	ObserveFrameScratchAtProtectedBoundary();
 }
 
+bool RenderSystem::IsInitialSceneViewHidden(RenderViewType viewType) const
+{
+	using State = RenderSystemLifetimeState::InitialSceneState;
+	const auto viewBit = viewType == RenderViewType::Scene ? State::SceneView : State::GameView;
+	return (initialSceneHiddenViews.load(std::memory_order_acquire) & viewBit) != 0u;
+}
+
 RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 {
 	if (!initialized) {
@@ -1350,6 +1357,18 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const FrameCaptureRoots capturedRoots = CaptureFrameRoots();
 	const auto& protectedRendererGeneration = capturedRoots.protectedRendererGeneration;
 	const auto& protectedSceneGeneration = capturedRoots.protectedSceneGeneration;
+	auto& initialScene = lifetimeState->initialScene;
+	const auto activeSceneId = SceneManager::Instance().GetActiveSceneId();
+	if (initialScene.sceneId != activeSceneId || initialScene.sceneGeneration != protectedSceneGeneration)
+	{
+		initialScene.requests.clear();
+		initialScene.sceneId = activeSceneId;
+		initialScene.sceneGeneration = protectedSceneGeneration;
+		initialScene.warming = activeSceneId != TerraEngine::EMPTY_UUID && dynamic_cast<VulkanContext*>(rhi.get());
+		using State = RenderSystemLifetimeState::InitialSceneState;
+		initialSceneHiddenViews.store(initialScene.warming && editorModeEnabled
+			? State::SceneView | State::GameView : 0u, std::memory_order_release);
+	}
 	const auto& animationPresentationFrame = capturedRoots.animationPresentationFrame;
 	const auto& immutableGpuAnimationPlan = capturedRoots.immutableGpuAnimationPlan;
 	const auto& hasDenseAnimationTopologyCandidate = capturedRoots.hasDenseAnimationTopologyCandidate;
@@ -1370,6 +1389,16 @@ RenderFrameExecution RenderSystem::BuildFrameExecution(float deltaTime)
 	const auto& runtimeLayoutRejectionReasons = capturedRenderables.runtimeLayoutRejectionReasons;
 	const auto& capturedScratchDiagnostics = capturedRenderables.capturedScratchDiagnostics;
 	const auto& aliveCompatibleAnimationObjects = capturedRenderables.aliveCompatibleAnimationObjects;
+
+	// Keep polling native load receipts without acquiring a swapchain image.
+	// The first frame then goes through the ordinary protected GPU preparation.
+	if (initialScene.warming && !WarmInitialSceneResourcesAtProtectedBoundary())
+	{
+		++nextRenderFrameId;
+		ClearOverrideCameras();
+		scratchLease.MarkCompleted();
+		co_return;
+	}
 
 	const FrameTerrainCapture terrainCapture = CaptureFrameTerrainInputs(std::span<const RenderableEntry>(renderables));
 	RetireFrameAnimationPoseOwners(aliveCompatibleAnimationObjects);
@@ -1998,6 +2027,7 @@ void RenderSystem::Shutdown()
 	// Release every retained topology/view/backend cache with the renderer
 	// session. A later Initialize starts from an empty, instance-owned state.
 	lifetimeState = std::make_unique<RenderSystemLifetimeState>();
+	initialSceneHiddenViews.store(0u, std::memory_order_release);
 	hasCachedSkyObjectResolution = false;
 	TerraEngine::Renderer::ClearAnimatedObjectVisibilitySnapshot();
 	cachedSkyObject.reset();

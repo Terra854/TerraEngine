@@ -415,6 +415,32 @@ foot dip remains animation/foot-placement polish, not a reason to raise the
 entire visual and misalign Idle. An explicit scene-file reopen was not performed:
 MCP requested approval; automated serialization round-trip coverage passed.
 
+## Scene startup rendering
+
+Build and install the current configuration before checking startup rendering.
+
+```powershell
+cmake --build out/build/RelWithDebInfo --config RelWithDebInfo --target install
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Engine\.(ResourceAsyncLifecycle|RuntimeMemorySafety\.(TaskCache|EmptyFramePolicy))|Editor\.HeadlessExport' --output-on-failure
+```
+
+Launch the installed editor with a cold project containing several distinct cooked
+meshes in the initial view. Keep the camera still and check that the viewport shows
+the loading indicator until the first scene frame. The Windows regression probe
+records the first observable draw count and worker count. Pass the expected draw
+count for the fixture's stationary view.
+
+```powershell
+python Tests/Tools/Correctness/TestInitialSceneDraws.py --editor out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe --project <disposable-project> --scene Startup --minimum-draws 8
+```
+
+Export a scene with an authored camera and check that the first frame appears
+without a loading indicator in a fresh game process.
+Reopen a different scene to check that an old
+viewport image is never shown as the new scene loads. For the failure path, use a
+disposable project with an invalid cooked mesh and check that valid objects still
+appear without waiting for the failed asset indefinitely.
+
 ## Movement inspector usability
 
 Build `TerraEngine-Editor` and `TerraEngine-EditorTests` using the RelWithDebInfo

@@ -4,6 +4,7 @@
 // It manages the transition between editor and game camera modes and provides runtime performance statistics.
 
 #include "GameViewWindow.h"
+#include "ViewportLoadingIndicator.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RendererRecovery.h"
@@ -296,7 +297,8 @@ void GameViewWindow::OnGui() {
 	UISystem::Instance().SetGameViewportSize(glm::vec2(imageSize.x, imageSize.y));
 
 	// --- Draw Render ---
-	void* texID = (m_Owner != nullptr && updateDecision.queryRenderTexture) ? m_Owner->GetGameTextureID() : nullptr;
+	const bool initialSceneHidden = RenderSystem::Instance().IsInitialSceneViewHidden(RenderViewType::Game);
+	void* texID = (!initialSceneHidden && m_Owner != nullptr && updateDecision.queryRenderTexture) ? m_Owner->GetGameTextureID() : nullptr;
 	ImVec2 cursorPos = ImGui::GetCursorScreenPos();
 	ImDrawList* drawList = ImGui::GetWindowDrawList();
 	drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
@@ -347,10 +349,14 @@ void GameViewWindow::OnGui() {
 			ImGui::IsMouseDown(ImGuiMouseButton_Left));
 	} else {
 		UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
-		const char* text = !hasCameras ? "No objects with cameras in the hierarchy" : "No Camera Rendering";
-		ImVec2 textSize = ImGui::CalcTextSize(text);
-		ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + (availableSize.x - textSize.x) * 0.5f, cursorPos.y + (availableSize.y - textSize.y) * 0.5f));
-		ImGui::Text("%s", text);
+		if (initialSceneHidden && hasCameras) {
+			TerraEngine::Editor::DrawViewportLoadingIndicator(availableSize);
+		} else {
+			const char* text = !hasCameras ? "No objects with cameras in the hierarchy" : "No Camera Rendering";
+			ImVec2 textSize = ImGui::CalcTextSize(text);
+			ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + (availableSize.x - textSize.x) * 0.5f, cursorPos.y + (availableSize.y - textSize.y) * 0.5f));
+			ImGui::Text("%s", text);
+		}
 	}
 
 	// The VG toolbar combo still controls visualization modes, but the retired
