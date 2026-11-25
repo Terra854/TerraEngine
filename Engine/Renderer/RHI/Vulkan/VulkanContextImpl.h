@@ -715,6 +715,7 @@ struct VulkanContext::Impl {
 	{
 		std::uint32_t directionalCount = 0u;
 		std::uint32_t sceneDirectionalCount = 0u;
+		std::uint32_t sceneDirectionalResolution = SHADOW_MAP_RESOLUTION;
 		std::uint32_t spotCount = 0u;
 		std::uint32_t areaCount = 0u;
 		std::uint32_t pointCount = 0u;
@@ -725,6 +726,13 @@ struct VulkanContext::Impl {
 		static constexpr std::uint32_t DirectionalSlot(std::uint32_t logicalSlot, bool sceneBank)
 		{
 			return logicalSlot + (sceneBank ? MAX_SHADOW_RESOURCE_SLOTS : 0u);
+		}
+
+		// The fitted editor bank has one sun. Additional slots use the normal budget tiers.
+		std::uint32_t DirectionalRegionSize(std::uint32_t slot) const
+		{
+			if (slot == DirectionalSlot(0u, true)) return sceneDirectionalResolution;
+			return slot % MAX_SHADOW_RESOURCE_SLOTS >= 16u ? SHADOW_MAP_RESOLUTION / 2u : SHADOW_MAP_RESOLUTION;
 		}
 
 		std::uint32_t DirectionalCount() const

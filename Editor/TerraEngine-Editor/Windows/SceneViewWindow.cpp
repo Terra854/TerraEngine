@@ -12,6 +12,7 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Renderer/DirectionalShadowProjection.h"
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Resource/ResourceManager.h"
@@ -1276,12 +1277,7 @@ float SceneViewWindow::ResolveShadowFocusDepth(const glm::vec3& forward) const
 	const auto localized = TerraEngine::Scene::LocalizeWorldPosition(focus, m_CameraPosition, 1000.0);
 	if (!localized.Succeeded()) return 0.0f;
 
-	const glm::vec3 offset(localized.offsetMetres);
-	const float depth = glm::dot(offset, forward);
-	const glm::vec3 lateral = offset - forward * depth;
-	// A point behind the camera or far from its view ray cannot usefully anchor
-	// the shadow map. Returning zero keeps coverage near the camera.
-	return depth > 0.0f && glm::dot(lateral, lateral) <= 0.25f * depth * depth ? depth : 0.0f;
+	return TerraEngine::Renderer::ResolveDirectionalShadowFocusDepth(glm::vec3(localized.offsetMetres), forward);
 }
 
 void SceneViewWindow::CaptureFlyShadowFocus()

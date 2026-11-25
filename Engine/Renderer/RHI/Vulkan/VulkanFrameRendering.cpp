@@ -611,6 +611,16 @@ void VulkanContext::RenderFrame(
 		&& presentation.efficiencyFixtureIntent.cameras.empty();
 	requestedShadowResources.directionalCount = impl->activeShadowResourceRequest.directionalCount;
 	requestedShadowResources.sceneDirectionalCount = impl->activeShadowResourceRequest.sceneDirectionalCount;
+	requestedShadowResources.sceneDirectionalResolution = impl->activeShadowResourceRequest.sceneDirectionalResolution;
+	const auto& sceneCoverage = presentation.directionalShadowSceneCoverage;
+	const auto cameraInShadowFrame = sceneCoverage ? TerraEngine::Scene::LocalizeWorldPosition(
+		presentation.referenceFrame.canonicalOrigin, sceneCoverage->center,
+		TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres) : TerraEngine::Scene::WorldLocalizationResult{};
+	const bool useSceneShadowCoverage = sceneDirectionalBank && sceneCoverage && cameraInShadowFrame.Succeeded()
+		&& TerraEngine::Renderer::IsValidSceneDirectionalShadowResolution(sceneCoverage->resolution);
+	if (sceneDirectionalBank)
+		requestedShadowResources.sceneDirectionalResolution = useSceneShadowCoverage
+			? sceneCoverage->resolution : VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
 	auto& directionalDemand = sceneDirectionalBank
 		? requestedShadowResources.sceneDirectionalCount : requestedShadowResources.directionalCount;
 	directionalDemand = std::min(budgetResult.diagnostics.allocatedDirectionalRegionCount,
@@ -788,7 +798,7 @@ void VulkanContext::RenderFrame(
 
 		for (uint32_t ordinal = 0u; ordinal < impl->activeShadowResourceRequest.DirectionalCount(); ++ordinal) {
 			const auto slotIndex = impl->activeShadowResourceRequest.PhysicalDirectionalSlot(ordinal);
-			const auto regionSize = Shadow2DRegionSizeForSlot(slotIndex % VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+			const auto regionSize = impl->activeShadowResourceRequest.DirectionalRegionSize(slotIndex);
 			if (!EnsureFramebuffer(impl->directionalShadowFramebuffers[slotIndex], impl->directionalShadowColors[slotIndex].view, impl->directionalShadowDepths[slotIndex].view, regionSize, regionSize)) {
 				return false;
 			}
@@ -1952,6 +1962,10 @@ void VulkanContext::RenderFrame(
 		return nullptr;
 	};
 
+	// Keep depth recording and its cache proof in the fixed scene frame. Only
+	// the receiver matrix translates from the current view into that frame.
+	std::optional<glm::mat4> sceneShadowProjection;
+	TerraEngine::UUID sceneShadowLightId{};
 	for (const FrameLightCandidate& candidate : budgetResult.retainedLights) {
 		GPULight light = candidate.gpuLight;
 		if (const ShadowResourceAssignmentDiagnostic* assignment = FindShadowAssignment(candidate.lightId)) {
@@ -1985,13 +1999,30 @@ void VulkanContext::RenderFrame(
 				// producers leave it empty and use the camera-centered projection.
 				const auto shadow = TerraEngine::Renderer::BuildDirectionalShadowProjection(
 					glm::vec3(light.directionAndRange),
-					presentation.directionalShadowAnchor.value_or(presentation.cameraLocalPosition));
+					presentation.directionalShadowAnchor.value_or(presentation.cameraLocalPosition),
+					presentation.referenceFrame.canonicalOrigin);
 				light.positionAndType = glm::vec4(shadow.center, light.positionAndType.w);
 				// Publish the same physical bank that owns this view's depth pass.
 				const auto physicalSlot = VulkanContext::Impl::ShadowResourceRequest::DirectionalSlot(
 					shadowSlotIndex, sceneDirectionalBank);
 				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndices[physicalSlot]);
-				StoreShadowViewProjection(light, shadow.viewProjection);
+				// Directionals have no cone. Reuse these typed lanes for the actual
+				// image width and the normalized bias scale of the fitted depth range.
+				light.coneAnglesAndArea.x = static_cast<float>(impl->activeShadowResourceRequest.DirectionalRegionSize(physicalSlot));
+				light.coneAnglesAndArea.y = 1.0f;
+				if (useSceneShadowCoverage && shadowSlotIndex == 0u) {
+					const auto fitted = TerraEngine::Renderer::BuildDirectionalShadowProjection(glm::vec3(light.directionAndRange),
+						glm::vec3(0.0f), sceneCoverage->center.offsetMetres, sceneCoverage->resolution, true);
+					sceneShadowProjection = fitted.viewProjection;
+					sceneShadowLightId = candidate.lightId;
+					using namespace TerraEngine::Renderer;
+					light.coneAnglesAndArea.y = (kDirectionalShadowBaseFarPlane - kDirectionalShadowNearPlane)
+						/ (SceneDirectionalShadowFarPlane(sceneCoverage->resolution) - kDirectionalShadowNearPlane);
+					light.positionAndType = glm::vec4(fitted.center - glm::vec3(cameraInShadowFrame.offsetMetres), light.positionAndType.w);
+					StoreShadowViewProjection(light, glm::translate(fitted.viewProjection, glm::vec3(cameraInShadowFrame.offsetMetres)));
+				} else {
+					StoreShadowViewProjection(light, shadow.viewProjection);
+				}
 			}
 			else if (lightType == 1u) {
 				light.shadowAndPadding.y = static_cast<float>(shadowSlotIndex);
@@ -4230,6 +4261,11 @@ void VulkanContext::RenderFrame(
 		PreparedShadowList& preparedList =
 			preparedShadowLists[shadowListIndex];
 		preparedList.lightId = shadowDrawList.lightId;
+		auto shadowReferenceFrame = presentation.referenceFrame;
+		// ResolveShadowDrawListItem localizes the canonical dynamic pose in this
+		// frame. The prepared camera instance buffer only supplies other metadata.
+		if (sceneShadowProjection && shadowDrawList.lightId == sceneShadowLightId)
+			shadowReferenceFrame.canonicalOrigin = sceneCoverage->center;
 		preparedList.sourceOrdinalCount = shadowDrawList.stableOrdinals.size();
 		preparedList.draws.reserve(shadowDrawList.stableOrdinals.size());
 		// One immutable publication qualifies the entire instance record array.
@@ -4268,7 +4304,7 @@ void VulkanContext::RenderFrame(
 			preparedList.batchSources.push_back(source);
 			auto& batchSource = preparedList.batchSources.back();
 			if(!TerraEngine::Renderer::ResolveShadowDrawListItem(
-				*publication, presentation.referenceFrame,
+				*publication, shadowReferenceFrame,
 				shadowDrawList, itemIndex, command)) {
 				preparedList.recordingReady = false;
 				preparedList.rejection.Capture("ResolveShadowItem", shadowDrawList.stableOrdinals[itemIndex]);
@@ -4401,7 +4437,7 @@ void VulkanContext::RenderFrame(
 			const std::uint64_t segmentId = (static_cast<std::uint64_t>(selectedShadowMeshletOffset) << 32U)
 				| selectedShadowMeshletCount;
 			auto casterInput = TerraEngine::Renderer::BuildShadowCasterStampInput(
-				command, presentation.referenceFrame, segmentId);
+				command, shadowReferenceFrame, segmentId);
 			const auto currentResourceGeneration = drawResources.GetRendererResourcePublicationGeneration();
 			// Adjacent opaque draws can share their exact native owner check.
 			// The preparation key includes the mesh, material and selected pipeline.
@@ -4559,6 +4595,7 @@ void VulkanContext::RenderFrame(
 				if (sourceCurrent) record = shadowDrawList.instanceInputs->records[itemIndex];
 				// The protected lowering patches every actually consumed selector after
 				// accepted native resource/animation/page preparation, preserving identity.
+				// Always overwrite the camera-local cached model with the shadow-local model.
 				record.modelMatrix = draw.push.model; record.editorTint = draw.push.editorTint;
 				record.materialAndTexture.x = draw.push.materialIndex; record.materialAndTexture.y = draw.push.textureIndex;
 				record.animationSelectors.x = draw.push.meshDataIndex; record.animationSelectors.y = draw.push.textureIndex;
@@ -4823,6 +4860,8 @@ void VulkanContext::RenderFrame(
 				record.regionWidth = std::max(assignment->regionWidth, 1u);
 				record.regionHeight = std::max(assignment->regionHeight, 1u);
 			}
+			if (lightType == 0u)
+				record.regionWidth = record.regionHeight = impl->activeShadowResourceRequest.DirectionalRegionSize(slotIndex);
 			shadowLightRecords.push_back(record);
 		}
 	}
@@ -4862,7 +4901,8 @@ void VulkanContext::RenderFrame(
 		auto& key = record.qualifiedKey;
 		key.rendererSessionGeneration = impl->renderSessionGeneration;
 		key.viewType = renderViewType; key.viewId = diagnosticViewId;
-		const auto& origin = presentation.referenceFrame.canonicalOrigin;
+		const bool fitted = sceneShadowProjection && record.lightId == sceneShadowLightId;
+		const auto& origin = fitted ? sceneCoverage->center : presentation.referenceFrame.canonicalOrigin;
 		key.referenceOrigin = {{origin.cell.x, origin.cell.y, origin.cell.z},
 			{origin.offsetMetres.x, origin.offsetMetres.y, origin.offsetMetres.z}};
 		key.lightId = record.lightId; key.resourceKind = ShadowKindFromRecord(record.type);
@@ -4872,7 +4912,8 @@ void VulkanContext::RenderFrame(
 			: std::array<std::uint32_t, 2>{record.regionWidth, record.regionHeight};
 		key.depthFormat = static_cast<std::uint32_t>(impl->depthFormat != VK_FORMAT_UNDEFINED ? impl->depthFormat : impl->FindDepthFormat());
 		key.lightProjectionStamp.viewProjection = exactMatrix(record.type == 1U
-			? BuildPointShadowViewProjection(*record.light, 0U) : LoadShadowViewProjection(*record.light));
+			? BuildPointShadowViewProjection(*record.light, 0U)
+			: fitted ? *sceneShadowProjection : LoadShadowViewProjection(*record.light));
 		key.lightProjectionStamp.lightParameters = {record.light->positionAndType.w, record.light->directionAndRange.w,
 			record.light->coneAnglesAndArea.x, record.light->coneAnglesAndArea.y};
 		key.lightProjectionStamp.shadowFilterParameters = {record.light->coneAnglesAndArea.z, record.light->coneAnglesAndArea.w,
@@ -5723,7 +5764,8 @@ void VulkanContext::RenderFrame(
 		VkViewport viewport{0, 0, static_cast<float>(begin.renderArea.extent.width), static_cast<float>(begin.renderArea.extent.height), 0, 1};
 		VkRect2D scissor{{0, 0}, begin.renderArea.extent};
 		vkCmdSetViewport(cmd, 0, 1, &viewport); vkCmdSetScissor(cmd, 0, 1, &scissor);
-		const auto matrix = record.type == 1 ? BuildPointShadowViewProjection(*record.light, face) : LoadShadowViewProjection(*record.light);
+		const auto matrix = record.type == 1 ? BuildPointShadowViewProjection(*record.light, face)
+			: sceneShadowProjection && record.lightId == sceneShadowLightId ? *sceneShadowProjection : LoadShadowViewProjection(*record.light);
 		const auto count = RecordShadowDraws(record, draws, matrix, true);
 		vkCmdEndRenderPass(cmd);
 		return count;
@@ -5859,7 +5901,8 @@ void VulkanContext::RenderFrame(
 
 			if (recordStaticComposition(record)) continue;
 			if (record.type == 0u) {
-				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
+				const glm::mat4 lightViewProjection = sceneShadowProjection && record.lightId == sceneShadowLightId
+					? *sceneShadowProjection : LoadShadowViewProjection(*record.light);
 				if (RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], impl->directionalShadowColors[record.slot].image, impl->directionalShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection)) record.recordedFaceMask |= 1U;
 			}
 			else if (record.type == 1u) {
@@ -5926,6 +5969,15 @@ void VulkanContext::RenderFrame(
 		for (auto& assignment : pendingBudgetDiagnostics.shadowAssignments)
 		{
 			if (assignment.lightId != record.lightId || !assignment.assigned) continue;
+			if (sceneShadowProjection && record.lightId == sceneShadowLightId) {
+				// The scheduler's nominal budget uses stock shadow regions. Report
+				// the actual fitted allocation alongside the native cache receipt.
+				assignment.regionWidth = record.regionWidth;
+				assignment.regionHeight = record.regionHeight;
+				const std::uint64_t bytes = std::uint64_t{record.regionWidth} * record.regionHeight * 8u;
+				pendingBudgetDiagnostics.estimatedShadowMemoryBytes += bytes - assignment.estimatedBytes;
+				assignment.estimatedBytes = bytes;
+			}
 			assignment.reusedCachedResult = record.reusedCachedResult;
 			assignment.refreshedThisFrame = !record.reusedCachedResult && record.recordedFaceMask == requiredFaces;
 			assignment.invalidatedThisFrame = record.invalidatedThisFrame;

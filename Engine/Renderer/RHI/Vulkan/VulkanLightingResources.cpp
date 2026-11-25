@@ -11,6 +11,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	ShadowResourceRequest targetRequest{};
 	targetRequest.directionalCount = std::min(request.directionalCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.sceneDirectionalCount = std::min(request.sceneDirectionalCount, MAX_SHADOW_RESOURCE_SLOTS);
+	targetRequest.sceneDirectionalResolution = request.sceneDirectionalResolution;
 	targetRequest.spotCount = std::min(request.spotCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.areaCount = std::min(request.areaCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.pointCount = std::min(request.pointCount, MAX_SHADOW_RESOURCE_SLOTS);
@@ -352,7 +353,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 	for (uint32_t ordinal = 0u; ordinal < targetRequest.DirectionalCount(); ++ordinal) {
 		const auto slotIndex = targetRequest.PhysicalDirectionalSlot(ordinal);
-		const auto regionSize = Shadow2DRegionSizeForSlot(slotIndex % MAX_SHADOW_RESOURCE_SLOTS);
+		const auto regionSize = targetRequest.DirectionalRegionSize(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, directionalShadowDepths[slotIndex]);
 		CreateShadowSampler(directionalShadowDepths[slotIndex], false);
@@ -525,7 +526,10 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		region.qualityTier = reduced2DRegion ? ShadowQualityTier::ReducedResolution : ShadowQualityTier::FullResolution;
 		region.estimatedBytes = estimateRegionBytes(kind);
 
-		if (reduced2DRegion) {
+		if (kind == ShadowResourceKind::DirectionalCascade) {
+			region.width = region.height = targetRequest.DirectionalRegionSize(typedSlot);
+			region.estimatedBytes = std::uint64_t{region.width} * region.height * 8u;
+		} else if (reduced2DRegion) {
 			region.estimatedBytes /= 4u;
 		}
 		region.live = true;

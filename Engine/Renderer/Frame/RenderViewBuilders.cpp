@@ -148,6 +148,20 @@ void RenderSystem::PrepareFrameSceneView(const FrameVisibilityInputs& visibility
 				sceneFrameData.cameraLocalPosition, sceneFrameData.viewMatrix, capturedSceneCamera.shadowFocusDistanceMetres);
 		}
 		LocalizeFrameLights(sceneFrameData);
+		// Fit one editor sun to the complete bounded scene. Other views keep
+		// their own shadow allocations, and multiple suns keep the usual budget.
+		if (!fixedSceneCamera && editorModeEnabled && sceneFrameData.efficiencyFixtureIntent.cameras.empty()
+			&& sceneFrameData.efficiencyFixtureIntent.correlation.operationId.empty()
+			&& std::count_if(sceneFrameData.lightCandidates.begin(), sceneFrameData.lightCandidates.end(), [](const auto& light) {
+				return light.gpuLight.positionAndType.w == 0.0f
+					&& (light.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u;
+			}) == 1)
+		{
+			const auto& coverage = visibilityInputs.spatialCache.directionalShadowSceneCoverage;
+			if (coverage && TerraEngine::Scene::LocalizeWorldPosition(sceneFrameData.referenceFrame.canonicalOrigin,
+				coverage->center, TerraEngine::Scene::kTransformSpaceMaximumRelativeRadiusMetres).Succeeded())
+				sceneFrameData.directionalShadowSceneCoverage = coverage;
+		}
 		sceneFrameData.sceneViewGridVisible = !fixedSceneCamera && sceneViewGridVisible;
 		sceneFrameData.sceneViewOrthographic = !fixedSceneCamera && capturedSceneCamera.orthographic;
 		VisibleCommandBuildResult visibleCommands;
@@ -200,7 +214,7 @@ void RenderSystem::PrepareFrameSceneView(const FrameVisibilityInputs& visibility
 			// deliberately shifted GPU view frame. Rebasing cannot change membership.
 			sceneFrameData.shadowDrawLists = PrepareFrameShadowLists(visibilityInputs, virtualGeometryInputs, virtualGeometryPreparation, renderableDrawCommandsByOrdinal, renderPreparationSettingsSignature, renderableSubmissionSignature, renderGraphWorkerCount, sceneFrameData.lightCandidates,
 				sceneFrameData.directionalShadowAnchor.value_or(sceneFrameData.cameraLocalPosition),
-				sceneFrameData.referenceFrame, RenderViewType::Scene, 1U);
+				sceneFrameData.referenceFrame, RenderViewType::Scene, 1U, sceneFrameData.directionalShadowSceneCoverage);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Scene View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);

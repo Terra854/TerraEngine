@@ -404,6 +404,7 @@ namespace TerraEngine::Renderer::Frame {
 		std::uint64_t observedMeshResourceRevision = 0U;
 		std::size_t observedRenderableCount = 0U;
 		std::vector<TerraEngine::Scene::SpatialObjectRecord> records;
+		std::optional<DirectionalShadowSceneCoverage> directionalShadowSceneCoverage;
 		std::unordered_map<entt::entity, std::size_t> renderableLookup;
 		std::vector<bool> conservativeAnimationBounds;
 	};

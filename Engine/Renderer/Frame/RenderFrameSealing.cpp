@@ -28,6 +28,9 @@ TerraEngine::Renderer::RenderViewPresentationInput RenderSystem::MakeFramePresen
 		input.graphicsCamera = frame.graphicsCamera;
 		input.graphicsView = frame.graphicsView;
 		input.directionalShadowAnchor = frame.directionalShadowAnchor;
+		// Pass the canonical center and the exact tier chosen for caster culling.
+		// Vulkan allocates that tier and rebases sampling into the current view.
+		input.directionalShadowSceneCoverage = frame.directionalShadowSceneCoverage;
 		input.deltaTimeSeconds = frame.deltaTimeSeconds;
 		input.globalTaskShaderCullingEnabled = frame.globalTaskShaderCullingEnabled;
 		input.cullingEpsilon = frame.cullingEpsilon;

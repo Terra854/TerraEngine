@@ -236,7 +236,8 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 	std::uint64_t renderPreparationSettingsSignature, std::uint64_t renderableSubmissionSignature,
 	std::size_t renderGraphWorkerCount, std::span<const FrameLightCandidate> ownedViewLights,
 	const glm::vec3& viewDirectionalShadowAnchor, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
-	RenderViewType viewType, std::uint32_t outputId)
+	RenderViewType viewType, std::uint32_t outputId,
+	const std::optional<TerraEngine::Renderer::DirectionalShadowSceneCoverage>& sceneCoverage)
 {
 	const auto& renderFrameSnapshot = visibilityInputs.renderFrameSnapshot;
 	const auto& retainedRenderTopology = visibilityInputs.retainedRenderTopology;
@@ -305,7 +306,9 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 		const auto indexedFrame = spatialIndex.GetReferenceFrame();
 		TerraEngine::Scene::WorldDelta anchorDelta;
 		anchorDelta.offsetMetres = glm::dvec3(viewDirectionalShadowAnchor);
-		const auto canonicalAnchor = TerraEngine::Scene::ApplyWorldDelta(viewReferenceFrame.canonicalOrigin, anchorDelta);
+		const auto canonicalAnchor = sceneCoverage
+			? TerraEngine::Scene::WorldCoordinateResult{sceneCoverage->center}
+			: TerraEngine::Scene::ApplyWorldDelta(viewReferenceFrame.canonicalOrigin, anchorDelta);
 		const auto localizedAnchor = canonicalAnchor.Succeeded()
 			? TerraEngine::Scene::LocalizeWorldPosition(canonicalAnchor.position, indexedFrame.canonicalOrigin, indexedFrame.maximumLocalDistanceMetres)
 			: TerraEngine::Scene::WorldLocalizationResult{{}, canonicalAnchor.error};
@@ -329,6 +332,7 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 		// not bypass their application. The generation is stable across step frames.
 		HashCombine(signature, renderFrameSnapshot.efficiencyFixtureIntent.controlGeneration);
 		HashCombine(signature, indexedFrame.generation);
+		HashCombine(signature, sceneCoverage ? sceneCoverage->resolution : 0u);
 		HashCombine(signature, std::hash<double>{}(indexedFrame.maximumLocalDistanceMetres));
 		HashCombine(signature, TerraEngine::Scene::WorldPositionHash{}(indexedFrame.canonicalOrigin));
 		HashCombine(signature, localizedAnchor.Succeeded() ? 1U : 0U);
@@ -432,7 +436,10 @@ std::vector<ShadowDrawList> RenderSystem::PrepareFrameShadowLists(
 					else if (lightType == static_cast<std::uint32_t>(LightType::Directional))
 					{
 						const glm::mat4 lightViewProjection = TerraEngine::Renderer::BuildDirectionalShadowProjection(
-							glm::vec3(candidate.gpuLight.directionAndRange), directionalShadowAnchor).viewProjection;
+							glm::vec3(candidate.gpuLight.directionAndRange), directionalShadowAnchor,
+							canonicalAnchor.position.offsetMetres,
+							sceneCoverage ? sceneCoverage->resolution : TerraEngine::Renderer::kDirectionalShadowBaseResolution,
+							sceneCoverage.has_value()).viewProjection;
 						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
 					}
 

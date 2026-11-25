@@ -3,9 +3,11 @@
 // Canonical world-space inputs and base-command spatial preparation.
 #include "RenderFrameState.h"
 #include "RenderFrameCapture.h"
+#include "Renderer/DirectionalShadowProjection.h"
 #include "Profiling/ProfilerScope.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <limits>
 
 namespace TerraEngine::Renderer::Frame {
 	std::uint64_t BuildDrawCommandSignature(
@@ -153,6 +155,20 @@ TerraEngine::Scene::SpatialDiagnosticsSnapshot RenderSystem::PrepareFrameSpatial
 	// must invalidate the spatial observation before cached bounds are reused.
 	const std::uint64_t meshResourceRevision =
 		renderFrameSnapshot.resourceRevision;
+	// Static packed geometry fits its vertex domain. A skinned mesh needs the
+	// broader deformation envelope already represented by its spatial bounds.
+	const auto fitDomain = [](const Mesh* mesh) -> const QuantizationInfo* {
+		if (!mesh || mesh->hasDeformablePayload || mesh->meshletVertexData.empty()) return nullptr;
+		const auto& domain = mesh->runtimeLayout.quantization;
+		for (std::size_t axis = 0u; axis < 3u; ++axis) {
+			// The packed decoder maps every unsigned component into [-1, 1].
+			// Cooked domains use positive half extents, even for flat geometry.
+			if (!std::isfinite(domain.positionOffset[axis]) || !std::isfinite(domain.positionScale[axis])
+				|| domain.positionScale[axis] <= 0.0f)
+				return nullptr;
+		}
+		return &domain;
+	};
 	const bool spatialObservationUnchanged = spatialPreparationCache.valid
 		&& spatialPreparationCache.observedSceneGeneration == spatialSceneGeneration
 		&& spatialPreparationCache.observedSpatialRevision == spatialRevision
@@ -204,6 +220,16 @@ TerraEngine::Scene::SpatialDiagnosticsSnapshot RenderSystem::PrepareFrameSpatial
 					mesh->second->deformablePayloadGeneration);
 				HashCombine(spatialPreparationSignature,
 					mesh->second->runtimeLayout.version);
+				// A recook can change the fitted domain without changing a meshlet's
+				// conservative culling sphere or the runtime layout version.
+				const auto* quantization = fitDomain(mesh->second);
+				HashCombine(spatialPreparationSignature, quantization != nullptr ? 1u : 0u);
+				if (quantization) {
+					for (std::size_t axis = 0u; axis < 3u; ++axis) {
+						HashCombine(spatialPreparationSignature, hashFloat(quantization->positionOffset[axis]));
+						HashCombine(spatialPreparationSignature, hashFloat(quantization->positionScale[axis]));
+					}
+				}
 			}
 		}
 	}
@@ -232,6 +258,11 @@ TerraEngine::Scene::SpatialDiagnosticsSnapshot RenderSystem::PrepareFrameSpatial
 				renderables.size(), false);
 			spatialPreparationCache.records.reserve(renderables.size());
 			spatialPreparationCache.renderableLookup.reserve(renderables.size());
+			// Use the same world bounds the spatial index publishes, independent
+			// of camera visibility. Skip a fit if any owner lacks local bounds.
+			glm::vec3 sceneMin(std::numeric_limits<float>::max());
+			glm::vec3 sceneMax(-std::numeric_limits<float>::max());
+			bool completeBounds = !renderables.empty();
 
 			for (std::size_t index = 0; index < renderables.size(); ++index)
 			{
@@ -239,9 +270,9 @@ TerraEngine::Scene::SpatialDiagnosticsSnapshot RenderSystem::PrepareFrameSpatial
 				spatialPreparationCache.renderableLookup.emplace(entry.entity, index);
 				const TerraEngine::Scene::WorldPose& transform = worldCapture.Get(entry.entity);
 				const glm::mat4 model = TerraEngine::Renderer::Frame::MakeFrameModelMatrix(transform, spatialFrame.canonicalOrigin);
-				const auto cachedBounds = localBoundsByMesh.find(entry.mesh->meshId);
+				const auto cachedBounds = frameMeshLocalBounds.find(entry.mesh->meshId);
 				const TerraEngine::Scene::SpatialAABB localBounds =
-					cachedBounds != localBoundsByMesh.end()
+					cachedBounds != frameMeshLocalBounds.end()
 						? cachedBounds->second : TerraEngine::Scene::SpatialAABB{};
 				const auto cachedSpatialMesh = frameMeshResources.find(entry.mesh->meshId);
 				const Mesh* spatialMesh = cachedSpatialMesh != frameMeshResources.end()
@@ -279,9 +310,34 @@ TerraEngine::Scene::SpatialDiagnosticsSnapshot RenderSystem::PrepareFrameSpatial
 				record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable | TerraEngine::Scene::SpatialCategoryEditorSelectable;
 				record.canonicalOwner = transform.position;
 				record.localBounds = localizedBounds;
+				// A meshlet's culling sphere can overhang its vertices by an entire
+				// building. Packed positions stay within their quantization domain.
+				// Deforming geometry still needs the full animated envelope.
+				auto fitBounds = localizedBounds;
+				if (const auto* quantization = fitDomain(spatialMesh)) {
+					const glm::vec3 center(quantization->positionOffset[0], quantization->positionOffset[1], quantization->positionOffset[2]);
+					const glm::vec3 halfSize(quantization->positionScale[0], quantization->positionScale[1], quantization->positionScale[2]);
+					const auto domain = TerraEngine::Scene::MakeAABB(center - halfSize, center + halfSize,
+						TerraEngine::Scene::SpatialBoundsSource::Mesh);
+					if (domain.IsUsable()) fitBounds = TerraEngine::Scene::TransformAABB(domain, model);
+				}
+				if (localizedOwner.Succeeded() && localBounds.IsUsable() && fitBounds.IsUsable()) {
+					sceneMin = glm::min(sceneMin, fitBounds.min);
+					sceneMax = glm::max(sceneMax, fitBounds.max);
+				} else {
+					completeBounds = false;
+				}
 				record.frameGeneration = spatialFrame.generation;
 				record.revision = capturedSpatialRevision;
 				spatialPreparationCache.records.push_back(record);
+			}
+			spatialPreparationCache.directionalShadowSceneCoverage.reset();
+			if (completeBounds) {
+				const auto resolution = TerraEngine::Renderer::ResolveSceneDirectionalShadowResolution((sceneMax - sceneMin) * 0.5f);
+				const auto center = TerraEngine::Scene::ApplyWorldDelta(spatialFrame.canonicalOrigin,
+					{{}, (glm::dvec3(sceneMin) + glm::dvec3(sceneMax)) * 0.5});
+				if (center.Succeeded() && resolution != 0u)
+					spatialPreparationCache.directionalShadowSceneCoverage = TerraEngine::Renderer::DirectionalShadowSceneCoverage{center.position, resolution};
 			}
 			spatialIndex.Refresh(spatialPreparationCache.records);
 			spatialPreparationCache.signature = spatialPreparationSignature;

@@ -3430,6 +3430,11 @@ past 52 metres. Check that directional shadows still reach the subject.
 Compare a Scene custom capture with the same look-at point and a close
 capture within 28 metres. The dolly regression in `Engine.RendererEfficiency`
 also checks that the spatial query and Vulkan agree across reference frames.
+For a bounded scene with a single shadow-casting sun, pan, orbit and dolly in
+Scene View. The fitted map should cover the same scene through those moves.
+Check that the submitted shadow map is reused while the camera moves and that
+changing a caster refreshes it. The static shadow policy tests also check depth
+ordering along the light rays and sampling across render origins.
 The `Editor.ReviewRemediation` suite checks that backing away in repeated fly
 sessions keeps tracking the same shadow reference. With no navigation pivot,
 turning around and switching to orthographic must center ahead of the camera.

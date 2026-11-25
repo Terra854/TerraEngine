@@ -34,6 +34,69 @@ namespace TerraEngine::Tests
 	}
 	void RegisterStaticShadowPolicyTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.Efficiency.StaticShadowPolicy.DirectionalDepthFollowsEmittedRays", [](TestContext& test) {
+			const auto map = BuildDirectionalShadowProjection(glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f));
+			const auto roof = map.viewProjection * glm::vec4(0.0f, 8.0f, 0.0f, 1.0f);
+			const auto ground = map.viewProjection * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+			test.Expect(roof.z < ground.z && roof.z > 0.0f && ground.z < 1.0f,
+				"A downward sun must record a roof before the ground it shadows.");
+		});
+		registry.Add("Renderer.Efficiency.StaticShadowPolicy.FittedSceneCoverageIsWorldLocked", [](TestContext& test) {
+			const glm::vec3 halfSize(95.0f, 26.0f, 90.0f);
+			const auto resolution = ResolveSceneDirectionalShadowResolution(halfSize);
+			test.ExpectEqual(4096u, resolution, "An approximately 190-metre scene needs a larger map to retain its texel density.");
+			test.ExpectEqual(1024u, ResolveSceneDirectionalShadowResolution(glm::vec3(10.0f)), "Small scenes use stock storage.");
+			const auto mediumResolution = ResolveSceneDirectionalShadowResolution(glm::vec3(60.0f, 8.0f, 10.0f));
+			test.ExpectEqual(2048u, mediumResolution, "Bounds beyond 40 metres must select the middle coverage tier.");
+			const auto mediumMap = BuildDirectionalShadowProjection(glm::vec3(0.0f, -1.0f, 0.0f),
+				glm::vec3(0.0f), glm::dvec3(0.0), mediumResolution, true);
+			const auto mediumCaster = mediumMap.viewProjection * glm::vec4(60.0f, 4.0f, 0.0f, 1.0f);
+			test.Expect(std::abs(mediumCaster.x) < 1.0f && std::abs(mediumCaster.y) < 1.0f,
+				"The middle tier's 80-metre half extent covers casters beyond the stock footprint.");
+			test.ExpectEqual(0u, ResolveSceneDirectionalShadowResolution(glm::vec3(1000.0f)), "Unbounded scenes cannot claim one fitted map.");
+			test.Expect(!IsValidSceneDirectionalShadowResolution(0u) && !IsValidSceneDirectionalShadowResolution(8192u)
+				&& !IsValidSceneDirectionalShadowResolution(1536u) && IsValidSceneDirectionalShadowResolution(resolution),
+				"Only supported fitted tiers can reach the native image allocation.");
+			const auto map = BuildDirectionalShadowProjection(glm::normalize(glm::vec3(0.3f, -0.8f, 0.5f)),
+				glm::vec3(0.0f), glm::dvec3(0.0), resolution, true);
+			for (const auto& viewOrigin : {glm::vec3(10.0f, 0.0f, 0.0f), glm::vec3(20.0f, 48.0f, 130.0f)}) {
+				const auto receiverProjection = glm::translate(map.viewProjection, viewOrigin);
+				const auto caster = map.viewProjection * glm::vec4(halfSize, 1.0f);
+				const auto receiver = receiverProjection * glm::vec4(halfSize - viewOrigin, 1.0f);
+				test.Expect(glm::length(caster - receiver) < 0.00001f && std::abs(caster.x) < 1.0f
+					&& std::abs(caster.y) < 1.0f && caster.z > 0.0f && caster.z < 1.0f,
+					"Camera motion must leave both world-space sampling and coverage fixed.");
+			}
+		});
+		registry.Add("Renderer.Efficiency.StaticShadowPolicy.FocusTransitionsAcrossCameraRay", [](TestContext& test) {
+			const glm::vec3 forward(0.0f, 0.0f, -1.0f);
+			const auto depth = [&](float lateral, float distance) {
+				return ResolveDirectionalShadowFocusDepth(glm::vec3(lateral, 0.0f, -distance), forward);
+			};
+			// An 80 m focus used to drop straight to zero at the old cone edge.
+			test.Expect(std::abs(depth(39.99f, 80.0f) - depth(40.01f, 80.0f)) < 0.01f,
+				"Small camera motion across the old cone edge must not jump the shadow anchor.");
+			test.Expect(depth(52.0f, 80.0f) > 0.0f && depth(52.0f, 80.0f) < 80.0f,
+				"Off-axis focus gradually hands coverage back to the camera.");
+			test.Expect(depth(64.0f, 80.0f) == 0.0f && depth(0.0f, -80.0f) == 0.0f,
+				"An irrelevant or rearward focus must not pull the map away from the camera.");
+		});
+		registry.Add("Renderer.Efficiency.StaticShadowPolicy.TexelGridSurvivesCameraRebase", [](TestContext& test) {
+			const glm::vec3 direction(0.0f, 1.0f, 0.0f);
+			const Scene::WorldPosition indexOrigin{{120000, -5, 31}, {0.0, 0.0, 0.0}};
+			const glm::vec3 anchor(0.01f, 0.0f, 0.01f);
+			const auto baseline = BuildDirectionalShadowProjection(direction, anchor, indexOrigin);
+			const auto shifted = BuildDirectionalShadowProjection(direction, anchor + glm::vec3(0.015f, 0.0f, 0.015f), indexOrigin);
+			test.Expect(baseline.center == shifted.center, "Sub-texel motion within a grid cell must not move depth coverage.");
+			const glm::vec3 cameraStep(6.125f, 0.5f, -4.25f);
+			const auto cameraOrigin = Scene::ApplyWorldDelta(indexOrigin, {{}, glm::dvec3(cameraStep)});
+			const auto rebased = BuildDirectionalShadowProjection(direction, anchor - cameraStep, cameraOrigin.position);
+			const glm::vec3 caster(0.0f, 3.0f, 4.0f);
+			const auto a = baseline.viewProjection * glm::vec4(caster, 1.0f);
+			const auto b = rebased.viewProjection * glm::vec4(caster - cameraStep, 1.0f);
+			test.Expect(cameraOrigin.Succeeded() && glm::length(a - b) < 0.00001f,
+				"Spatial and camera-relative projections must place one physical caster in the same texel.");
+		});
 		registry.Add("Renderer.Efficiency.StaticShadowPolicy.SceneViewDollyRetainsDirectionalCoverage", [](TestContext& test) {
 			const glm::vec3 subject(0.0f);
 			const glm::vec3 light(0.0f, 1.0f, 0.0f);

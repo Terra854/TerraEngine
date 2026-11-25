@@ -98,6 +98,13 @@ namespace TerraEngine::Tests
 			context.Expect(record.modelMatrix[3][0] == 1.5f && record.geometrySelectors.z == 59
 				&& record.geometrySelectors.w == 61 && record.virtualGeometryPayloadSelectors.z == 71,
 				"Worker records must retain the localized transform and exact light-selected page/range bytes.");
+			auto fittedFrame = fixture.reference;
+			fittedFrame.canonicalOrigin.offsetMetres.x = 0.0;
+			RenderItemRecord fittedCaster;
+			context.Expect(ResolveShadowDrawListItem(*fixture.publication, fittedFrame, fixture.selection, 0, fittedCaster),
+				"Shadow recording must resolve against its fitted origin with camera-local inputs present.");
+			context.ExpectEqual(51.5f, fittedCaster.modelMatrix[3][0],
+				"The fitted frame must localize the canonical caster again even when generations match.");
 			view.output.outputId = 8;
 			context.Expect(!ShadowPreparedInstanceInputsCurrent(*fixture.publication, view, fixture.selection),
 				"A stream from another output cannot authorize this light's grouped draw.");

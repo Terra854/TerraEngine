@@ -320,7 +320,7 @@ float4 TransformShadowClip(GPULight light, float3 worldPosition)
 		+ light.shadowMatrixC3 * world.w;
 }
 
-float SampleProjectedShadowMap(Texture2D shadowMap, SamplerState shadowSampler, GPULight light, FrameCullingData frame, float3 worldPosition, float fallbackBias, float2 texelSize)
+float SampleProjectedShadowMap(Texture2D shadowMap, SamplerState shadowSampler, GPULight light, FrameCullingData frame, float3 worldPosition, float fallbackBias, float2 texelSize, float biasScale = 1.0f)
 {
 	const float4 shadowClip = TransformShadowClip(light, worldPosition);
 	if (shadowClip.w <= 1e-5f)
@@ -343,7 +343,7 @@ float SampleProjectedShadowMap(Texture2D shadowMap, SamplerState shadowSampler, 
 	uv = light.shadowRegion.xy + uv * regionScale;
 
 	const float authoredBias = max(light.extraParams.y, 0.0f);
-	return SampleShadowPCF(shadowMap, shadowSampler, uv, shadowNdc.z, max(fallbackBias, authoredBias), frame.renderSettings0.y, texelSize);
+	return SampleShadowPCF(shadowMap, shadowSampler, uv, shadowNdc.z, max(fallbackBias, authoredBias) * biasScale, frame.renderSettings0.y, texelSize);
 }
 
 float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
@@ -355,9 +355,11 @@ float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 wor
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
 	const uint nonUniformIndex = NonUniformResourceIndex(min(shadowTextureIndex, kMaxBindlessTextureCount - 1u));
-	const float res = (float)frame.renderSettings0.x;
-	const float2 texelSize = 1.0f / max(res, 512.0f);
-	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kDirectionalShadowBias, texelSize);
+	// Directional lights use the cone fields for depth-image metadata. The
+	// filter stays in texels and the bias stays in world units at every tier.
+	const float2 texelSize = 1.0f / max(light.coneAnglesAndArea.x, 1.0f);
+	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition,
+		kDirectionalShadowBias, texelSize, light.coneAnglesAndArea.y);
 }
 
 float SampleSpotShadow(GPULight light, FrameCullingData frame, float3 worldPosition)

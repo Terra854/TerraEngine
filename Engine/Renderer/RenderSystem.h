@@ -1158,7 +1158,8 @@ TerraEngine::Renderer::Frame::VisibleCommandBuildResult PrepareFrameVisibleComma
 	std::uint64_t renderPreparationSettingsSignature, std::uint64_t renderableSubmissionSignature,
 	std::size_t renderGraphWorkerCount, std::span<const FrameLightCandidate> ownedViewLights,
 	const glm::vec3& viewDirectionalShadowAnchor, const TerraEngine::Renderer::RenderReferenceFrame& viewReferenceFrame,
-	RenderViewType viewType, std::uint32_t outputId);
+	RenderViewType viewType, std::uint32_t outputId,
+	const std::optional<TerraEngine::Renderer::DirectionalShadowSceneCoverage>& sceneCoverage = {});
 
 	struct PreparedRenderSubmission;
 TerraEngine::Renderer::RenderViewPresentationInput MakeFramePresentationInput(

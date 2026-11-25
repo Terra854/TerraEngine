@@ -57,6 +57,12 @@ inline const char* ToString(RenderViewType viewType)
 }
 
 namespace TerraEngine::Renderer {
+	struct DirectionalShadowSceneCoverage
+	{
+		TerraEngine::Scene::WorldPosition center{};
+		std::uint32_t resolution = 0u;
+	};
+
 	// A render reference frame translates one canonical world origin into a
 	// bounded float space. Every view owns its identity; no renderer worker may
 	// reuse another view's origin or silently reinterpret a stale packet.
@@ -3877,6 +3883,7 @@ struct RenderViewBuildState
 	glm::vec3 cameraLocalPosition = glm::vec3(0.0f);
 	// Sealed Scene View anchor in the same reference frame as the camera.
 	std::optional<glm::vec3> directionalShadowAnchor;
+	std::optional<TerraEngine::Renderer::DirectionalShadowSceneCoverage> directionalShadowSceneCoverage;
 	float deltaTimeSeconds = 0.0f;
 	bool globalTaskShaderCullingEnabled = true;
 	float cullingEpsilon = 0.001f;
