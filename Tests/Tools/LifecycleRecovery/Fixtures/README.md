@@ -13,10 +13,9 @@ groups. The wrapper enforces every named case floor and retains watchdog logs.
 The installed Correctness managed project and ExportRuntimeBaseline/PhysicsExportRuntime
 authored fixtures supply live Save As, managed callback, real NativeAOT export,
 package/readiness, and normal shutdown checks. Both installed default editor
-layout files are copied into each disposable editor project. The normal editor
-approval UI remains required for protected live actions.
+layout files are copied into each disposable editor project.
 
 All fixture inputs, runners, tools and matching binaries must appear in
 `correctness-artifacts.json`. Missing artifacts, source runner invocation,
-failed readiness, zero cases, denied/missing approval or forced process cleanup
+failed readiness, zero cases, or forced process cleanup
 are failures; they cannot produce a passing summary.

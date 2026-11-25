@@ -352,6 +352,7 @@ private:
 	void DrawMainMenuBar();
 	// False keeps project owners alive when a copy receipt or cleanup must retry.
 	bool CloseCurrentProject();
+	void ExitEditor();
 	
 	EditorContext* ctx = nullptr;
 	struct PrefabResetRequest {

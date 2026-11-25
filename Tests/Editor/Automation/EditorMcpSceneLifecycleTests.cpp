@@ -131,7 +131,7 @@ namespace TerraEngine::EditorTests
 				WriteMode::WritesEnabled,
 				"scene-delete-impact");
 			context.Expect(impact.value("ok", false), "Scene deletion preflight should return an impact report.");
-			context.Expect(impact["data"].value("requiresApproval", false), "Scene deletion should require editor-owned destructive approval.");
+			context.Expect(!impact["data"].value("requiresApproval", true), "Scene deletion preflight should run without approval.");
 			context.Expect(!impact["data"].value("dependents", nlohmann::json::array()).empty(), "Impact report should identify build-profile references.");
 			context.Expect(std::filesystem::exists(fixture.projectRoot() / "Assets/Scenes/Scene.tescene"), "Preflight must not delete or rewrite the scene.");
 

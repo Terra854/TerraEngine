@@ -256,7 +256,7 @@ namespace TerraEngine::Editor::Automation
 		capabilities.push_back(MakeRegistration(
 			resolveHandler,
 			"asset.prepare_delete",
-			"Inspect deletion impact and request approval for a project asset.",
+			"Inspect the impact of deleting a project asset.",
 			ObjectSchema({{"path", AssetReferenceSchema()}}, {"path"}),
 			MutationMode::Destructive,
 			AutomationApprovalPolicy::Destructive));

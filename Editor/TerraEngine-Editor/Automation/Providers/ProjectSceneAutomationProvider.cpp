@@ -164,13 +164,13 @@ namespace TerraEngine::Editor::Automation
 		capabilities.push_back(Registration(resolveHandler, "scene.save_as", "scene", "Save the active scene to a new identity.", ObjectSchema({{"path", {{"type", "string"}}}}, Json::array({"path"})), AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, MutationMode::SceneMutation, Availability(true, true), WriteExecution("scene_lifecycle_commit", {"ActiveScene", "ObjectStorage"}, {"SceneFile", "SceneDirtyState"})));
 		capabilities.push_back(Registration(resolveHandler, "scene.rename", "scene", "Rename a scene after reference-impact preflight.", ObjectSchema({{"source", {{"type", "string"}}}, {"destination", {{"type", "string"}}}}, Json::array({"source", "destination"})), AutomationPermission::ProjectWrite, AutomationApprovalPolicy::HighImpact, MutationMode::SceneMutation, Availability(true, false), WriteExecution("scene_lifecycle_commit", {"SceneInventory", "BuildProfiles"}, {"SceneFile"})));
 		capabilities.push_back(Registration(resolveHandler, "scene.duplicate", "scene", "Duplicate a scene to a distinct file identity.", ObjectSchema({{"source", {{"type", "string"}}}, {"destination", {{"type", "string"}}}}, Json::array({"source", "destination"})), AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, MutationMode::SceneMutation, Availability(true, false), WriteExecution("scene_lifecycle_commit", {"SceneInventory"}, {"SceneFile"})));
-		capabilities.push_back(Registration(resolveHandler, "scene.prepare_delete", "scene", "Report scene references and create a destructive approval preflight.", ObjectSchema({{"path", {{"type", "string"}}}}, Json::array({"path"})), AutomationPermission::ProjectWrite, AutomationApprovalPolicy::Destructive, MutationMode::Destructive, Availability(true, false), WriteExecution("approval_preflight_only", {"SceneInventory", "BuildProfiles"}, {"EditorAutomationSession"})));
+		capabilities.push_back(Registration(resolveHandler, "scene.prepare_delete", "scene", "Report references affected by deleting a scene.", ObjectSchema({{"path", {{"type", "string"}}}}, Json::array({"path"})), AutomationPermission::ProjectWrite, AutomationApprovalPolicy::Destructive, MutationMode::Destructive, Availability(true, false), WriteExecution("deletion_preflight", {"SceneInventory", "BuildProfiles"}, {"EditorAutomationSession"})));
 
 		capabilities.push_back(Registration(
 			resolveHandler,
 			"scene.open",
 			"scene",
-			"Open a project-relative scene after the existing approval check.",
+			"Open a project-relative scene with the supplied dirty-scene policy.",
 			ObjectSchema({{"path", {{"type", "string"}, {"minLength", 1}}}}, Json::array({"path"})),
 			AutomationPermission::ProjectWrite,
 			AutomationApprovalPolicy::HighImpact,
@@ -227,7 +227,7 @@ namespace TerraEngine::Editor::Automation
 			resolveHandler,
 			"object.delete",
 			"object",
-			"Delete a scene object after approval while retaining undo data.",
+			"Delete a scene object while retaining undo data.",
 			ObjectSchema({{"object", target}}, Json::array({"object"})),
 			AutomationPermission::ProjectWrite,
 			AutomationApprovalPolicy::Destructive,

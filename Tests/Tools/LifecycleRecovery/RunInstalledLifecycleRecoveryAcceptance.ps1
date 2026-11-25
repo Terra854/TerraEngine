@@ -4,8 +4,7 @@ Validates the installed lifecycle-recovery closure with fresh native/live eviden
 .DESCRIPTION
 Configure BUILD_TESTING, build/install, and pass the integrated gates first.
 Invoke this installed copy with -InstallRoot <Build> -AllowLiveAcceptance.
-The normal editor approval UI remains authoritative. Missing approval, failed
-case floors, stale artifacts, or watchdog cleanup cannot produce a passing run.
+Failed case floors, stale artifacts, or watchdog cleanup cannot produce a passing run.
 #>
 [CmdletBinding()]
 param(

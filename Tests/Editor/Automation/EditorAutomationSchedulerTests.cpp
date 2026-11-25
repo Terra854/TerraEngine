@@ -173,7 +173,7 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json status = bridge.BuildStatusJson();
 			context.ExpectEqual(static_cast<std::size_t>(0), bridge.GetQueuedRequests().size(), "Idle frames should leave the automation queue empty.");
 			context.ExpectEqual(static_cast<std::size_t>(0), status.value("pendingRequestCount", static_cast<std::size_t>(1)), "Idle frames should publish no pending request work.");
-			context.ExpectEqual(static_cast<std::size_t>(0), status.value("pendingApprovalCount", static_cast<std::size_t>(1)), "Idle frames should publish no approval work.");
+			context.Expect(!status.contains("pendingApprovalCount"), "Status should expose only active bridge queues.");
 			context.ExpectEqual(initialActivityCount, bridge.GetRecentActivity().size(), "Idle updates should not emit synthetic automation activity.");
 			bridge.Shutdown();
 		});

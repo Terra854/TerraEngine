@@ -479,7 +479,7 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	});
 	projectHub->SetOpenPreferencesCallback([this]() {
 		// Preferences is editor-wide and remains safe while the project hub is
-		// active; lifecycle approvals depend on this access path.
+		// active, including when no project has been opened.
 		if (mainEditor) {
 			mainEditor->OpenPreferences();
 		}

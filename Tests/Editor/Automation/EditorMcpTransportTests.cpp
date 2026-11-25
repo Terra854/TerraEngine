@@ -347,8 +347,6 @@ namespace TerraEngine::EditorTests
 				// and approval/request ownership must not change on rejected traffic.
 				return {{"enabled", status["enabled"]}, {"writeMode", status["writeMode"]},
 					{"pendingRequestCount", status["pendingRequestCount"]},
-					{"pendingApprovalCount", status["pendingApprovalCount"]},
-					{"recentApprovalCount", status["recentApprovalCount"]},
 					{"objects", ObjectManager::instance().getObjectsWithComponents<>().size()},
 					{"dispatches", dispatchCount.load()}};
 			}
@@ -363,7 +361,7 @@ namespace TerraEngine::EditorTests
 			std::jthread pump;
 		};
 
-		nlohmann::json ParseLoopbackResourcePayload(std::string_view response)
+		nlohmann::json ParseLoopbackToolPayload(std::string_view response)
 		{
 			// The HTTP response contains a JSON-RPC envelope whose MCP content item
 			// contains a second JSON document as text. Parse both layers so tests
@@ -375,12 +373,12 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json envelope = nlohmann::json::parse(
 				std::string(response.substr(bodyOffset + 4U)), nullptr, false);
 			if(envelope.is_discarded() || !envelope.contains("result")
-				|| !envelope["result"].contains("contents")
-				|| !envelope["result"]["contents"].is_array()
-				|| envelope["result"]["contents"].size() != 1U) {
+				|| !envelope["result"].contains("content")
+				|| !envelope["result"]["content"].is_array()
+				|| envelope["result"]["content"].size() != 1U) {
 				return nullptr;
 			}
-			const std::string text = envelope["result"]["contents"][0U].value("text", std::string{});
+			const std::string text = envelope["result"]["content"][0U].value("text", std::string{});
 			const nlohmann::json payload = nlohmann::json::parse(text, nullptr, false);
 			return payload.is_discarded() ? nlohmann::json(nullptr) : payload;
 		}
@@ -844,14 +842,17 @@ namespace TerraEngine::EditorTests
 			context.Expect(denied.find("read-only mode") != std::string::npos, "HTTP authority acceptance must not bypass the read-only permission gate.");
 			context.ExpectEqual(before, fixture.Fingerprint(), "Read-only policy must prevent authored writes.");
 			fixture.bridge.SetWriteMode(TerraEngine::Editor::Automation::WriteMode::WritesEnabled);
-			const std::string approvalBody = R"({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"asset.prepare_delete","arguments":{"path":"Assets/Missing.txt"}}})";
-			const auto beforeApproval = fixture.Fingerprint();
-			context.Expect(!fixture.Send(fixture.ValidHeaders() + "Origin: null\r\n", approvalBody).starts_with("HTTP/1.1 200"),
-				"Foreign authority must not create approvals.");
-			context.ExpectEqual(beforeApproval, fixture.Fingerprint(), "Rejected approval request must preserve policy state.");
-			context.Expect(fixture.Send(fixture.ValidHeaders(), approvalBody).find("waiting_approval") != std::string::npos,
-				"Valid high-impact request must retain its approval gate.");
-			context.ExpectEqual(std::size_t(1), fixture.bridge.GetPendingApprovals().size(), "Only the valid request may create an approval.");
+			const std::string writeBody = R"({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"asset.prepare_delete","arguments":{"path":"Assets/Missing.txt"}}})";
+			const auto beforeWrite = fixture.Fingerprint();
+			context.Expect(!fixture.Send(fixture.ValidHeaders() + "Origin: null\r\n", writeBody).starts_with("HTTP/1.1 200"),
+				"Foreign authority must not dispatch writes.");
+			context.ExpectEqual(beforeWrite, fixture.Fingerprint(), "Rejected write request must preserve policy state.");
+			const auto response = fixture.Send(fixture.ValidHeaders(), writeBody);
+			const auto payload = ParseLoopbackToolPayload(response);
+			context.Expect(response.starts_with("HTTP/1.1 200") && payload.is_object()
+				&& !payload.value("requestId", std::string{}).empty()
+				&& payload.value("status", std::string{}) != "waiting_approval",
+				"An authorized write must return its correlated tool response on the initial connection.");
 			context.Expect(fixture.Send(fixture.ValidHeaders(), R"({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"not-pending"}})").starts_with("HTTP/1.1 202"),
 				"Valid authority must preserve cancellation notification routing.");
 		});
@@ -1114,77 +1115,6 @@ namespace TerraEngine::EditorTests
 				"RAII fixture should acquire an ephemeral listener before destruction.");
 			context.Expect(rebound,
 				"Transport destruction should join the listener and release its exact port.");
-		});
-
-		registry.Add("Editor.MCP.Transport.HttpApprovalSurvivesConnectionClose", [](TestContext& context) {
-			EditorMcpBridge bridge;
-			bridge.Initialize(nullptr);
-			bridge.SetEnabled(true);
-			bridge.SetWriteMode(TerraEngine::Editor::Automation::WriteMode::WritesEnabled);
-			const std::uint16_t port = bridge.GetListenPort();
-			context.Expect(port != 0, "Enabled bridge should expose a loopback listener port.");
-
-			// The listener thread waits for main-thread tool dispatch. Pump the bridge
-			// exactly as the editor frame loop does while the test client waits for
-			// the one-request HTTP socket to close.
-			std::atomic<bool> stopPump = false;
-			std::thread pump([&]() {
-				while (!stopPump.load())
-				{
-					bridge.Update(0.0f);
-					std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				}
-			});
-			const std::string response = SendLoopbackHttpPost(port,
-				R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"asset.prepare_delete","arguments":{"path":"Assets/Missing.txt"}}})");
-			stopPump = true;
-			pump.join();
-
-			context.Expect(response.find("waiting_approval") != std::string::npos, "High-impact HTTP tool call should return an approval prompt.");
-			const std::string pendingResponse = SendLoopbackHttpPost(port,
-				R"({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"terraengine://approvals/pending"}})");
-			context.Expect(pendingResponse.find("approval-") != std::string::npos, "A second stateless HTTP request should rediscover the pending approval.");
-			const auto approvals = bridge.GetPendingApprovals();
-			context.ExpectEqual(approvals.size(), static_cast<std::size_t>(1), "Request socket closure should leave one resolvable approval.");
-			if (!approvals.empty())
-			{
-				context.Expect(bridge.ResolveApproval(approvals.front().approvalId, true), "Preferences-side approval should resolve after HTTP disconnect.");
-			}
-			const std::string recentResponse = SendLoopbackHttpPost(port,
-				R"({"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"terraengine://approvals/recent"}})");
-			const nlohmann::json recentPayload = ParseLoopbackResourcePayload(recentResponse);
-			const nlohmann::json recentApprovals = recentPayload.is_object()
-				? recentPayload.value("approvals", nlohmann::json::array())
-				: nlohmann::json::array();
-			const auto retained = std::find_if(recentApprovals.begin(), recentApprovals.end(),
-				[&approvals](const nlohmann::json& entry) {
-					return !approvals.empty()
-						&& entry.value("approvalId", std::string{}) == approvals.front().approvalId;
-				});
-			const bool recoveredExactResult = retained != recentApprovals.end()
-				&& retained->value("state", std::string{}) == "approved"
-				&& retained->value("approved", false)
-				&& retained->value("dispatchCompleted", false)
-				&& retained->contains("dispatchResult")
-				&& (*retained)["dispatchResult"].is_object()
-				&& (*retained)["dispatchResult"].value("requestId", std::string{}) == approvals.front().requestId;
-			context.Expect(recoveredExactResult,
-				"A later HTTP connection should recover the exact completed protected-handler result.");
-
-			const auto activity = bridge.GetRecentActivity(64);
-			const bool recordedApproval = std::any_of(activity.begin(), activity.end(), [](const auto& event) {
-				return event.message == "Approved request.";
-			});
-			const bool executedHandler = std::any_of(activity.begin(), activity.end(), [](const auto& event) {
-				return event.message == "Prepared asset delete approval.";
-			});
-			const bool recordedExpiredBinding = std::any_of(activity.begin(), activity.end(), [](const auto& event) {
-				return event.message.find("Approval binding expired") != std::string::npos;
-			});
-			context.Expect(recordedApproval, "Real loopback approval should execute through the approved path.");
-			context.Expect(executedHandler, "Resolved approval should execute the protected handler, not only consume the prompt.");
-			context.Expect(!recordedExpiredBinding, "Real loopback socket closure must not expire the listener-bound approval.");
-			bridge.Shutdown();
 		});
 
 		registry.Add("Editor.MCP.Transport.DisableCancelsBlockedToolCallWithoutFramePump", [](TestContext& context) {

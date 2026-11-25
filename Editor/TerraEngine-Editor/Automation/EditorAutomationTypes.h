@@ -42,7 +42,6 @@ namespace TerraEngine::Editor::Automation
 	{
 		Queued,
 		Running,
-		WaitingApproval,
 		Completed,
 		Failed,
 		Rejected,
@@ -132,7 +131,6 @@ namespace TerraEngine::Editor::Automation
 		Rejection,
 		Configuration,
 		Request,
-		Approval,
 		Mutation,
 		Diagnostic,
 		Capture,
@@ -454,32 +452,6 @@ namespace TerraEngine::Editor::Automation
 		std::string outcome;
 		ActivityEventType type = ActivityEventType::Request;
 		std::chrono::system_clock::time_point recordedAt = std::chrono::system_clock::now();
-	};
-
-	struct ApprovalPrompt
-	{
-		std::string approvalId;
-		std::string requestId;
-		std::string capability;
-		std::string summary;
-		nlohmann::json arguments = nlohmann::json::object();
-		std::string argumentsFingerprint;
-		std::string impactFingerprint;
-		std::string sessionId;
-		std::string clientName;
-		std::uint64_t projectGeneration = 0;
-		std::uint64_t sceneGeneration = 0;
-		std::uint32_t worldGeneration = 0;
-		bool resolved = false;
-		bool approved = false;
-		// Approval and protected dispatch are asynchronous from the original
-		// loopback request. Retain the exact handler envelope so a reconnecting
-		// client can continue from real approved output instead of reconstructing
-		// job IDs or mutation receipts from logs.
-		bool dispatchCompleted = false;
-		std::string resolutionState = "pending";
-		nlohmann::json dispatchResult = nullptr;
-		std::chrono::system_clock::time_point expiresAt = std::chrono::system_clock::now();
 	};
 
 	struct EditorTarget

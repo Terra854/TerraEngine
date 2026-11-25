@@ -6,9 +6,7 @@ Prerequisites: parent integrated build/tests/install and an install-root
 correctness-artifacts.json (schemaVersion=1, builtAtUtc, files entries with
 relativePath/sha256/length, minimumCases map keyed by native filter).
 Example: pwsh -NoProfile -File ./Build/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1 -InstallRoot ./Build -AllowLiveAcceptance
-Export is a high-impact bridge operation. Approve each displayed export request
-in the installed editor's normal approval UI; the runner polls the supported
-approvals/recent resource and never manufactures an approval token.
+Export returns its durable job receipt directly.
 All binaries/assets resolve beneath InstallRoot. Fresh work/evidence is retained;
 no caller data is deleted. Forced watchdog cleanup is failure, never normal close.
 #>
@@ -19,7 +17,6 @@ param(
 	[string]$WorkRoot='',
 	[ValidateRange(1024,65535)][int]$McpPort=43139,
 	[ValidateRange(30,600)][int]$StageTimeoutSeconds=180,
-	[ValidateRange(30,600)][int]$ApprovalTimeoutSeconds=180,
 	[ValidateRange(120,3600)][int]$EditorWatchdogSeconds=1800,
 	[switch]$AllowLiveAcceptance,
 	[switch]$LifecycleRecovery
@@ -124,19 +121,6 @@ function Envelope($Response) {
 }
 function Tool([string]$Name,$Arguments=@{},[switch]$ExpectFailure) {
 	$response=Envelope (Rpc 'tools/call' @{name=$Name;arguments=$Arguments})
-	if ($response.PSObject.Properties['status'] -and $response.status -eq 'waiting_approval') {
-		$id=$response.data.approvalId
-		Write-Host "Approve $Name ($id) in the installed editor's normal approval UI."
-		$deadline=[DateTime]::UtcNow.AddSeconds($ApprovalTimeoutSeconds); $resolved=$false
-		while ([DateTime]::UtcNow -lt $deadline) {
-			$resource=Rpc 'resources/read' @{uri='terraengine://approvals/recent'}
-			$recent=$resource.result.contents[0].text | ConvertFrom-Json
-			$match=@($recent.approvals | Where-Object { $_.approvalId -eq $id -and $_.dispatchCompleted })
-			if ($match.Count -eq 1) { if (!$match[0].approved) { throw "Approval $id was denied/stale." }; $response=$match[0].dispatchResult; $resolved=$true; break }
-			Start-Sleep -Milliseconds 100
-		}
-		if (!$resolved) { throw "Approval $id did not resolve before the deadline." }
-	}
 	if ($ExpectFailure) { if ($response.ok) { throw "$Name unexpectedly succeeded." } }
 	elseif (!$response.ok) { throw "$Name failed: $($response | ConvertTo-Json -Depth 20 -Compress)" }
 	return $response
@@ -281,7 +265,7 @@ try {
 	Record 'managed-build' (Job $compile.data.jobId 'correctness-managed-build')
 	Record 'explicit-scripting-ready' (ReadyScripts)
 	# Verify the production startup load first. A repeated scene open would
-	# unnecessarily request approval; keep the approved fallback if needed.
+	# manage more of the project than the requested test operation.
 	$fixtureState=(Tool 'project.state').data
 	if ($fixtureState.activeScene -ne 'Startup') {
 		Record 'opened-fixture-scene' (Tool 'scene.open' @{path='Assets/Scenes/Startup.tescene'})

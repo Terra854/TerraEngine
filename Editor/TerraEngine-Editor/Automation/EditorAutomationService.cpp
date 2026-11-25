@@ -723,17 +723,6 @@ namespace TerraEngine::Editor::Automation
 			return "read";
 		}
 
-		const char* ApprovalPolicyJson(AutomationApprovalPolicy policy)
-		{
-			switch (policy)
-			{
-			case AutomationApprovalPolicy::None: return "none";
-			case AutomationApprovalPolicy::Destructive: return "destructive";
-			case AutomationApprovalPolicy::HighImpact: return "high_impact";
-			}
-			return "none";
-		}
-
 		const char* JobStateJson(AutomationJobState state)
 		{
 			switch (state)
@@ -2240,7 +2229,6 @@ namespace TerraEngine::Editor::Automation
 		{
 			case RequestStatus::Queued: return "queued";
 			case RequestStatus::Running: return "running";
-			case RequestStatus::WaitingApproval: return "waiting_approval";
 			case RequestStatus::Completed: return "completed";
 			case RequestStatus::Failed: return "failed";
 			case RequestStatus::Rejected: return "rejected";
@@ -2296,7 +2284,6 @@ namespace TerraEngine::Editor::Automation
 			case ActivityEventType::Rejection: return "rejection";
 			case ActivityEventType::Configuration: return "configuration";
 			case ActivityEventType::Request: return "request";
-			case ActivityEventType::Approval: return "approval";
 			case ActivityEventType::Mutation: return "mutation";
 			case ActivityEventType::Diagnostic: return "diagnostic";
 			case ActivityEventType::Capture: return "capture";
@@ -3932,7 +3919,7 @@ namespace TerraEngine::Editor::Automation
 				capability.mutatesState = descriptor.mutationMode != MutationMode::ReadOnly;
 				capability.requiresProject = descriptor.availability.requiresProject;
 				capability.requiresScene = descriptor.availability.requiresScene;
-				capability.requiresApproval = descriptor.approvalPolicy != AutomationApprovalPolicy::None;
+				capability.requiresApproval = false;
 				capability.inputSummary = descriptor.description;
 				(void)RegisterCapability(capability);
 			}
@@ -5927,14 +5914,6 @@ namespace TerraEngine::Editor::Automation
 				&& request.arguments["projectGeneration"].is_number_unsigned()
 				&& request.arguments["projectGeneration"].get<std::uint64_t>() == request.state.projectGeneration;
 		};
-		const auto approvalMatches = [&request, operationName]() {
-			if (!request.arguments.contains("approval") || !request.arguments["approval"].is_object()) return false;
-			const nlohmann::json& approval = request.arguments["approval"];
-			return approval.value("projectGeneration", std::numeric_limits<std::uint64_t>::max()) == request.state.projectGeneration
-				&& approval.value("sceneGeneration", request.state.sceneGeneration) == request.state.sceneGeneration
-				&& approval.value("impactFingerprint", std::string{}) == PhysicsImpactFingerprint(operationName, request.arguments, request.state)
-				&& !approval.value("approvalId", std::string{}).empty();
-		};
 		const auto beginIdempotency = [this, &request, operationName]() {
 			return idempotencyStore.Begin({
 				request.clientId, std::string(operationName), request.idempotencyKey,
@@ -5976,12 +5955,12 @@ namespace TerraEngine::Editor::Automation
 			return succeed("Prepared physics settings reference impact.", {
 				{"impactFingerprint", PhysicsImpactFingerprint("physics.settings.set", request.arguments, request.state)},
 				{"projectGeneration", request.state.projectGeneration}, {"sceneGeneration", request.state.sceneGeneration},
-				{"referenceCount", 0U}, {"affectedObjects", nlohmann::json::array()}, {"requiresApproval", true}, {"expirySeconds", 300U}
+				{"referenceCount", 0U}, {"affectedObjects", nlohmann::json::array()}, {"requiresApproval", false}, {"expirySeconds", 300U}
 			});
 		}
 		if (operation == AutomationOperation("physics.settings.set"))
 		{
-			if (!projectGenerationMatches() || !approvalMatches()) return reject(ErrorCategory::Conflict, "Physics settings approval fingerprint or project/scene generation is stale.");
+			if (!projectGenerationMatches()) return reject(ErrorCategory::Conflict, "Project generation changed before this physics operation.");
 			const IdempotencyDecision decision = beginIdempotency();
 			if (const auto prior = replayOrConflict(decision)) return *prior;
 			PhysicsSettings candidate = physics.ConfiguredSettings();
@@ -5995,7 +5974,7 @@ namespace TerraEngine::Editor::Automation
 
 		if (IsOperationOneOf(operation, {AutomationOperation("physics.layer.create"), AutomationOperation("physics.layer.update")}))
 		{
-			if (!projectGenerationMatches() || !approvalMatches()) return reject(ErrorCategory::Conflict, "Collision-layer approval fingerprint or project/scene generation is stale.");
+			if (!projectGenerationMatches()) return reject(ErrorCategory::Conflict, "Project generation changed before this physics operation.");
 			if (!request.arguments["layer"].is_object()) return reject(ErrorCategory::Validation, "layer must be an object.");
 			const IdempotencyDecision decision = beginIdempotency();
 			if (const auto prior = replayOrConflict(decision)) return *prior;
@@ -6053,7 +6032,6 @@ namespace TerraEngine::Editor::Automation
 		if (IsOperationOneOf(operation, {AutomationOperation("physics.material.create"), AutomationOperation("physics.material.update")}))
 		{
 			if (!projectGenerationMatches()) return reject(ErrorCategory::Conflict, "Project generation changed before material publication.");
-			if (operation == AutomationOperation("physics.material.update") && !approvalMatches()) return reject(ErrorCategory::Conflict, "Material approval fingerprint is stale.");
 			if (!request.arguments["material"].is_object()) return reject(ErrorCategory::Validation, "material must be an object.");
 			const IdempotencyDecision decision = beginIdempotency();
 			if (const auto prior = replayOrConflict(decision)) return *prior;
@@ -6064,7 +6042,7 @@ namespace TerraEngine::Editor::Automation
 			std::optional<std::filesystem::path> existing = findMaterialPath(*id);
 			if (operation == AutomationOperation("physics.material.create") && existing)
 			{
-				return rejectAfterReservation(ErrorCategory::Conflict, "A physics material with this ID already exists; use the approval-gated update capability.");
+				return rejectAfterReservation(ErrorCategory::Conflict, "A physics material with this ID already exists; use the material update capability.");
 			}
 			if (existing)
 			{
@@ -6091,7 +6069,7 @@ namespace TerraEngine::Editor::Automation
 
 		if (operation == AutomationOperation("physics.collider.cook"))
 		{
-			if (!projectGenerationMatches() || !approvalMatches()) return reject(ErrorCategory::Conflict, "Collider-cook approval fingerprint or project generation is stale.");
+			if (!projectGenerationMatches()) return reject(ErrorCategory::Conflict, "Project generation changed before this physics operation.");
 			const IdempotencyDecision decision = beginIdempotency();
 			if (const auto prior = replayOrConflict(decision)) return *prior;
 			const nlohmann::json sourceValidation = ValidateProjectRelativePath(
@@ -7710,7 +7688,7 @@ namespace TerraEngine::Editor::Automation
 			const BuildProfileCollectionResult found = FindBuildProfileInCollection(directory, profileId);
 			std::optional<BuildProfile> existing = found.profile;
 			if (operation == AutomationOperation("build_profile.get")) return existing ? BuildSuccess(requestId, "Read build profile.", {{"profile", serializeProfile(*existing)}}) : BuildError(requestId, ErrorCategory::MissingTarget, "Build profile was not found.");
-			if (operation == AutomationOperation("build_profile.prepare_delete")) return existing ? BuildSuccess(requestId, "Prepared build-profile deletion.", {{"profileId", existing->id}, {"impact", {{"startupScene", existing->startupScene}}}, {"approvalId", "approval-build-profile-" + existing->id}}) : BuildError(requestId, ErrorCategory::MissingTarget, "Build profile was not found.");
+			if (operation == AutomationOperation("build_profile.prepare_delete")) return existing ? BuildSuccess(requestId, "Prepared build-profile deletion.", {{"profileId", existing->id}, {"impact", {{"startupScene", existing->startupScene}}}}) : BuildError(requestId, ErrorCategory::MissingTarget, "Build profile was not found.");
 			BuildProfile profile;
 			if (operation == AutomationOperation("build_profile.create"))
 			{
@@ -8454,7 +8432,7 @@ namespace TerraEngine::Editor::Automation
 						dependents.push_back(std::filesystem::relative(iterator->path(), editorContext->projectManager->GetProjectRoot()).generic_string());
 				}
 			}
-			return BuildSuccess(requestId, "Prepared scene deletion impact report.", {{"path", relative}, {"requiresApproval", true}, {"dependents", dependents}});
+			return BuildSuccess(requestId, "Prepared scene deletion impact report.", {{"path", relative}, {"requiresApproval", false}, {"dependents", dependents}});
 		}
 		if (operation == AutomationOperation("diagnostics.get_summary")) return HandleDiagnosticsGetSummary(arguments, requestId);
 		return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability metadata exists but no handler is registered.");
@@ -8476,7 +8454,7 @@ namespace TerraEngine::Editor::Automation
 				{"mutatesState", descriptor.mutationMode != MutationMode::ReadOnly},
 				{"requiresProject", capability.availability.requiresProject},
 				{"requiresScene", capability.availability.requiresScene},
-				{"requiresApproval", descriptor.approvalPolicy != AutomationApprovalPolicy::None},
+				{"requiresApproval", false},
 				{"inputSummary", legacy != nullptr ? legacy->inputSummary : descriptor.description},
 				{"version", descriptor.version},
 				{"description", descriptor.description},
@@ -8487,7 +8465,7 @@ namespace TerraEngine::Editor::Automation
 				{"jobBehavior", descriptor.jobBehavior},
 				{"diagnosticsContract", descriptor.diagnosticsContract},
 				{"permission", PermissionJson(descriptor.permission)},
-				{"approvalPolicy", ApprovalPolicyJson(descriptor.approvalPolicy)},
+				{"approvalPolicy", "none"},
 				{"provider", capability.providerId},
 				{"deprecated", descriptor.deprecated},
 				{"replacement", descriptor.replacement},
@@ -10419,7 +10397,7 @@ namespace TerraEngine::Editor::Automation
 	{
 		nlohmann::json validation = ValidateAssetPath(arguments, requestId);
 		if (!validation.value("ok", false)) return validation;
-		return BuildSuccess(requestId, "Prepared asset delete approval.", {{"path", validation["path"]}, {"requiresApproval", true}});
+		return BuildSuccess(requestId, "Prepared asset deletion impact.", {{"path", validation["path"]}, {"requiresApproval", false}});
 	}
 
 	nlohmann::json EditorAutomationService::HandleExportValidate(const nlohmann::json& arguments, const std::string& requestId)

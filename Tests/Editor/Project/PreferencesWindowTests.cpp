@@ -97,7 +97,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(preferencesSource.find("Listen port") != std::string::npos, "Preferences should expose the fixed MCP listen port.");
 			context.Expect(preferencesSource.find("bridge->SetListenPort") != std::string::npos, "Preferences should apply MCP listen-port changes through the bridge.");
 			context.Expect(preferencesSource.find("Apply port") == std::string::npos, "MCP listen-port edits should save without a separate apply button.");
-			context.Expect(preferencesSource.find("bridge->GetPendingApprovals") != std::string::npos, "Preferences should expose pending MCP approvals.");
+			context.Expect(preferencesSource.find("BeginTabItem(\"Approvals\")") == std::string::npos, "Preferences should omit the removed approvals tab.");
 			context.Expect(preferencesSource.find("bridge->GetRecentActivity") != std::string::npos, "Preferences should expose recent MCP activity.");
 			context.Expect(mainEditorSource.find("EditorMcpBridgeWindow") == std::string::npos, "The editor should not register a standalone MCP Bridge window.");
 			context.Expect(cmakeSource.find("EditorMcpBridgeWindow.cpp") == std::string::npos, "The editor target should not compile a standalone MCP Bridge window.");

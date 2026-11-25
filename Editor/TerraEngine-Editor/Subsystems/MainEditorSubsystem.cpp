@@ -4342,10 +4342,14 @@ void MainEditorSubsystem::RequestExit() {
 		m_PendingAction = PendingAction::Exit;
 		m_ShowSaveConfirmation = true;
 	} else {
-		if(!CloseCurrentProject()) return;
-
-		if (ctx && ctx->engine) ctx->engine->SignalShutdown();
+		ExitEditor();
 	}
+}
+
+void MainEditorSubsystem::ExitEditor() {
+	// Settle recoverable terrain ownership before leaving the event loop.
+	// Shutdown saves the live workspace and drains its owners without opening the hub.
+	if (ctx && ctx->engine && RetireTerrainCopies()) ctx->engine->SignalShutdown();
 }
 
 
@@ -4358,11 +4362,7 @@ void MainEditorSubsystem::ExecutePendingAction() {
 			CloseCurrentProject();
 			break;
 		case PendingAction::Exit:
-			// A recoverable ownership failure must also block the exit caller;
-			// merely returning from project close would still signal teardown here.
-			if(!CloseCurrentProject()) break;
-
-			if (ctx && ctx->engine) ctx->engine->SignalShutdown();
+			ExitEditor();
 			break;
 		default:
 			break;

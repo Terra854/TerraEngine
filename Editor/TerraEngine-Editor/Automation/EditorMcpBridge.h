@@ -1,7 +1,7 @@
-// EditorMcpBridge.h - Session, resource, approval, and activity state for MCP.
+// EditorMcpBridge.h - Session, resource and activity state for MCP.
 //
 // The bridge owns editor-facing policy such as enablement, write mode, request
-// ordering, and approval gates. Actual editor actions are delegated to
+// and ordering. Actual editor actions are delegated to
 // EditorAutomationService so this class can stay focused on lifecycle state.
 
 #pragma once
@@ -93,10 +93,6 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json BuildCapabilityListJson() const;
 		nlohmann::json BuildCaptureAvailabilityJson() const;
 
-		ApprovalPrompt CreateApprovalPrompt(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt = {});
-		bool ResolveApproval(std::string_view approvalId, bool approved);
-		bool CancelApproval(std::string_view approvalId);
-		std::vector<ApprovalPrompt> GetPendingApprovals() const;
 		bool CancelQueuedRequest(std::string_view requestId);
 
 	private:
@@ -122,13 +118,9 @@ namespace TerraEngine::Editor::Automation
 		};
 
 		bool RequiresWritePermission(const AutomationCapabilityDescriptor& capability) const;
-		bool RequiresApproval(const AutomationCapabilityDescriptor& capability) const;
 		nlohmann::json CallToolLocked(std::string_view name, const nlohmann::json& arguments);
-		nlohmann::json BuildApprovalResponse(const AutomationCapabilityDescriptor& capability, const nlohmann::json& arguments, const std::string& requestId);
-		ApprovalPrompt CreateApprovalPromptLocked(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt);
 		void PersistPreferences() const;
 		void ProcessPendingToolCalls();
-		void ExpirePendingApprovals();
 
 		EditorContext* editorContext = nullptr;
 		MainEditorSubsystem* mainEditor = nullptr;
@@ -145,21 +137,16 @@ namespace TerraEngine::Editor::Automation
 		// written by the editor UI. Keep them separate from activity and pending
 		// call locks so service callbacks never require a recursive mutex.
 		// Lifecycle policy is held across tool execution so disable/shutdown cannot
-		// race an approved or ordinary handler past the security boundary.
+		// race a handler past the security boundary.
 		mutable std::mutex lifecycleMutex;
 		mutable std::mutex stateMutex;
 		mutable std::mutex activityMutex;
 		mutable std::mutex pendingToolCallsMutex;
 		bool acceptingToolCalls = false;
-		std::vector<ApprovalPrompt> approvals;
 		std::uint64_t nextActivitySequence = 1;
 		std::uint64_t nextRequestSequence = 1;
-		std::uint64_t nextApprovalSequence = 1;
 		std::uint64_t nextSessionSequence = 1;
 		std::size_t maxActivityRecords = 256;
-		// Resolved approvals remain queryable for stateless loopback reconnects,
-		// but the listener must never accumulate unbounded retained envelopes.
-		std::size_t maxApprovalRecords = 256;
 		std::string lastDiagnosticRequest = "never";
 	#if defined(TERRAENGINE_EDITOR_TESTS)
 		std::function<void()> enablePublicationHookForTests;

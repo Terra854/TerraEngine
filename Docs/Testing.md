@@ -89,14 +89,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File out/build/RelWithDebInfo
 ```
 
 Live checks require Windows, a usable desktop/renderer and the installed bundled
-NativeAOT tools. Export requests retain the existing high-impact approval policy:
-approve each of the four export requests under Edit → Preferences → MCP Bridge
-→ Approvals. Fresh correctness/export fixtures copy both installed default layout
+NativeAOT tools. Fresh correctness/export fixtures copy both installed default layout
 files, matching normal project creation. Managed callback fault evidence requires
 the exact fixture receipt and logged exception; native dispatch counts alone do
 not report exceptions caught inside the managed callback bridge.
-The runner uses isolated write-enabled preferences but never manufactures approval
-tokens. Optional timing/port arguments and the maintained managed-reload/export
+The runner uses isolated, write-enabled preferences. Optional timing/port
+arguments and the maintained managed-reload/export
 regressions are documented by the installed runner's parameter help.
 The runner preserves correlated native/live logs and package/managed/process
 observations; watchdog termination is a failed check, not an orderly shutdown.
@@ -1954,7 +1952,7 @@ the repository unless a later feature explicitly approves them.
 
 The editor MCP bridge checks live under `Tests/Editor/Automation`. They cover
 automation envelopes, capability metadata, local-only transport checks, bridge
-state transitions, bounded activity history, approval prompts, and resource/tool
+state transitions, bounded activity history, direct command dispatch, and resource/tool
 routing. The glTF and FBX package import checks live under both
 `Tests/Editor/AssetPipeline` and `Tests/Editor/Automation`; they validate
 fastgltf and Assimp package parsing, generated material/texture/assignment
@@ -1973,7 +1971,7 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 After installation, open the installed editor, load a project, and use
 `Edit > Preferences... > MCP Bridge` to confirm disabled/read-only startup,
 local-only connection behavior, capability/resource listing, write-mode
-blocking, approval prompts, activity history, and fixed-port persistence. Change
+blocking, direct write dispatch, activity history, and fixed-port persistence. Change
 the listen port while disabled, restart the editor, and confirm the endpoint
 uses the same port instead of an ephemeral one.
 
@@ -2206,7 +2204,7 @@ with isolated preferences, enable the bridge and writes from
 the editor automation validation workflow. Validation must cover one
 successful atomic batch and one rejected batch, undo/redo, disconnect and job
 reconnect, Play Mode single-step, image capture, correlated logs, script
-compilation, export evidence, profiler capture, approval binding, project
+compilation, export evidence, profiler capture, project
 reload, and final bridge disablement.
 
 Disposable MCP projects must not enter recent-project history. Remove them only
@@ -3116,15 +3114,15 @@ $pwsh = (Get-Command pwsh.exe).Source
 if ($LASTEXITCODE -ne 0) { throw 'Installed lifecycle acceptance failed.' }
 ```
 
-The live editor uses the installed default layout and normal MCP approval UI.
+The live editor uses the installed default layout.
 Keep the Windows desktop unlocked for the complete interactive run. The editor
 watchdog requests a visible window; native regression jobs stay hidden. A locked
 desktop or unanswered dirty-scene exit prompt is a failed/incomplete live run,
 not evidence of normal shutdown.
 Acceptance requires fresh dirty reload/Save As/repaired reload, valid-word real
 NativeAOT managed readiness, all native floors and normal process settlement.
-Forced cleanup, stale artifacts, absent device checkpoints or missing approval
-cannot produce a passing summary. See the feature quickstart and retained
+Forced cleanup, stale artifacts or absent device checkpoints cannot produce a
+passing summary. See the feature quickstart and retained
 validation record for the complete evidence map.
 
 Installed acceptance on 2026-10-04 passed all eight lifecycle/support case floors
@@ -3237,7 +3235,7 @@ omitted/wrong ports and alternate origins are rejected before session attachment
 or JSON dispatch. Use the actual endpoint port after each restart. Interleave
 rejected requests with valid native/browser traffic and compare dispatch counts,
 selection, objects and session fingerprints. The installed bridge has no cumulative dispatch counter; its last diagnostic request and bounded activity log provide live fingerprints, while native callbacks prove exact rejected dispatch counts. Valid authority retains existing
-read-only, write-mode, approval and cancellation controls.
+read-only, write-mode and cancellation controls.
 
 ## Texture ranges, RGBA rows, fatal task settlement and UI targeting
 
@@ -3283,8 +3281,7 @@ The installed runner verifies its artifact seal, matching native DLL closure,
 bundled SDK, fixture generator and authored project. It seeds both default
 layout templates, isolates preferences and recents, generates eight fresh
 textures, checks loopback endpoint/process identity, compiles normal managed
-scripts and enters Play. Approve any ordinary displayed request in the editor's
-normal approval UI. Captures require `backendReadback=true` and
+scripts and enters Play. Captures require `backendReadback=true` and
 `deterministicFallback=false`; a fallback image never proves rendered acceptance.
 
 After `pointer-ready.json`, use the actual Game View image bounds and the fixture

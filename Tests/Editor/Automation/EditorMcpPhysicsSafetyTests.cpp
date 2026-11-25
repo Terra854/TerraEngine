@@ -193,7 +193,7 @@ namespace TerraEngine::EditorTests
 			}
 		});
 
-		registry.Add("Editor.MCP.Physics.AuthoringPreflightBindsApprovalAndReferenceImpact", [](TestContext& context) {
+		registry.Add("Editor.MCP.Physics.AuthoringUsesProjectGenerationWithoutApproval", [](TestContext& context) {
 			EditorAutomationRegistry capabilityRegistry;
 			context.Expect(capabilityRegistry.RegisterProvider(MakeProvider()).registered, "Physics provider registration should succeed.");
 			const AutomationCapabilitySnapshot& preflight = RequireCapability(context, capabilityRegistry, "physics.settings.preflight");
@@ -202,20 +202,18 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json& preflightProperties = preflight.descriptor.resultSchema["properties"];
 			context.Expect(preflightProperties.contains("impactFingerprint"), "A settings preflight must produce a stable impact fingerprint.");
 			context.Expect(preflightProperties.contains("referenceCount"), "Reference-impact preflight must report affected references.");
-			context.Expect(preflightProperties.contains("projectGeneration"), "Preflight output must bind the approval to a project generation.");
-			context.Expect(set.descriptor.approvalPolicy == AutomationApprovalPolicy::HighImpact, "Settings publication must require high-impact approval.");
-			const nlohmann::json& approval = set.descriptor.inputSchema["properties"]["approval"];
-			context.Expect(Requires(approval, "approvalId"), "Publication must carry the approval token.");
-			context.Expect(Requires(approval, "impactFingerprint"), "Publication must revalidate the preflight fingerprint.");
-			context.Expect(Requires(approval, "projectGeneration"), "Publication must revalidate the project generation.");
+			context.Expect(preflightProperties.contains("projectGeneration"), "Preflight output must identify the current project generation.");
+			context.Expect(!set.descriptor.inputSchema["properties"].contains("approval"),
+				"Physics settings can be submitted directly with the project generation.");
+			context.Expect(Requires(set.descriptor.inputSchema, "projectGeneration"), "Publication must revalidate the project generation.");
 			context.ExpectEqual(std::string("post_editor_automation_flush"), set.descriptor.execution.visibilityBoundary, "Authoring changes must publish only after the protected editor flush.");
 
-			for (const std::string_view name : {"physics.layer.create", "physics.layer.update", "physics.collider.cook"})
+			for (const std::string_view name : {"physics.layer.create", "physics.layer.update", "physics.material.update", "physics.collider.cook"})
 			{
 				const AutomationCapabilitySnapshot& capability = RequireCapability(context, capabilityRegistry, name);
 				const nlohmann::json& schema = capability.descriptor.inputSchema;
-				context.Expect(schema["properties"].contains("approval"), "Every reference-impact mutation must expose an approval envelope.");
-				context.Expect(Requires(schema, "approval"), "Approval must be mandatory in the public mutation schema, not merely injected by the bridge.");
+				context.Expect(!schema["properties"].contains("approval"), "Authoring mutations must accept direct requests.");
+				context.Expect(Requires(schema, "projectGeneration"), "Authoring mutations must validate the project generation.");
 			}
 		});
 

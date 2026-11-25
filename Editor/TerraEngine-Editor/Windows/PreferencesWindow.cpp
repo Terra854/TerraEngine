@@ -371,7 +371,6 @@ void PreferencesWindow::DrawMcpBridgeCategory()
 			}
 			ImGui::Text("Clients: %llu", static_cast<unsigned long long>(status.value("connectedClientCount", 0ull)));
 			ImGui::Text("Pending requests: %llu", static_cast<unsigned long long>(status.value("pendingRequestCount", 0ull)));
-			ImGui::Text("Pending approvals: %llu", static_cast<unsigned long long>(status.value("pendingApprovalCount", 0ull)));
 			ImGui::Text("Recent activity: %llu", static_cast<unsigned long long>(status.value("recentActivityCount", 0ull)));
 			ImGui::TextWrapped("Last diagnostics: %s", status.value("lastDiagnosticRequest", "never").c_str());
 			ImGui::EndTabItem();
@@ -427,39 +426,6 @@ void PreferencesWindow::DrawMcpBridgeCategory()
 				if (!terminal && job.value("cancellable", false) && ImGui::Button("Request cancellation"))
 				{
 					bridge->CallTool(typedJobsAvailable ? "jobs.cancel" : "export.cancel", {{"jobId", jobId}});
-				}
-				ImGui::Separator();
-				ImGui::PopID();
-			}
-			ImGui::EndTabItem();
-		}
-
-		if (ImGui::BeginTabItem("Approvals"))
-		{
-			const auto approvals = bridge->GetPendingApprovals();
-			if (approvals.empty())
-			{
-				ImGui::TextDisabled("No pending approvals.");
-			}
-			for (const auto& approval : approvals)
-			{
-				ImGui::PushID(approval.approvalId.c_str());
-				ImGui::Text("%s", approval.capability.c_str());
-				ImGui::TextDisabled("Approval %s | Request %s", approval.approvalId.c_str(), approval.requestId.c_str());
-				ImGui::TextWrapped("%s", approval.summary.c_str());
-				if (ImGui::Button("Approve"))
-				{
-					bridge->ResolveApproval(approval.approvalId, true);
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Deny"))
-				{
-					bridge->ResolveApproval(approval.approvalId, false);
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Cancel"))
-				{
-					bridge->CancelApproval(approval.approvalId);
 				}
 				ImGui::Separator();
 				ImGui::PopID();

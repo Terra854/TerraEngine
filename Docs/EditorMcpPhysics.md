@@ -18,9 +18,8 @@ open project and no scene. Renderer availability is never required.
 Project-write permission is required for settings/layer changes and collider
 cooking. Runtime body/character commands are typed scene mutations and also
 require project-write permission, an active scene/world, and Play Mode
-(`playing` or `paused`). Material creation is an atomic asset mutation without
-approval; material updates, settings, layer create/update, and collider cooking
-are `HighImpact` approval-gated operations.
+(`playing` or `paused`). Material creation is an atomic asset mutation.
+Physics mutations require writes enabled and use their protected commit boundary.
 
 ## Reads and bounded queries
 
@@ -93,31 +92,25 @@ custom gravity after disabling the body's authored built-in gravity:
 }
 ```
 
-## Approvals, fingerprints, and durable cooking
+## Settings preflight and durable cooking
 
-Call `physics.settings.preflight` before a settings change; for layer, material,
-or cook writes, obtain the equivalent editor approval preflight for that
-capability. The bounded result includes
-`impactFingerprint`, `projectGeneration`, `sceneGeneration`, `referenceCount`,
-affected object IDs, approval requirement, and expiry. Submit that fingerprint
-to the editor approval flow, then pass this envelope to the mutation:
+Use `physics.settings.preflight` to inspect a proposed settings change and get
+the current project generation. Send the patch through `physics.settings.set`
+with that generation and the usual command identity fields.
 
 ```json
 {
   "settings": {"gravity": [0, -9.81, 0], "fixedTimeStep": 0.016666667,
     "maxSubsteps": 4, "retainedDebugTicks": 2, "maxDebugPrimitives": 100000},
   "projectGeneration": 55,
-  "approval": {"approvalId": "approval-123", "impactFingerprint": "impact-abc",
-    "projectGeneration": 55, "sceneGeneration": 8},
   "worldGeneration": 12,
   "idempotencyKey": "settings-55-1",
   "correlationId": "settings-change"
 }
 ```
 
-The commit boundary (`post_editor_automation_flush`) revalidates approval,
-fingerprint, payload, session, and generations. Any intervening project/scene
-change invalidates approval; rejected writes leave settings, layers, materials,
+The commit boundary (`post_editor_automation_flush`) validates the payload, session, and applicable generations. Any intervening project/scene
+change invalidates a stale request. Rejected writes leave settings, layers, materials,
 and assets unchanged. Collider cooking is durable and cancellable: cancellation
 before publication discards the result and cannot replace a valid cooked asset
 with partial data. Runtime commands publish at `physics_command_commit`; reads

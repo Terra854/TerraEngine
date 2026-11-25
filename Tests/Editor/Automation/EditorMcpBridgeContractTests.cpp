@@ -48,21 +48,20 @@ namespace TerraEngine::EditorTests
 			context.Expect(!resources.empty(), "Bridge should expose resources.");
 			context.ExpectEqual(resources[0].value("uri", std::string()), std::string("terraengine://bridge/status"), "Status should be listed first.");
 			bool sawCaptureAvailability = false;
-			bool sawRecentApprovalResults = false;
+			bool sawApprovalResource = false;
 			for (const auto& resource : resources)
 			{
 				if (resource.value("uri", std::string()) == "terraengine://capture/availability")
 				{
 					sawCaptureAvailability = true;
 				}
-				if (resource.value("uri", std::string()) == "terraengine://approvals/recent")
+				if (resource.value("uri", std::string()).starts_with("terraengine://approvals/"))
 				{
-					sawRecentApprovalResults = true;
+					sawApprovalResource = true;
 				}
 			}
 			context.Expect(sawCaptureAvailability, "Bridge should list capture availability.");
-			context.Expect(sawRecentApprovalResults,
-				"Bridge should advertise retained approval results for stateless clients.");
+			context.Expect(!sawApprovalResource, "Approval resources are removed from discovery.");
 		});
 
 		registry.Add("Editor.MCP.Contract.StatusAndActivityResources", [](TestContext& context) {
@@ -111,10 +110,13 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json capabilities = bridge.BuildCapabilityListJson()["capabilities"];
 			bool sawAssetImport = false;
 			bool sawExportStart = false;
-			bool sawAssetDeleteApproval = false;
+			bool sawAssetDelete = false;
 			bool sawWriteModeTool = false;
 			for (const auto& capability : capabilities)
 			{
+				context.Expect(!capability.value("requiresApproval", true)
+					&& capability.value("approvalPolicy", std::string{}) == "none",
+					"Every tool must advertise immediate execution within its permissions.");
 				if (capability.value("name", "") == "bridge.set_write_mode")
 				{
 					sawWriteModeTool = true;
@@ -126,8 +128,7 @@ namespace TerraEngine::EditorTests
 				if (capability.value("name", "") == "export.start")
 				{
 					const nlohmann::json jobBehavior = capability.value("jobBehavior", nlohmann::json::object());
-					sawExportStart = capability.value("requiresApproval", false)
-						&& capability.value("mutationMode", "") == "export_mutation"
+					sawExportStart = capability.value("mutationMode", "") == "export_mutation"
 						&& jobBehavior.value("returnsDurableJob", false)
 						&& jobBehavior.value("pollOperation", "") == "jobs.get"
 						&& jobBehavior.value("cancelOperation", "") == "export.cancel"
@@ -135,12 +136,12 @@ namespace TerraEngine::EditorTests
 				}
 				if (capability.value("name", "") == "asset.prepare_delete")
 				{
-					sawAssetDeleteApproval = capability.value("requiresApproval", false);
+					sawAssetDelete = true;
 				}
 			}
 			context.Expect(sawAssetImport, "asset.import should advertise project-scoped mutation behavior.");
-			context.Expect(sawExportStart, "export.start should advertise its approval-gated, reconnect-readable durable job behavior.");
-			context.Expect(sawAssetDeleteApproval, "asset.prepare_delete should advertise destructive approval behavior.");
+			context.Expect(sawExportStart, "export.start should advertise its reconnect-readable durable job behavior.");
+			context.Expect(sawAssetDelete, "Asset deletion preflight should remain discoverable.");
 			context.Expect(!sawWriteModeTool, "MCP discovery should not advertise editor-owned write-mode changes.");
 		});
 

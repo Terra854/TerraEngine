@@ -12,12 +12,10 @@
 #include "EditorMcpTransport.h"
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
-#include "Engine/Physics/PhysicsSystem.h"
 
 #include <algorithm>
 #include <chrono>
 #include <exception>
-#include <sstream>
 
 namespace TerraEngine::Editor::Automation
 {
@@ -35,50 +33,6 @@ namespace TerraEngine::Editor::Automation
 		bool IsEnabledState(BridgeState state)
 		{
 			return state == BridgeState::Listening || state == BridgeState::Connected;
-		}
-
-		std::string StableApprovalFingerprint(std::string_view value)
-		{
-			std::uint64_t hash = 1469598103934665603ull;
-			for (unsigned char byte : value)
-			{
-				hash ^= byte;
-				hash *= 1099511628211ull;
-			}
-			std::ostringstream stream;
-			stream << std::hex << hash;
-			return stream.str();
-		}
-
-		std::string PhysicsImpactScope(std::string_view capability)
-		{
-			if (capability.starts_with("physics.settings.")) return "physics.settings";
-			if (capability.starts_with("physics.layer.")) return "physics.layer";
-			if (capability.starts_with("physics.material.")) return "physics.material";
-			if (capability.starts_with("physics.collider.")) return "physics.collider";
-			return std::string(capability);
-		}
-
-		nlohmann::json ApprovalImpactPayload(nlohmann::json arguments)
-		{
-			// Transport-only and replay-control fields are not part of the authored
-			// reference impact. The semantic patch and target identities remain.
-			for (const char* field : {"approval", "correlationId", "idempotencyKey", "worldGeneration", "projectGeneration", "sceneGeneration"})
-			{
-				arguments.erase(field);
-			}
-			return arguments;
-		}
-
-		std::string BuildImpactFingerprint(
-			std::string_view capability,
-			const nlohmann::json& arguments,
-			std::uint64_t projectGeneration,
-			std::uint64_t sceneGeneration)
-		{
-			return StableApprovalFingerprint(
-				PhysicsImpactScope(capability) + "|" + ApprovalImpactPayload(arguments).dump()
-				+ "|" + std::to_string(projectGeneration) + "|" + std::to_string(sceneGeneration));
 		}
 
 		const char* JobStateJson(AutomationJobState state)
@@ -189,7 +143,6 @@ namespace TerraEngine::Editor::Automation
 			calls.swap(pendingToolCalls);
 		}
 
-		std::vector<ApprovalPrompt> canceledApprovals;
 		{
 			std::lock_guard lock(stateMutex);
 			session.state = BridgeState::Stopping;
@@ -201,18 +154,6 @@ namespace TerraEngine::Editor::Automation
 				request.canceled = true;
 			}
 			requestQueue.clear();
-			for (ApprovalPrompt& prompt : approvals)
-			{
-				if (!prompt.resolved)
-				{
-					prompt.resolved = true;
-					prompt.approved = false;
-					prompt.dispatchCompleted = true;
-					prompt.resolutionState = "canceled";
-					canceledApprovals.push_back(prompt);
-				}
-			}
-			approvals.clear();
 			session.sessionId = "terraengine-editor-local-" + std::to_string(nextSessionSequence++);
 			session.clientName.clear();
 			session.peerAddress.clear();
@@ -239,11 +180,6 @@ namespace TerraEngine::Editor::Automation
 				call->completedSignal.notify_all();
 			}
 		}
-		for (const ApprovalPrompt& prompt : canceledApprovals)
-		{
-			RecordActivity(ActivityEventType::Approval, prompt.requestId, prompt.capability,
-				"Canceled approval because the MCP bridge shut down.", "canceled");
-		}
 		if (transport)
 		{
 			transport->StopListening();
@@ -257,7 +193,6 @@ namespace TerraEngine::Editor::Automation
 
 	void EditorMcpBridge::Update(float)
 	{
-		ExpirePendingApprovals();
 		ProcessPendingToolCalls();
 		// The queue is FIFO so repeated assistant commands produce deterministic
 		// scene/editor state even when a client sends overlapping requests.
@@ -434,7 +369,6 @@ namespace TerraEngine::Editor::Automation
 			}
 
 			std::deque<AssistantRequest> canceledRequests;
-			std::vector<ApprovalPrompt> canceledApprovals;
 			{
 				std::lock_guard lock(stateMutex);
 				const bool endsListenerSession = IsEnabledState(session.state);
@@ -445,20 +379,6 @@ namespace TerraEngine::Editor::Automation
 				canceledRequests.swap(requestQueue);
 				if (endsListenerSession)
 				{
-					// Disabling the listener is the explicit security boundary
-					// between logical clients. Resolve outstanding prompts and rotate
-					// the identity before the listener thread can finish disconnecting.
-					for (ApprovalPrompt& prompt : approvals)
-					{
-						if (!prompt.resolved)
-						{
-							prompt.resolved = true;
-							prompt.approved = false;
-							prompt.dispatchCompleted = true;
-							prompt.resolutionState = "canceled";
-							canceledApprovals.push_back(prompt);
-						}
-					}
 					session.sessionId = "terraengine-editor-local-" + std::to_string(nextSessionSequence++);
 				}
 				session.connectedClientCount = 0;
@@ -492,11 +412,6 @@ namespace TerraEngine::Editor::Automation
 				{
 					call->completedSignal.notify_all();
 				}
-			}
-			for (const ApprovalPrompt& prompt : canceledApprovals)
-			{
-				RecordActivity(ActivityEventType::Approval, prompt.requestId, prompt.capability,
-					"Canceled approval because the MCP listener was disabled.", "canceled");
 			}
 			if (transport)
 			{
@@ -618,8 +533,8 @@ namespace TerraEngine::Editor::Automation
 			std::lock_guard lock(stateMutex);
 			// Preserve the client kind and listener-session identity. The HTTP
 			// transport intentionally closes after every response, so clearing
-			// either value here would make a freshly returned approval impossible
-			// to resolve. A late disconnect must not resurrect a stopping bridge.
+			// either value would discard the identity of the listener session.
+			// A late disconnect must not resurrect a stopping bridge.
 			if (session.connectedClientCount > 0)
 			{
 				--session.connectedClientCount;
@@ -726,11 +641,6 @@ namespace TerraEngine::Editor::Automation
 			RecordActivity(ActivityEventType::Rejection, requestId, std::string(name), "Blocked write while bridge is read-only.", "rejected");
 			return service.BuildError(requestId, ErrorCategory::Permission, "The bridge is in read-only mode.");
 		}
-		if (capability && RequiresApproval(capability->descriptor))
-		{
-			return BuildApprovalResponse(capability->descriptor, arguments, requestId);
-		}
-
 		const bool captureTool = IsCaptureTool(name);
 		if (captureTool)
 		{
@@ -980,44 +890,6 @@ namespace TerraEngine::Editor::Automation
 			for (const StructuredLogRecord& record : page.records) records.push_back({{"sequence", record.sequence}, {"category", record.category}, {"source", record.source}, {"message", record.message}, {"correlationId", record.correlationId}, {"requestId", record.requestId}, {"jobId", record.jobId}});
 			return {{"ok", page.valid}, {"records", records}, {"nextCursor", page.nextCursor}, {"droppedBeforeCursor", page.droppedBeforeCursor}};
 		}
-		if (resource == "terraengine://approvals/pending")
-		{
-			nlohmann::json pending = nlohmann::json::array();
-			for (const ApprovalPrompt& approval : GetPendingApprovals()) pending.push_back({{"approvalId", approval.approvalId}, {"requestId", approval.requestId}, {"capability", approval.capability}, {"summary", approval.summary}, {"state", approval.resolved ? (approval.approved ? "approved" : "rejected") : "pending"}});
-			return {{"ok", true}, {"approvals", pending}};
-		}
-		if (resource == "terraengine://approvals/recent")
-		{
-			nlohmann::json recent = nlohmann::json::array();
-			std::lock_guard lock(stateMutex);
-			// HTTP uses one request per connection. Retain results across those
-			// connections, but expose only the current listener session so an old
-			// approval can never be confused with a newly authorized client.
-			for (auto approval = approvals.rbegin();
-				approval != approvals.rend() && recent.size() < 64U; ++approval)
-			{
-				if (approval->sessionId != session.sessionId)
-				{
-					continue;
-				}
-				recent.push_back({
-					{"approvalId", approval->approvalId},
-					{"requestId", approval->requestId},
-					{"capability", approval->capability},
-					{"summary", approval->summary},
-					{"state", approval->resolutionState},
-					{"approved", approval->approved},
-					{"dispatchCompleted", approval->dispatchCompleted},
-					{"dispatchResult", approval->dispatchResult},
-					{"argumentsFingerprint", approval->argumentsFingerprint},
-					{"impactFingerprint", approval->impactFingerprint},
-					{"projectGeneration", approval->projectGeneration},
-					{"sceneGeneration", approval->sceneGeneration},
-					{"worldGeneration", approval->worldGeneration}
-				});
-			}
-			return {{"ok", true}, {"approvals", std::move(recent)}};
-		}
 		return {{"ok", false}, {"error", {{"category", ToString(ErrorCategory::UnsupportedCapability)}, {"details", "Unknown resource URI."}}}};
 	}
 
@@ -1035,9 +907,7 @@ namespace TerraEngine::Editor::Automation
 			{{"uri", "terraengine://capture/availability"}, {"name", "Capture Availability"}},
 			{{"uri", "terraengine://activity/recent"}, {"name", "Recent Activity"}},
 			{{"uri", "terraengine://jobs/recent"}, {"name", "Recent Jobs"}},
-			{{"uri", "terraengine://logs/recent"}, {"name", "Recent Structured Logs"}},
-			{{"uri", "terraengine://approvals/pending"}, {"name", "Pending Approvals"}},
-			{{"uri", "terraengine://approvals/recent"}, {"name", "Recent Approval Results"}}
+			{{"uri", "terraengine://logs/recent"}, {"name", "Recent Structured Logs"}}
 		});
 	}
 
@@ -1073,8 +943,6 @@ namespace TerraEngine::Editor::Automation
 		WriteMode capturedWriteMode = WriteMode::ReadOnly;
 		std::uint16_t capturedConfiguredPort = 0;
 		std::size_t pendingRequestCount = 0;
-		std::size_t pendingApprovalCount = 0;
-		std::size_t recentApprovalCount = 0;
 		std::string capturedLastDiagnosticRequest;
 		{
 			std::lock_guard lock(stateMutex);
@@ -1082,14 +950,6 @@ namespace TerraEngine::Editor::Automation
 			capturedWriteMode = writeMode;
 			capturedConfiguredPort = configuredListenPort;
 			pendingRequestCount = requestQueue.size();
-			pendingApprovalCount = static_cast<std::size_t>(std::count_if(
-				approvals.begin(), approvals.end(), [](const ApprovalPrompt& prompt) {
-					return !prompt.resolved;
-				}));
-			recentApprovalCount = static_cast<std::size_t>(std::count_if(
-				approvals.begin(), approvals.end(), [&capturedSession](const ApprovalPrompt& prompt) {
-					return prompt.sessionId == capturedSession.sessionId;
-				}));
 			capturedLastDiagnosticRequest = lastDiagnosticRequest;
 		}
 		std::size_t recentActivityCount = 0;
@@ -1116,8 +976,6 @@ namespace TerraEngine::Editor::Automation
 			{"pendingRequestCount", pendingRequestCount},
 			{"pendingToolCallCount", pendingToolCallCount},
 			{"acceptingToolCalls", capturedToolCallAdmission},
-			{"pendingApprovalCount", pendingApprovalCount},
-			{"recentApprovalCount", recentApprovalCount},
 			{"recentActivityCount", recentActivityCount},
 			{"lastDiagnosticRequest", capturedLastDiagnosticRequest}
 		};
@@ -1155,243 +1013,9 @@ namespace TerraEngine::Editor::Automation
 		return service.BuildCaptureAvailability();
 	}
 
-	ApprovalPrompt EditorMcpBridge::CreateApprovalPrompt(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt)
-	{
-		std::lock_guard lifecycleLock(lifecycleMutex);
-		return CreateApprovalPromptLocked(std::move(requestId), std::move(capability), std::move(summary), std::move(arguments), expiresAt);
-	}
-
-	ApprovalPrompt EditorMcpBridge::CreateApprovalPromptLocked(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt)
-	{
-		{
-			std::lock_guard lock(pendingToolCallsMutex);
-			if (!acceptingToolCalls)
-			{
-				return {};
-			}
-		}
-		const AutomationStateSnapshot state = service.BuildAutomationStateSnapshot();
-		ApprovalPrompt prompt;
-		prompt.requestId = std::move(requestId);
-		prompt.capability = std::move(capability);
-		prompt.summary = std::move(summary);
-		prompt.arguments = std::move(arguments);
-		prompt.argumentsFingerprint = StableApprovalFingerprint(prompt.arguments.dump());
-		prompt.impactFingerprint = BuildImpactFingerprint(prompt.capability, prompt.arguments, state.projectGeneration, state.sceneGeneration);
-		prompt.projectGeneration = state.projectGeneration;
-		prompt.sceneGeneration = state.sceneGeneration;
-		prompt.worldGeneration = prompt.arguments.value("worldGeneration", TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().worldGeneration);
-		prompt.expiresAt = expiresAt == std::chrono::system_clock::time_point{}
-			? std::chrono::system_clock::now() + std::chrono::minutes(5)
-			: expiresAt;
-		{
-			std::lock_guard lock(stateMutex);
-			if (!IsEnabledState(session.state))
-			{
-				return {};
-			}
-			// Keep unresolved prompts until the user acts or they expire. When the
-			// bounded history is full, discard only the oldest resolved entry;
-			// never evict a still-actionable security decision to admit new work.
-			while (approvals.size() >= maxApprovalRecords)
-			{
-				const auto resolved = std::find_if(approvals.begin(), approvals.end(),
-					[](const ApprovalPrompt& candidate) {
-						return candidate.resolved;
-					});
-				if (resolved == approvals.end())
-				{
-					return {};
-				}
-				approvals.erase(resolved);
-			}
-			prompt.approvalId = "approval-" + std::to_string(nextApprovalSequence++);
-			prompt.sessionId = session.sessionId;
-			prompt.clientName = session.clientName;
-			approvals.push_back(prompt);
-		}
-		RecordActivity(ActivityEventType::Approval, prompt.requestId, prompt.capability, "Created approval prompt.", "waiting_approval");
-		return prompt;
-	}
-
-	bool EditorMcpBridge::ResolveApproval(std::string_view approvalId, bool approved)
-	{
-		// Approval validation and protected dispatch are one lifecycle operation;
-		// disable/shutdown cannot invalidate the binding between those two steps.
-		std::lock_guard lifecycleLock(lifecycleMutex);
-		const AutomationStateSnapshot state = service.BuildAutomationStateSnapshot();
-		const std::uint32_t currentWorldGeneration = TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().worldGeneration;
-		std::optional<ApprovalPrompt> resolvedPrompt;
-		WriteMode capturedWriteMode = WriteMode::ReadOnly;
-		bool bindingStillValid = false;
-		{
-			std::lock_guard lock(pendingToolCallsMutex);
-			if (!acceptingToolCalls)
-			{
-				return false;
-			}
-		}
-		{
-			std::lock_guard lock(stateMutex);
-			if (!IsEnabledState(session.state))
-			{
-				return false;
-			}
-			for (ApprovalPrompt& prompt : approvals)
-			{
-				if (prompt.approvalId == approvalId && !prompt.resolved)
-				{
-					// Generation checks catch lifecycle changes. Rebuild the semantic
-					// fingerprint before injecting the approval so a retained token
-					// cannot authorize a modified request.
-					const std::string currentImpactFingerprint = BuildImpactFingerprint(
-						prompt.capability, prompt.arguments, state.projectGeneration, state.sceneGeneration);
-					bindingStillValid = prompt.expiresAt > std::chrono::system_clock::now()
-						&& prompt.sessionId == session.sessionId
-						&& prompt.clientName == session.clientName
-						&& prompt.argumentsFingerprint == StableApprovalFingerprint(prompt.arguments.dump())
-						&& prompt.impactFingerprint == currentImpactFingerprint
-						&& prompt.projectGeneration == state.projectGeneration
-						&& prompt.sceneGeneration == state.sceneGeneration
-						&& (prompt.worldGeneration == 0U || prompt.worldGeneration == currentWorldGeneration);
-					prompt.resolved = true;
-					prompt.approved = approved && bindingStillValid;
-					prompt.dispatchCompleted = !prompt.approved;
-					if (!approved)
-					{
-						prompt.resolutionState = "denied";
-					}
-					else if (!bindingStillValid)
-					{
-						prompt.resolutionState = "binding_invalid";
-					}
-					else
-					{
-						// The prompt disappears from the actionable UI before the
-						// handler runs, while recent-approval readers see an honest
-						// in-progress state until the exact result is retained.
-						prompt.resolutionState = "dispatching";
-					}
-					resolvedPrompt = prompt;
-					capturedWriteMode = writeMode;
-					break;
-				}
-			}
-		}
-		if (!resolvedPrompt)
-		{
-			return false;
-		}
-		ApprovalPrompt prompt = std::move(*resolvedPrompt);
-		if (approved && !bindingStillValid)
-		{
-			RecordActivity(ActivityEventType::Rejection, prompt.requestId, prompt.capability,
-				"Approval binding expired or its session/generation/fingerprint changed.", "rejected");
-			return true;
-		}
-		RecordActivity(ActivityEventType::Approval, prompt.requestId, prompt.capability,
-			approved ? "Approved request." : "Denied request.", approved ? "completed" : "rejected");
-		if (approved)
-		{
-			if (prompt.capability.starts_with("physics."))
-			{
-				prompt.arguments["approval"] = {
-					{"approvalId", prompt.approvalId},
-					{"impactFingerprint", prompt.impactFingerprint},
-					{"projectGeneration", prompt.projectGeneration},
-					{"sceneGeneration", prompt.sceneGeneration}
-				};
-			}
-			nlohmann::json result;
-			try
-			{
-				result = service.HandleTool(
-					prompt.capability, prompt.arguments, capturedWriteMode, prompt.requestId);
-			}
-			catch (const std::exception& exception)
-			{
-				// A provider exception must not strand a resolved approval forever
-				// in "dispatching". Convert it into the same correlated envelope a
-				// loopback client can safely inspect and report.
-				result = service.BuildError(prompt.requestId, ErrorCategory::Internal,
-					std::string("Approved handler failed unexpectedly: ") + exception.what());
-			}
-			catch (...)
-			{
-				result = service.BuildError(prompt.requestId, ErrorCategory::Internal,
-					"Approved handler failed with an unknown exception.");
-			}
-			{
-				std::lock_guard lock(stateMutex);
-				const auto retained = std::find_if(approvals.begin(), approvals.end(),
-					[&prompt](const ApprovalPrompt& candidate) {
-						return candidate.approvalId == prompt.approvalId;
-					});
-				if (retained != approvals.end())
-				{
-					retained->dispatchResult = result;
-					retained->dispatchCompleted = true;
-					retained->resolutionState = "approved";
-				}
-			}
-			RecordActivity(result.value("ok", false) ? ActivityEventType::Request : ActivityEventType::Rejection,
-				prompt.requestId, prompt.capability, result.value("message", ""), result.value("status", "completed"));
-		}
-		return true;
-	}
-
-	bool EditorMcpBridge::CancelApproval(std::string_view approvalId)
-	{
-		std::optional<ApprovalPrompt> canceledPrompt;
-		{
-			std::lock_guard lock(stateMutex);
-			for (ApprovalPrompt& prompt : approvals)
-			{
-				if (prompt.approvalId == approvalId && !prompt.resolved)
-				{
-					prompt.resolved = true;
-					prompt.approved = false;
-					prompt.dispatchCompleted = true;
-					prompt.resolutionState = "canceled";
-					canceledPrompt = prompt;
-					break;
-				}
-			}
-		}
-		if (!canceledPrompt)
-		{
-			return false;
-		}
-		RecordActivity(ActivityEventType::Approval, canceledPrompt->requestId, canceledPrompt->capability,
-			"Canceled approval prompt.", "canceled");
-		return true;
-	}
-
-	std::vector<ApprovalPrompt> EditorMcpBridge::GetPendingApprovals() const
-	{
-		std::vector<ApprovalPrompt> pending;
-		std::lock_guard lock(stateMutex);
-		for (const ApprovalPrompt& prompt : approvals)
-		{
-			if (!prompt.resolved)
-			{
-				pending.push_back(prompt);
-			}
-		}
-		return pending;
-	}
-
 	bool EditorMcpBridge::RequiresWritePermission(const AutomationCapabilityDescriptor& capability) const
 	{
 		return capability.mutationMode != MutationMode::ReadOnly;
-	}
-
-	bool EditorMcpBridge::RequiresApproval(const AutomationCapabilityDescriptor& capability) const
-	{
-		// Destructive/high-impact actions stop at an explicit approval prompt
-		// before execution so the editor user remains in control of data loss,
-		// file deletion, export overwrite, or bridge exposure changes.
-		return capability.approvalPolicy != AutomationApprovalPolicy::None;
 	}
 
 	void EditorMcpBridge::PersistPreferences() const
@@ -1413,31 +1037,6 @@ namespace TerraEngine::Editor::Automation
 		}
 		editorContext->projectManager->SetEditorMcpPreferences(
 			enabled, std::string(ToString(capturedWriteMode)), GetListenEndpoint(), capturedConfiguredPort);
-	}
-
-	nlohmann::json EditorMcpBridge::BuildApprovalResponse(const AutomationCapabilityDescriptor& capability, const nlohmann::json& arguments, const std::string& requestId)
-	{
-		ApprovalPrompt prompt = CreateApprovalPromptLocked(requestId, capability.name, "Approval required for " + capability.name, arguments, {});
-		if (prompt.approvalId.empty())
-		{
-			return service.BuildError(requestId, ErrorCategory::Permission,
-				"The MCP bridge stopped before the approval could be created.");
-		}
-		nlohmann::json result;
-		result["ok"] = false;
-		result["requestId"] = requestId;
-		result["status"] = ToString(RequestStatus::WaitingApproval);
-		result["message"] = "Approval is required before this request can run.";
-		result["data"] = {
-			{"approvalId", prompt.approvalId},
-			{"capability", prompt.capability},
-			{"impactFingerprint", prompt.impactFingerprint},
-			{"projectGeneration", prompt.projectGeneration},
-			{"sceneGeneration", prompt.sceneGeneration},
-			{"worldGeneration", prompt.worldGeneration}
-		};
-		result["error"] = nullptr;
-		return result;
 	}
 
 	void EditorMcpBridge::ProcessPendingToolCalls()
@@ -1507,30 +1106,5 @@ namespace TerraEngine::Editor::Automation
 		RecordActivity(ActivityEventType::Request, canceledRequest->requestId, canceledRequest->capability,
 			"Canceled queued request.", "canceled");
 		return true;
-	}
-
-	void EditorMcpBridge::ExpirePendingApprovals()
-	{
-		const auto now = std::chrono::system_clock::now();
-		std::vector<ApprovalPrompt> expiredPrompts;
-		{
-			std::lock_guard lock(stateMutex);
-			for (ApprovalPrompt& prompt : approvals)
-			{
-				if (!prompt.resolved && prompt.expiresAt <= now)
-				{
-					prompt.resolved = true;
-					prompt.approved = false;
-					prompt.dispatchCompleted = true;
-					prompt.resolutionState = "expired";
-					expiredPrompts.push_back(prompt);
-				}
-			}
-		}
-		for (const ApprovalPrompt& prompt : expiredPrompts)
-		{
-			RecordActivity(ActivityEventType::Approval, prompt.requestId, prompt.capability,
-				"Approval prompt expired.", "canceled");
-		}
 	}
 }

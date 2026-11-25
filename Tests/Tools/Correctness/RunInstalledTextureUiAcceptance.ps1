@@ -11,7 +11,7 @@ and never deterministicFallback. Physical input remains an observed interactive
 gate: the parent records screen/logical coordinates and screenshots, compares
 texture regions with independent generator colors, and writes live-review.json.
 The runner does not inject clicks or infer acceptance from synthetic labels.
-Normal approvals remain in the editor UI; no token/policy bypass. Forced cleanup
+Writes run in the editor's configured MCP write mode. Forced cleanup
 is failure. Preserve work/evidence; no caller files are removed.
 Example: pwsh -NoProfile -File ./Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1
  -InstallRoot ./Build -WorkRoot ./out/validation/texture-ui-live-new -AllowLiveAcceptance
@@ -22,7 +22,6 @@ param(
 	[Parameter(Mandatory=$true)][string]$WorkRoot,
 	[ValidateRange(1024,65535)][int]$McpPort=43149,
 	[ValidateRange(30,600)][int]$StageTimeoutSeconds=180,
-	[ValidateRange(30,600)][int]$ApprovalTimeoutSeconds=180,
 	[ValidateRange(120,3600)][int]$EditorWatchdogSeconds=1800,
 	[switch]$AllowLiveAcceptance
 )
@@ -137,19 +136,6 @@ function Envelope($Response) {
 }
 function Tool([string]$Name,$Arguments=@{},[switch]$ExpectFailure) {
 	$response=Envelope (Rpc 'tools/call' @{name=$Name;arguments=$Arguments})
-	if ($response.PSObject.Properties['status'] -and $response.status -eq 'waiting_approval') {
-		$id=$response.data.approvalId
-		Write-Host "Approve $Name ($id) in the installed editor's normal approval UI."
-		$deadline=[DateTime]::UtcNow.AddSeconds($ApprovalTimeoutSeconds); $resolved=$false
-		while ([DateTime]::UtcNow -lt $deadline) {
-			$resource=Rpc 'resources/read' @{uri='terraengine://approvals/recent'}
-			$recent=$resource.result.contents[0].text | ConvertFrom-Json
-			$match=@($recent.approvals | Where-Object { $_.approvalId -eq $id -and $_.dispatchCompleted })
-			if ($match.Count -eq 1) { if (!$match[0].approved) { throw "Approval $id was denied/stale." }; $response=$match[0].dispatchResult; $resolved=$true; break }
-			Start-Sleep -Milliseconds 100
-		}
-		if (!$resolved) { throw "Approval $id did not resolve before the deadline." }
-	}
 	if ($ExpectFailure) { if ($response.ok) { throw "$Name unexpectedly succeeded." } }
 	elseif (!$response.ok) { throw "$Name failed: $($response | ConvertTo-Json -Depth 20 -Compress)" }
 	return $response

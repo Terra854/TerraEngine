@@ -196,6 +196,13 @@ namespace TerraEngine::EditorTests
 				&& liveValidationClose < projectClose,
 				"Installed terrain validation must cross the real project-close boundary after creating terrain history.");
 
+			const auto editorExit = RequiredContractRegion(editorSubsystemSource,
+				"void MainEditorSubsystem::ExitEditor()", "void MainEditorSubsystem::ExecutePendingAction()");
+			context.Expect(editorExit.find("RetireTerrainCopies()") < editorExit.find("SignalShutdown()")
+				&& editorExit.find("SignalShutdown()") != std::string::npos
+				&& editorExit.find("CloseCurrentProject()") == std::string::npos,
+				"Editor exit must retire terrain work and signal shutdown with the project still open.");
+
 			const auto rendererPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine/Renderer/RenderSystem.cpp";
 			std::ifstream rendererFile(rendererPath);

@@ -16,15 +16,15 @@ code never edits scene or project state directly.
   activity, capabilities, scene listing, asset listing, and export validation.
 - Write mode is required for scene, object, component, asset, and export
   mutations.
-- Destructive or high-impact tools create approval prompts before execution.
+- Tools dispatch directly according to the configured write mode and capability permissions.
 - Activity history is bounded to the newest 256 records so long sessions do not
   grow memory indefinitely.
 
 ## Preferences
 
 Open `Edit > Preferences...` and select `MCP Bridge`. The category exposes
-enablement, write mode, current state, pending request/approval counts, approval
-buttons, export activity, resources, and recent activity. The bridge no longer
+enablement, write mode, current state, pending request counts,
+export jobs, resources, and recent activity. The bridge no longer
 uses a separate editor window.
 
 The listen port is also configured in this category and defaults to `8765`.
@@ -37,9 +37,9 @@ reports the bind error instead of choosing a random port.
 ## Resources
 
 - `terraengine://bridge/status`: enablement, endpoint, permission mode, clients,
-  pending requests, approvals, and activity counters.
+  pending requests and activity counters.
 - `terraengine://bridge/capabilities`: versioned tool descriptors, JSON schemas,
-  permissions, approval policy, current availability, and execution boundaries.
+  permissions, current availability, and execution boundaries.
 - `terraengine://project/state`: the version-one project summary retained for
   compatibility.
 - `terraengine://project/session`: project and active-scene identity, prefab
@@ -61,7 +61,7 @@ reports the bind error instead of choosing a random port.
 - `terraengine://capture/availability`: image sources, limits, and renderer
   availability.
 - `terraengine://activity/recent`: bounded audit records for requests,
-  approvals, commits, cancellation, and terminal jobs.
+  commits, cancellation, and terminal jobs.
 
 Resources are read-only snapshots. Their availability does not grant permission
 to call a related write tool.
@@ -70,7 +70,7 @@ to call a related write tool.
 
 `terraengine://bridge/capabilities` is the machine-readable authority for the
 current editor state. A tool is advertised only when it has an executable
-handler, complete input/result schemas, permission and approval metadata, a
+handler, complete input/result schemas, permission metadata, a
 mutation classification, and an availability result. Existing version-one names
 and MCP `tools/call` content envelopes remain compatible.
 
@@ -89,8 +89,7 @@ and MCP `tools/call` content envelopes remain compatible.
 
 Project creation/opening remain native editor actions and are not advertised by
 MCP. Scene and asset paths are normalized against the owner-opened project. Dirty
-project transitions require an explicit precondition and, where necessary, an
-editor-owned approval. Scene, hierarchy, and component writes enter the typed
+project transitions require an explicit precondition and enabled write mode. Scene, hierarchy, and component writes enter the typed
 transaction/deferred-mutation path instead of modifying live storage from a
 worker.
 
@@ -191,25 +190,17 @@ Settings use explicit project/editor allowlists. Global editor preference writes
 are high impact. Command invocation is limited to explicitly registered semantic
 commands; menu-label execution and screen-coordinate input are never accepted.
 
-## Permissions and approvals
+## Permissions
 
-Each capability declares one permission level:
+- `read` inspects snapshots and can run in read-only mode.
+- `project_write` changes the project, authored content, jobs, or editor session
+  and requires **Writes enabled** in Preferences.
+- `global_write` changes allowlisted editor-wide preferences and also requires
+  **Writes enabled**.
 
-- `read` inspects snapshots and can run while the bridge is read-only.
-- `project_write` changes the open project, authored content, jobs, or editor
-  session and requires **Writes enabled** in Preferences.
-- `global_write` changes allowlisted editor-wide preferences and requires
-  writes plus high-impact approval.
-
-Approval policy is `none`, `destructive`, or `high_impact`. Required approvals
-are created and resolved only by the editor Preferences UI, expire safely, and
-are bound to the normalized request fingerprint. Approving a different request,
-changing its arguments, or replaying an expired approval does not authorize the
-call. The loopback transport closes each HTTP request after its response, so
-pending approvals remain bound to the current enabled-listener session across
-those ordinary socket closures. Disabling the bridge, re-enabling it, or
-restarting the editor starts a new listener session and invalidates every older
-prompt. Every approval outcome is retained in bounded activity history.
+A permitted tool returns its result or job receipt on the initial call. Tool
+discovery reports `requiresApproval: false` and `approvalPolicy: none`.
+Preflight fingerprints still bind specific operations to the state they inspected.
 
 State-changing calls include a correlation ID and return affected identifiers.
 When supplied, an idempotency key is scoped to the client, capability, and
@@ -258,14 +249,9 @@ process execution, unrestricted filesystem access, source-control operations,
 engine-source modification, package installation, arbitrary menu names, or
 desktop input emulation.
 
-Jobs, idempotency results, cursors, logs, approvals, and activity are retained
+Jobs, idempotency results, cursors, logs and activity are retained
 only for the current editor session; clients must rediscover after restart.
-Approvals have the narrower lifetime of one continuously enabled listener and
-are canceled whenever that listener is disabled.
-Project artifacts and saved editor data retain their normal persistence. Active
-jobs are cooperative rather than forcibly terminated: an already committed
-atomic change remains committed, while an uncommitted transaction remains
-unapplied.
+
 
 Capability availability is state-dependent. Operations that need an open
 project, active scene, renderer, stopped Play Mode, or implemented subsystem may
@@ -276,7 +262,7 @@ descriptor and executable handler.
 ## Animation Provider
 
 The optional `animation` provider follows the same read-only, write-mode, and
-approval rules as other MCP providers. Its asset and authoring mutations use
+permission rules as other MCP providers. Its asset and authoring mutations use
 expected generations and idempotency keys; long-running work uses bounded
 session-retained jobs. It has no authority to open/close projects or control the
 application lifecycle. Its runtime residency and profiler reads consume copied,
