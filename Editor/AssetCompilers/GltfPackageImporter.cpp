@@ -485,7 +485,7 @@ namespace TerraEngine::AssetPipeline
 			return ".png";
 		}
 
-		std::vector<std::uint8_t> BytesFromSpan(fastgltf::span<const std::byte> bytes)
+		std::vector<std::uint8_t> BytesFromSpan(std::span<const std::byte> bytes)
 		{
 			std::vector<std::uint8_t> result(bytes.size());
 			for (std::size_t index = 0; index < bytes.size(); ++index)
@@ -537,9 +537,10 @@ namespace TerraEngine::AssetPipeline
 				},
 				[&](const fastgltf::sources::URI& uri) {
 					outExtension = ExtensionForMimeType(uri.mimeType);
-					if (uri.uri.isLocalPath())
+					// The current parser stores external paths in a movable box.
+					if (!uri.uri.valueless_after_move() && uri.uri->isLocalPath())
 					{
-						const std::filesystem::path imagePath = packageDirectory / uri.uri.fspath();
+						const std::filesystem::path imagePath = packageDirectory / uri.uri->fspath();
 						std::ifstream in(imagePath, std::ios::binary);
 						if (!in)
 						{
@@ -584,9 +585,9 @@ namespace TerraEngine::AssetPipeline
 		{
 			if (const auto* uri = std::get_if<fastgltf::sources::URI>(&image.data))
 			{
-				if (uri->uri.isLocalPath())
+				if (!uri->uri.valueless_after_move() && uri->uri->isLocalPath())
 				{
-					return uri->uri.fspath();
+					return uri->uri->fspath();
 				}
 			}
 			return {};
@@ -3348,11 +3349,11 @@ namespace TerraEngine::AssetPipeline
 			fastgltf::Extensions::KHR_texture_transform |
 			fastgltf::Extensions::KHR_lights_punctual);
 
+		// fastgltf validates the required asset version and loads GLB buffers
+		// by default. Keep the importer's other parse options explicit.
 		constexpr fastgltf::Options parserOptions =
-			fastgltf::Options::DontRequireValidAssetMember |
 			fastgltf::Options::AllowDouble |
 			fastgltf::Options::LoadExternalBuffers |
-			fastgltf::Options::LoadGLBBuffers |
 			fastgltf::Options::GenerateMeshIndices |
 			fastgltf::Options::DecomposeNodeMatrices;
 
@@ -3753,10 +3754,8 @@ namespace TerraEngine::AssetPipeline
 			fastgltf::Extensions::KHR_texture_transform |
 			fastgltf::Extensions::KHR_lights_punctual);
 		constexpr fastgltf::Options parserOptions =
-			fastgltf::Options::DontRequireValidAssetMember |
 			fastgltf::Options::AllowDouble |
 			fastgltf::Options::LoadExternalBuffers |
-			fastgltf::Options::LoadGLBBuffers |
 			fastgltf::Options::GenerateMeshIndices |
 			fastgltf::Options::DecomposeNodeMatrices;
 		auto parsed = parser.loadGltf(gltfFile.get(), options.sourcePath.parent_path(), parserOptions);

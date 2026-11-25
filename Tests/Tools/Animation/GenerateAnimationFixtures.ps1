@@ -447,7 +447,7 @@ try {
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint)
 	) -Payload ([ordered]@{
 		formatVersion = [ordered]@{ major = 1; minor = 0 }
-		joltCookFingerprint = [ordered]@{ provider = "Jolt"; version = "5.6.1"; revision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea" }
+		joltCookFingerprint = [ordered]@{ provider = "Jolt"; version = "5.7.0"; revision = "cb1a6244912555d12b580265ce7540de262eab44" }
 		bodies = @([ordered]@{ bodyId = "root-body"; jointId = "root"; shape = [ordered]@{ type = "Sphere"; radiusMetres = 0.1 }; massKilograms = 1.0 })
 		constraints = @()
 		blendMask = @([ordered]@{ jointId = "root"; weight = 1.0 })

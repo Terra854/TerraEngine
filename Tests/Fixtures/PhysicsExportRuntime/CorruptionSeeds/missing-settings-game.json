@@ -1,7 +1,7 @@
 {
 	"physics": {
 		"schemaVersion": 1,
-		"provider": { "identifier": "Jolt", "version": "5.6.1", "revision": "2e28006e4a367624bb512bf2c37ca99a93d9d1ea" },
+		"provider": { "identifier": "Jolt", "version": "5.7.0", "revision": "cb1a6244912555d12b580265ce7540de262eab44" },
 		"settings": { "packagePath": "ProjectSettings/Missing.json", "schemaVersion": 1, "contentHash": "0000000000000000" },
 		"layersHash": "0000000000000000", "materials": [], "colliders": []
 	}

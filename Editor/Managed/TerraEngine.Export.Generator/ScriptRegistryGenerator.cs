@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
@@ -15,7 +16,7 @@ namespace TerraEngine.Export.Generator
 {
 	[Generator]
 	// ScriptRegistryGenerator is the managed-facing contract for this subsystem; keep it predictable for scripts.
-	public sealed class ScriptRegistryGenerator : ISourceGenerator
+	public sealed class ScriptRegistryGenerator : IIncrementalGenerator
 	{
 		private static readonly DiagnosticDescriptor s_collisionDiagnostic = new(
 			id: "TEEXP001",
@@ -33,24 +34,26 @@ namespace TerraEngine.Export.Generator
 			defaultSeverity: DiagnosticSeverity.Error,
 			isEnabledByDefault: true);
 
-		// Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
-		public void Initialize(GeneratorInitializationContext context)
+		public void Initialize(IncrementalGeneratorInitializationContext context)
 		{
+			// Script IDs and field helper chains depend on relationships across
+			// the compilation. Publish the registry from that complete input.
+			context.RegisterSourceOutput(context.CompilationProvider, Execute);
 		}
 
-		// Execute bridges managed callers to engine state; validate arguments before forwarding to native code.
-		public void Execute(GeneratorExecutionContext context)
+		private static void Execute(SourceProductionContext context, Compilation compilation)
 		{
-			INamedTypeSymbol? scriptBaseType = context.Compilation.GetTypeByMetadataName("TerraEngine.Script");
-			INamedTypeSymbol? serializeFieldAttribute = context.Compilation.GetTypeByMetadataName("TerraEngine.SerializeFieldAttribute");
-			INamedTypeSymbol? nonSerializedAttribute = context.Compilation.GetTypeByMetadataName("System.NonSerializedAttribute");
+			INamedTypeSymbol? scriptBaseType = compilation.GetTypeByMetadataName("TerraEngine.Script");
+			INamedTypeSymbol? serializeFieldAttribute = compilation.GetTypeByMetadataName("TerraEngine.SerializeFieldAttribute");
+			INamedTypeSymbol? nonSerializedAttribute = compilation.GetTypeByMetadataName("System.NonSerializedAttribute");
 			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (scriptBaseType == null || serializeFieldAttribute == null || nonSerializedAttribute == null)
 			{
 				return;
 			}
 
-			List<ScriptTypeModel> models = DiscoverScriptTypes(context, scriptBaseType, serializeFieldAttribute, nonSerializedAttribute);
+			List<ScriptTypeModel> models = DiscoverScriptTypes(compilation, context.CancellationToken,
+				scriptBaseType, serializeFieldAttribute, nonSerializedAttribute);
 			ReportCollisions(context, models);
 			ReportMissingPartialTypes(context, models);
 			ResolveHelperChains(models);
@@ -59,20 +62,21 @@ namespace TerraEngine.Export.Generator
 
 		// DiscoverScriptTypes bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static List<ScriptTypeModel> DiscoverScriptTypes(
-			GeneratorExecutionContext context,
+			Compilation compilation,
+			CancellationToken cancellationToken,
 			INamedTypeSymbol scriptBaseType,
 			INamedTypeSymbol serializeFieldAttribute,
 			INamedTypeSymbol nonSerializedAttribute)
 		{
 			var discoveredTypes = new Dictionary<INamedTypeSymbol, ScriptTypeModel>(SymbolEqualityComparer.Default);
 
-			foreach (SyntaxTree syntaxTree in context.Compilation.SyntaxTrees)
+			foreach (SyntaxTree syntaxTree in compilation.SyntaxTrees)
 			{
-				SemanticModel semanticModel = context.Compilation.GetSemanticModel(syntaxTree);
-				foreach (ClassDeclarationSyntax classDeclaration in syntaxTree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
+				SemanticModel semanticModel = compilation.GetSemanticModel(syntaxTree);
+				foreach (ClassDeclarationSyntax classDeclaration in syntaxTree.GetRoot(cancellationToken).DescendantNodes().OfType<ClassDeclarationSyntax>())
 				{
 					// Validate this condition before crossing into native or editor state that may outlive the managed object.
-					if (semanticModel.GetDeclaredSymbol(classDeclaration) is not INamedTypeSymbol typeSymbol)
+					if (semanticModel.GetDeclaredSymbol(classDeclaration, cancellationToken) is not INamedTypeSymbol typeSymbol)
 					{
 						continue;
 					}
@@ -122,7 +126,7 @@ namespace TerraEngine.Export.Generator
 		}
 
 		// ReportCollisions bridges managed callers to engine state; validate arguments before forwarding to native code.
-		private static void ReportCollisions(GeneratorExecutionContext context, IEnumerable<ScriptTypeModel> models)
+		private static void ReportCollisions(SourceProductionContext context, IEnumerable<ScriptTypeModel> models)
 		{
 			var seenIds = new Dictionary<ulong, ScriptTypeModel>();
 			foreach (ScriptTypeModel model in models.Where(model => model.IsAttachable))
@@ -147,7 +151,7 @@ namespace TerraEngine.Export.Generator
 		}
 
 		// ReportMissingPartialTypes bridges managed callers to engine state; validate arguments before forwarding to native code.
-		private static void ReportMissingPartialTypes(GeneratorExecutionContext context, IEnumerable<ScriptTypeModel> models)
+		private static void ReportMissingPartialTypes(SourceProductionContext context, IEnumerable<ScriptTypeModel> models)
 		{
 			foreach (ScriptTypeModel model in models)
 			{

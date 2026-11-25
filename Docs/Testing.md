@@ -1009,7 +1009,7 @@ and a build-tree package cache. After the single managed restore target runs,
 the engine assembly, source generator, and editor assembly build with
 `--no-restore`.
 
-The current closure is pinned to .NET SDK `10.0.303`, runtime pack `10.0.11`,
+The current closure is pinned to .NET SDK `10.0.404`, runtime pack `10.0.15`,
 and RID `win-x64`. CMake downloads the SDK archive selected by
 `cmake/TerraEngineDotNetSdk.lock.json`, verifies its SHA-512, and extracts it to
 `External/dotnet/sdk/<rid>/<version>`. Build commands always use that absolute
@@ -1019,7 +1019,7 @@ configuring:
 
 ```powershell
 cmake --fresh --preset RelWithDebInfo
-$dotnet = "External/dotnet/sdk/win-x64/10.0.303/dotnet.exe"
+$dotnet = "External/dotnet/sdk/win-x64/10.0.404/dotnet.exe"
 & $dotnet --version
 $archives = @(
 	Get-ChildItem .nuget/feed/*.nupkg |
@@ -1032,7 +1032,7 @@ cmake -DTERRAENGINE_RUNTIME_ID=win-x64 `
 	-P cmake/TerraEngineOfflineNuGet.cmake
 ```
 
-The SDK version command must print `10.0.303`. NuGet verifies each archive's
+The SDK version command must print `10.0.404`. NuGet verifies each archive's
 available author and repository signatures without an online revocation
 lookup. The CMake verifier rejects changed or unmanifested packages, mismatched
 SDK metadata, and changed legal files. Set

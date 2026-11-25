@@ -1,7 +1,7 @@
 # miniaudio dependency
 
-TerraEngine Audio uses unmodified miniaudio **0.11.25**, pinned to commit
-`9634bedb5b5a2ca38c1ee7108a9358a4e233f14d`. The implementation is private to the
+TerraEngine Audio uses unmodified miniaudio **0.11.26**, pinned to commit
+`877ea4a7c2601c7b0f2a44e83dfac42e6470fea6`. The implementation is private to the
 `terra.miniaudio` provider. TerraEngine's private implementation wrapper includes
 the bundled `extras/stb_vorbis.c` declarations before compiling miniaudio, while
 the full stb_vorbis implementation is linked once from the pinned dependency.

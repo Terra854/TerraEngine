@@ -12,7 +12,7 @@ function(terraengine_configure_recast_dependency)
 	endif()
 
 	set(_terraengine_recast_root "${CMAKE_SOURCE_DIR}/External/recastnavigation")
-	set(TERRAENGINE_RECAST_REVISION "6dc1667f580357e8a2154c28b7867bea7e8ad3a7")
+	set(TERRAENGINE_RECAST_REVISION "9f4ce64458dfae86e1239c525ddc219c4e9e06f1")
 
 	if(NOT EXISTS "${_terraengine_recast_root}/Recast/Source/Recast.cpp" OR
 		NOT EXISTS "${_terraengine_recast_root}/Detour/Source/DetourNavMesh.cpp")

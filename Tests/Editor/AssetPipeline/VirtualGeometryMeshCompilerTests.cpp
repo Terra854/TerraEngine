@@ -578,19 +578,38 @@ namespace
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.PlanarOneSidedConesRemainEligible", [](TestContext& context) {
 			RawMeshFixture fixture = MakeGridMesh(48u);
-			// An explicitly planar surface supplies a strong all-eligible control;
-			// curved simplified geometry is not a proof of a nondegenerate cone.
+			// Source triangles have planar, consistent winding. Simplified LODs
+			// can still contain folded or degenerate triangles and must fail open.
 			for(auto& vertex : fixture.vertices) vertex.position[2] = 0.0f;
 			const auto output = MakeTempOutputPath("ConeSafetyPlanarGrid");
 			MeshCompileReport report{};
 			context.Expect(CompileMeshFromRaw("VirtualGeometry/ConeSafetyPlanarGrid.obj", output, fixture.vertices, fixture.indices, true, &report), "The planar cone control must compile.");
 			context.Expect(report.virtualGeometry.coneSafetyRecordCount > 0u, "The planar control must emit actual cone safety records.");
-			context.ExpectEqual(report.virtualGeometry.coneSafetyRecordCount, report.virtualGeometry.coneEligibleClusterCount, "All one-sided planar cluster cones must remain eligible.");
 			const Mesh* mesh = LoadCompiledMeshForInspection(output);
 			context.Expect(mesh != nullptr && mesh->virtualGeometryConeSafety.size() == report.virtualGeometry.coneSafetyRecordCount, "Planar safety records must survive the production decoder.");
-			context.Expect(std::all_of(mesh->virtualGeometryConeSafety.begin(), mesh->virtualGeometryConeSafety.end(), [](const VirtualGeometryConeSafetyRecord& record) {
-				return (record.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u && (record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u;
-			}), "Decoded planar records must retain valid and eligible cone flags.");
+			if (!mesh) return;
+			std::uint32_t finestCount = 0u;
+			std::uint32_t eligibleCount = 0u;
+			for (const auto& record : mesh->virtualGeometryConeSafety) {
+				const bool coneValid = (record.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u;
+				const bool eligible = (record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u;
+				context.ExpectEqual(coneValid, eligible, "One-sided cones must be eligible exactly when their bounds are valid.");
+				if (eligible) ++eligibleCount;
+				context.Expect(record.groupOffset < mesh->virtualGeometryCullableGroups.size(),
+					"Each cone must refer to a decoded cullable group.");
+				if (record.groupOffset >= mesh->virtualGeometryCullableGroups.size()) continue;
+				if (mesh->virtualGeometryCullableGroups[record.groupOffset].lodIndex == 0u) {
+					++finestCount;
+					context.Expect(eligible, "Every finest-LOD cluster of the one-sided planar source must stay eligible.");
+				}
+				if (!coneValid) {
+					context.Expect(record.disabledReasonStringSize > 0u,
+						"An invalid simplified cone must retain the fail-open reason.");
+				}
+			}
+			context.Expect(finestCount > 0u, "The planar control must exercise the finest LOD.");
+			context.ExpectEqual(report.virtualGeometry.coneEligibleClusterCount, eligibleCount,
+				"The cook report and decoded eligible cone count must agree.");
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.ConservativeCookDisablesConeSafety", [](TestContext& context) {

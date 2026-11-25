@@ -8,9 +8,9 @@ must not expose Recast or Detour types.
 ## Approved source and rationale
 
 - **Project:** Recast Navigation
-- **Version:** `1.6.0`
+- **Version:** `v1.6.0-367-g9f4ce64` development snapshot
 - **Repository:** `https://github.com/recastnavigation/recastnavigation.git`
-- **Exact source commit:** `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`
+- **Exact source commit:** `9f4ce64458dfae86e1239c525ddc219c4e9e06f1`
 - **Approved repository location:** pristine submodule at `External/recastnavigation`
 - **License/notice source:** `External/recastnavigation/License.txt`
 
@@ -68,6 +68,6 @@ Get-Content "$src/License.txt"
 ```
 
 The first command must print
-`6dc1667f580357e8a2154c28b7867bea7e8ad3a7`. Compile, focused tests, install,
+`9f4ce64458dfae86e1239c525ddc219c4e9e06f1`. Compile, focused tests, install,
 and installed-tree notice verification are implementation gates; this document
 does not claim those qualification results until the build gate records them.

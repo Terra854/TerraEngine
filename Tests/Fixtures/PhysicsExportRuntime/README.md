@@ -19,6 +19,6 @@ repeats that vocabulary with the source-collider path, headless capability, and
 the required zero-active-job shutdown result so a runner can reject stale or
 partially staged fixture inputs before launching either mode.
 
-The fixture requires the repository-owned Jolt Physics v5.6.1 provider at
-commit `2e28006e4a367624bb512bf2c37ca99a93d9d1ea`; it does not require a system
+The fixture requires the repository-owned Jolt Physics v5.7.0 provider at
+commit `cb1a6244912555d12b580265ce7540de262eab44`; it does not require a system
 physics SDK or any globally installed runtime dependency.

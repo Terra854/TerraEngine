@@ -15,7 +15,7 @@
 
 namespace TerraEngine::Tests {
 	namespace {
-		constexpr std::string_view kApprovedJoltCommit = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
+		constexpr std::string_view kApprovedJoltCommit = "cb1a6244912555d12b580265ce7540de262eab44";
 		constexpr std::string_view kOfficialJoltUrl = "https://github.com/jrouwe/JoltPhysics.git";
 
 		struct CommandResult {
@@ -262,7 +262,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(0, gitlink.exitCode,
 				"Git must be available so the contract can inspect the working-tree submodule selection.");
 			context.Expect(gitlink.output.find(kApprovedJoltCommit) != std::string::npos,
-				"The working-tree gitlink must select the approved Jolt 5.6.1 commit.");
+				"The working-tree gitlink must select the approved Jolt 5.7.0 commit.");
 
 			const CommandResult providerHead = CaptureCommand(JoltHeadCommand(sourceRoot));
 			context.ExpectEqual(0, providerHead.exitCode,
@@ -277,14 +277,14 @@ namespace TerraEngine::Tests {
 				"External/JoltPhysics must have no modified or untracked provider files: " + providerStatus.output);
 		});
 
-		registry.Add("Engine.Physics.DependencyContract.JoltVersionHeaderIsFiveSixOne", [](TestContext& context) {
+		registry.Add("Engine.Physics.DependencyContract.JoltVersionHeaderIsFiveSevenZero", [](TestContext& context) {
 			const std::string coreHeader = ReadTextFile(SourceRoot() / "External/JoltPhysics/Jolt/Core/Core.h");
 			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_MAJOR\s+5(?:\s|$))")),
 				"The vendored Jolt public version header must report major version 5.");
-			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_MINOR\s+6(?:\s|$))")),
-				"The vendored Jolt public version header must report minor version 6.");
-			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_PATCH\s+1(?:\s|$))")),
-				"The vendored Jolt public version header must report patch version 1.");
+			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_MINOR\s+7(?:\s|$))")),
+				"The vendored Jolt public version header must report minor version 7.");
+			context.Expect(std::regex_search(coreHeader, std::regex(R"(#define\s+JPH_VERSION_PATCH\s+0(?:\s|$))")),
+				"The vendored Jolt public version header must report patch version 0.");
 		});
 
 		registry.Add("Engine.Physics.DependencyContract.ProductionProfileIsCoreOnly", [](TestContext& context) {

@@ -85,8 +85,8 @@ by default), while a current failure bypasses that rate limit.
 
 ## Provider baseline
 
-The runtime provider baseline is pristine Jolt Physics 5.6.1 at commit
-`2e28006e4a367624bb512bf2c37ca99a93d9d1ea`, vendored under `External/` and
+The runtime provider baseline is pristine Jolt Physics 5.7.0 at commit
+`cb1a6244912555d12b580265ce7540de262eab44`, vendored under `External/` and
 built by the repository configuration. Jolt 5.5 is comparison evidence only;
 it must never be used as the runtime baseline.
 

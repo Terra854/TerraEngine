@@ -70,6 +70,9 @@ namespace TerraEngine::Physics::Backend {
 			JPH::ColorArg color,
 			const JobFunction& function,
 			JPH::uint32 dependencyCount = 0) override;
+		void CreateJobs(const char* name, JPH::ColorArg color,
+			const JobFunction& function, JobHandle* jobs, JPH::uint32 jobCount,
+			JPH::uint32 dependencyCount = 0) override;
 		void WaitForJobs(Barrier* barrier) override;
 
 		void RequestStop() noexcept;

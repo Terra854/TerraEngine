@@ -1,6 +1,6 @@
 param(
-	[string]$SdkVersion = "10.0.303",
-	[string]$RuntimePackVersion = "10.0.11"
+	[string]$SdkVersion = "10.0.404",
+	[string]$RuntimePackVersion = "10.0.15"
 )
 
 # This script refreshes only the versioned .NET runtime and NativeAOT packages

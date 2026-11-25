@@ -75,7 +75,7 @@ endfunction()
 # requirement or installed public surface.
 function(terraengine_configure_miniaudio_dependency)
 	set(_terraengine_miniaudio_root "${CMAKE_SOURCE_DIR}/External/miniaudio")
-	set(TERRAENGINE_MINIAUDIO_REVISION "9634bedb5b5a2ca38c1ee7108a9358a4e233f14d")
+	set(TERRAENGINE_MINIAUDIO_REVISION "877ea4a7c2601c7b0f2a44e83dfac42e6470fea6")
 	if(NOT EXISTS "${_terraengine_miniaudio_root}/miniaudio.c")
 		message(FATAL_ERROR "miniaudio is missing. Run 'git submodule update --init --recursive External/miniaudio'.")
 	endif()
@@ -103,8 +103,8 @@ endfunction()
 
 function(terraengine_configure_jolt_dependency)
 	set(_terraengine_jolt_root "${CMAKE_SOURCE_DIR}/External/JoltPhysics")
-	set(TERRAENGINE_JOLT_REVISION "2e28006e4a367624bb512bf2c37ca99a93d9d1ea")
-	set(TERRAENGINE_JOLT_VERSION "5.6.1")
+	set(TERRAENGINE_JOLT_REVISION "cb1a6244912555d12b580265ce7540de262eab44")
+	set(TERRAENGINE_JOLT_VERSION "5.7.0")
 
 	if(NOT EXISTS "${_terraengine_jolt_root}/Build/CMakeLists.txt")
 		message(FATAL_ERROR
@@ -128,13 +128,13 @@ function(terraengine_configure_jolt_dependency)
 	file(READ "${_terraengine_jolt_root}/Jolt/Core/Core.h" TERRAENGINE_JOLT_CORE_HEADER)
 	foreach(TERRAENGINE_VERSION_PAIR IN ITEMS
 		"JPH_VERSION_MAJOR;5"
-		"JPH_VERSION_MINOR;6"
-		"JPH_VERSION_PATCH;1")
+		"JPH_VERSION_MINOR;7"
+		"JPH_VERSION_PATCH;0")
 		list(GET TERRAENGINE_VERSION_PAIR 0 TERRAENGINE_VERSION_NAME)
 		list(GET TERRAENGINE_VERSION_PAIR 1 TERRAENGINE_VERSION_VALUE)
 		if(NOT TERRAENGINE_JOLT_CORE_HEADER MATCHES
 			"#define[ \t]+${TERRAENGINE_VERSION_NAME}[ \t]+${TERRAENGINE_VERSION_VALUE}")
-			message(FATAL_ERROR "External/JoltPhysics does not contain approved Jolt 5.6.1 headers.")
+			message(FATAL_ERROR "External/JoltPhysics does not contain approved Jolt 5.7.0 headers.")
 		endif()
 	endforeach()
 

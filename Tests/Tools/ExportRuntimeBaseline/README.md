@@ -79,7 +79,7 @@ The helper also copies the source-only physics recipe from
 `Tests/Fixtures/PhysicsExportRuntime` into its disposable project and invokes
 the installed `TerraEnginePhysicsColliderCompiler`. It requires a published
 `Build/Assets/Colliders/Startup.tepcoll` envelope with the repository-pinned
-Jolt 5.6.1 revision `2e28006e4a367624bb512bf2c37ca99a93d9d1ea` before export. The archive must contain that cooked
+Jolt 5.7.0 revision `cb1a6244912555d12b580265ce7540de262eab44` before export. The archive must contain that cooked
 envelope and Physics Settings, while excluding the `.tecollider` source recipe.
 
 ## Expected signals and diagnosis

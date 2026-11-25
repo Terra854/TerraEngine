@@ -335,7 +335,7 @@ bool ValidatePhysicsManifestAsset(
 			TerraEngine::Physics::kJoltCookProviderVersion,
 			TerraEngine::Physics::kJoltCookRevision);
 		if(!compatibility.compatible) {
-			outError = "Physics cooked collider provider mismatch: " + NormalizePackagePath(path) + ". " + compatibility.message + " Re-cook with Jolt 5.6.1 revision 2e28006e4a367624bb512bf2c37ca99a93d9d1ea.";
+			outError = "Physics cooked collider provider mismatch: " + NormalizePackagePath(path) + ". " + compatibility.message + " Re-cook with Jolt 5.7.0 revision cb1a6244912555d12b580265ce7540de262eab44.";
 			return false;
 		}
 	}
@@ -365,9 +365,9 @@ bool ValidatePhysicsManifestBlock(
 	}
 	if(!physics.contains("provider") || !physics["provider"].is_object()
 		|| physics["provider"].value("identifier", std::string{}) != "Jolt"
-		|| physics["provider"].value("version", std::string{}) != "5.6.1"
-		|| physics["provider"].value("revision", std::string{}) != "2e28006e4a367624bb512bf2c37ca99a93d9d1ea") {
-		outError = "Physics export manifest must require Jolt 5.6.1 revision 2e28006e4a367624bb512bf2c37ca99a93d9d1ea.";
+		|| physics["provider"].value("version", std::string{}) != "5.7.0"
+		|| physics["provider"].value("revision", std::string{}) != "cb1a6244912555d12b580265ce7540de262eab44") {
+		outError = "Physics export manifest must require Jolt 5.7.0 revision cb1a6244912555d12b580265ce7540de262eab44.";
 		return false;
 	}
 	if(physics.value("cookFormatVersion", 0U) != TerraEngine::Physics::kJoltCookPayloadFormatVersion) {

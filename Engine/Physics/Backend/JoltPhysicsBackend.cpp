@@ -84,8 +84,8 @@ namespace TerraEngine::Physics::Backend {
 		constexpr std::size_t kMaximumCookTriangles = 4U * 1024U * 1024U;
 		constexpr std::string_view kJoltCookFormatFamily = "TerraEngine.Jolt.ShapeWithChildren";
 		constexpr std::string_view kJoltProviderName = "Jolt";
-		constexpr std::string_view kJoltProviderVersion = "5.6.1";
-		constexpr std::string_view kJoltProviderRevision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
+		constexpr std::string_view kJoltProviderVersion = "5.7.0";
+		constexpr std::string_view kJoltProviderRevision = "cb1a6244912555d12b580265ce7540de262eab44";
 		constexpr std::uint32_t kJoltCookFormatVersion = 1U;
 
 		PhysicsBackendResult Success(std::string message = {}) {

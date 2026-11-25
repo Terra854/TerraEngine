@@ -191,7 +191,10 @@ namespace TerraEngine::EditorTests
 			auto document = nlohmann::json::parse(ReadTextFile(source));
 			const auto uri = document["buffers"][0]["uri"].get<std::string>();
 			const auto decoded = fastgltf::base64::decode(std::string_view(uri).substr(uri.find(',') + 1U));
-			std::vector<std::uint8_t> bytes(decoded.begin(), decoded.end());
+			context.Expect(decoded.error() == fastgltf::Error::None, "The fixture must contain valid Base64 data.");
+			if (decoded.error() != fastgltf::Error::None) return;
+			const auto& decodedBytes = decoded.get();
+			std::vector<std::uint8_t> bytes(decodedBytes.begin(), decodedBytes.end());
 			context.Expect(bytes.size() >= 276U, "The committed fixture must contain its real float3 morph displacements.");
 			// Report a broken fixture before accessing its displacement stream.
 			if (bytes.size() < 276U) return;

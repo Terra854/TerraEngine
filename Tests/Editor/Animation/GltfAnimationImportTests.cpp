@@ -24,6 +24,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fastgltf/base64.hpp>
 #include <nlohmann/json.hpp>
 
 namespace TerraEngine::EditorTests
@@ -45,9 +46,8 @@ namespace TerraEngine::EditorTests
 			return nlohmann::json::parse(input);
 		}
 
-		// Add validly-shaped package metadata for the capabilities that ImplementationCheck must
-		// preserve.  The current importer intentionally ignores it, creating the
-		// red state that protects the later implementation from static regressions.
+		// Extend the triangle with real skin and channel streams. The glTF parser
+		// now validates accessor shapes and rejects empty animation samplers.
 		void AddAnimatedSkinContractData(nlohmann::json& document, std::string_view interpolation, bool includeSkin = true)
 		{
 			document["nodes"][0]["name"] = "AnimatedCharacter";
@@ -57,22 +57,67 @@ namespace TerraEngine::EditorTests
 				{ "extras", { { "terraEngineSocket", "RightHand" } } }
 			});
 			document["nodes"][0]["children"] = { 1 };
+			std::vector<std::uint8_t> bytes;
+			const auto buffer = document["buffers"].size();
+			const auto addAccessor = [&](const auto& data, int component, const char* type, std::size_t count) {
+				const auto offset = bytes.size();
+				const auto* first = reinterpret_cast<const std::uint8_t*>(data.data());
+				bytes.insert(bytes.end(), first, first + data.size() * sizeof(data[0]));
+				const auto view = document["bufferViews"].size();
+				document["bufferViews"].push_back({
+					{"buffer", buffer}, {"byteOffset", offset}, {"byteLength", bytes.size() - offset}
+				});
+				const auto accessor = document["accessors"].size();
+				document["accessors"].push_back({
+					{"bufferView", view}, {"componentType", component}, {"count", count}, {"type", type}
+				});
+				return accessor;
+			};
 			if(includeSkin)
 			{
 				document["nodes"][0]["skin"] = 0;
+				auto& attributes = document["meshes"][0]["primitives"][0]["attributes"];
+				attributes["JOINTS_0"] = addAccessor(std::array<std::uint16_t, 12>{}, 5123, "VEC4", 3);
+				attributes["WEIGHTS_0"] = addAccessor(std::array<float, 12>{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0}, 5126, "VEC4", 3);
+				const auto inverseBind = addAccessor(
+					std::array<float, 16>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1}, 5126, "MAT4", 1);
 				document["skins"] = nlohmann::json::array({ {
 					{ "name", "HeroSkin" },
 					{ "joints", { 1 } },
-					// The accessor reference is intentionally part of the test input even
-					// though the base fixture does not need its values to demonstrate the
-					// present importer omission.  ImplementationCheck will validate and consume it.
-					{ "inverseBindMatrices", 0 }
+					{ "inverseBindMatrices", inverseBind }
 				} });
 			}
+			const auto times = addAccessor(std::array<float, 2>{0, 1}, 5126, "SCALAR", 2);
+			document["accessors"][times]["min"] = {0};
+			document["accessors"][times]["max"] = {1};
+			auto channels = nlohmann::json::array();
+			auto samplers = nlohmann::json::array();
+			const auto addChannel = [&](const char* path, const char* type, const auto& key) {
+				const bool cubic = interpolation == "CUBICSPLINE";
+				const std::size_t count = cubic ? 6U : 2U;
+				std::vector<float> values(count * key.size());
+				// Cubic entries are in-tangent, value, out-tangent per key.
+				for (std::size_t index = 0; index < 2; ++index) {
+					const auto value = cubic ? index * 3U + 1U : index;
+					std::copy(key.begin(), key.end(), values.begin() + value * key.size());
+				}
+				channels.push_back({{"sampler", samplers.size()}, {"target", {{"node", 1}, {"path", path}}}});
+				samplers.push_back({
+					{"input", times}, {"interpolation", interpolation},
+					{"output", addAccessor(values, 5126, type, count)}
+				});
+			};
+			addChannel("translation", "VEC3", std::array<float, 3>{0, 1, 0});
+			addChannel("rotation", "VEC4", std::array<float, 4>{0, 0, 0, 1});
+			addChannel("scale", "VEC3", std::array<float, 3>{1, 1, 1});
+			document["buffers"].push_back({
+				{"byteLength", bytes.size()},
+				{"uri", "data:application/octet-stream;base64," + fastgltf::base64::encode(bytes.data(), bytes.size())}
+			});
 			document["animations"] = nlohmann::json::array({ {
 				{ "name", std::string("ContractClip_") + std::string(interpolation) },
-				{ "samplers", nlohmann::json::array() },
-				{ "channels", nlohmann::json::array() },
+				{ "samplers", std::move(samplers) },
+				{ "channels", std::move(channels) },
 				{ "extras", { { "requiredInterpolation", interpolation } } }
 			} });
 		}

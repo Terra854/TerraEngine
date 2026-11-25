@@ -680,6 +680,10 @@ target_include_directories(basisu PUBLIC
 )
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_compile_definitions(basisu PUBLIC BASISU_SUPPORT_ENCODING=1 BASISD_SUPPORT_KTX2=1 BASISD_SUPPORT_KTX2_ZSTD=0)
+# The refreshed encoder defaults to Wuffs. Keep the existing image decoder
+# path so this dependency update preserves texture compiler input behavior.
+set_property(SOURCE External/basisu/encoder/basisu_enc.cpp APPEND
+	PROPERTY COMPILE_DEFINITIONS BASISU_USE_WUFFS_LDR_LOADER=0)
 # Configure-time guard: select platform or option behavior before generating build files.
 if(MSVC)
 	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
@@ -1005,6 +1009,17 @@ set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
 set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "Disable fastgltf examples" FORCE)
 set(FASTGLTF_ENABLE_DOCS OFF CACHE BOOL "Disable fastgltf docs" FORCE)
 set(FASTGLTF_COMPILE_AS_CPP20 ON CACHE BOOL "Compile fastgltf as C++20" FORCE)
+set(FASTGLTF_DOWNLOAD_SIMDJSON OFF CACHE BOOL "Use TerraEngine's bundled simdjson" FORCE)
+set(FASTGLTF_DOWNLOAD_SIMDUTF OFF CACHE BOOL "Use TerraEngine's bundled simdutf" FORCE)
+# Link fastgltf to the pinned simdutf amalgamation. This keeps the importer
+# self-contained and avoids adding a runtime DLL to the editor or export.
+add_library(TerraEngineSimdutf STATIC External/simdutf/simdutf.cpp)
+target_include_directories(TerraEngineSimdutf SYSTEM PUBLIC
+	"$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/External/simdutf>")
+target_compile_features(TerraEngineSimdutf PUBLIC cxx_std_20)
+set_target_properties(TerraEngineSimdutf PROPERTIES
+	POSITION_INDEPENDENT_CODE ON CXX_SCAN_FOR_MODULES OFF)
+add_library(simdutf::simdutf ALIAS TerraEngineSimdutf)
 add_subdirectory(External/fastgltf)
 set_target_properties(fastgltf PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -1705,7 +1720,16 @@ target_link_libraries(TerraEngineModelPackageCompiler
 		basisu
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(WIN32)
+	# The build-tree compiler and fixture baker share this directory. Refresh
+	# both importer DLLs so Windows cannot load an older copy beside them.
+	add_custom_command(TARGET TerraEngineModelPackageCompiler POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"$<TARGET_FILE:fastgltf>"
+			"$<TARGET_FILE:simdjson>"
+			"$<TARGET_FILE_DIR:TerraEngineModelPackageCompiler>"
+		VERBATIM)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	# This compiler is installed beside the editor and again under Tests/Editor.
 	# Local owners serve the editor copy; the deeper test copy reaches that same
 	# complete editor dependency bundle without duplicating large native owners.
@@ -2297,6 +2321,11 @@ endif()
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/External/JoltPhysics/LICENSE"
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/ThirdPartyNotices"
 	RENAME "JoltPhysics-LICENSE.txt"
+)
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/External/simdutf/LICENSE-MIT"
+	"${CMAKE_CURRENT_SOURCE_DIR}/External/simdutf/LICENSE-APACHE"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/ThirdPartyNotices/simdutf"
 )
 
 set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")

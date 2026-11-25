@@ -51,7 +51,7 @@ namespace TerraEngine::EditorTests {
 			return {
 				{"physics", {
 					{"schemaVersion", 1},
-					{"provider", {{"identifier", "Jolt"}, {"version", "5.6.1"}, {"revision", "2e28006e4a367624bb512bf2c37ca99a93d9d1ea"}}},
+					{"provider", {{"identifier", "Jolt"}, {"version", "5.7.0"}, {"revision", "cb1a6244912555d12b580265ce7540de262eab44"}}},
 					{"cookFormatVersion", 1},
 					{"settings", {{"packagePath", "ProjectSettings/PhysicsSettings.json"}, {"schemaVersion", 1}, {"contentHash", "settings-hash"}}},
 					{"layersHash", "layers-hash"}, {"defaultMaterialGuid", "11111111111111111111111111111111"},
@@ -69,8 +69,8 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(5u, static_cast<unsigned int>(AssetType::CookedCollider), "Cooked collider must append after physics material without renumbering prior types.");
 			const PhysicsExportManifest manifest;
 			context.ExpectEqual(std::string("Jolt"), manifest.providerIdentifier, "The exported physics provider identifier must remain engine-facing.");
-			context.ExpectEqual(std::string("5.6.1"), manifest.providerVersion, "The manifest must record the approved Jolt 5.6.1 provider version.");
-			context.ExpectEqual(std::string("2e28006e4a367624bb512bf2c37ca99a93d9d1ea"), manifest.providerRevision, "The manifest must record the exact approved Jolt revision.");
+			context.ExpectEqual(std::string("5.7.0"), manifest.providerVersion, "The manifest must record the approved Jolt 5.7.0 provider version.");
+			context.ExpectEqual(std::string("cb1a6244912555d12b580265ce7540de262eab44"), manifest.providerRevision, "The manifest must record the exact approved Jolt revision.");
 		});
 
 		registry.Add("Editor.PhysicsExport.InventoryClassifiesRuntimePhysicsPayloads", [](TestContext& context) {
@@ -156,7 +156,7 @@ namespace TerraEngine::EditorTests {
 			const std::vector<std::string> files = {"export-result.json", "resolved-manifest.json", "content-inventory.json", "validation-report.json", "progress.jsonl", "package-validation.txt"};
 			for(const std::string& name : files) {
 				const std::string contents = ReadText(request.evidenceDirectory / name);
-				context.Expect(contents.find("2e28006e4a367624bb512bf2c37ca99a93d9d1ea") != std::string::npos, "Every physics evidence output should expose the exact provider provenance.");
+				context.Expect(contents.find("cb1a6244912555d12b580265ce7540de262eab44") != std::string::npos, "Every physics evidence output should expose the exact provider provenance.");
 			}
 			const nlohmann::json inventory = nlohmann::json::parse(ReadText(request.evidenceDirectory / "content-inventory.json"));
 			context.Expect(inventory.at("physics").at("present").get<bool>(), "Inventory evidence must retain physics validation provenance even when the file list is empty.");

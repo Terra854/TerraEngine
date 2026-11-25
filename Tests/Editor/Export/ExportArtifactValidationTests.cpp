@@ -123,7 +123,7 @@ namespace TerraEngine::EditorTests {
 			return {
 				{"startupScene", "Scenes/Startup.tescene"},
 				{"rendererRecovery", {{"mode", "failClosed"}, {"fatalMessage", "restart"}, {"fullApplicationRestart", false}}},
-				{"physics", {{"schemaVersion", 1}, {"provider", {{"identifier", "Jolt"}, {"version", "5.6.1"}, {"revision", "2e28006e4a367624bb512bf2c37ca99a93d9d1ea"}}},
+				{"physics", {{"schemaVersion", 1}, {"provider", {{"identifier", "Jolt"}, {"version", "5.7.0"}, {"revision", "cb1a6244912555d12b580265ce7540de262eab44"}}},
 					{"cookFormatVersion", 1}, {"settings", {{"packagePath", "ProjectSettings/PhysicsSettings.json"}, {"schemaVersion", 1}, {"contentHash", Hash(ByteView(settingsText))}}},
 					{"layersHash", Hash(ByteView(layers))}, {"defaultMaterialGuid", ToHexString(materialId)}, {"materials", nlohmann::json::array({{{"guid", ToHexString(materialId)}, {"packagePath", "Physics/Surface.tephysmat"}, {"size", materialText.size()}, {"checksum", Hash(ByteView(materialText))}}})},
 					{"colliders", nlohmann::json::array({{{"guid", ToHexString(colliderId)}, {"packagePath", "Physics/Door.tepcoll"}, {"size", collider.size()}, {"checksum", Hash(collider)}, {"sourceProvenanceHash", "source"}, {"recipeHash", "recipe"}}})},

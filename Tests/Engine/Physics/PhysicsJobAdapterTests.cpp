@@ -164,10 +164,15 @@ namespace TerraEngine::Tests {
 			std::atomic<int> completedJobs = 0;
 			auto* barrier = adapter.CreateBarrier();
 
-			for(int jobIndex = 0; jobIndex < 16; ++jobIndex) {
-				auto job = adapter.CreateJob("Physics adapter barrier job", JPH::Color::sWhite, [&completedJobs]() {
-					completedJobs.fetch_add(1, std::memory_order_acq_rel);
-				}, 1U);
+			// Bulk creation must retain each dependency until its own handle is
+			// released and then execute every job once through the shared pool.
+			std::vector<JPH::JobSystem::JobHandle> jobs(16);
+			adapter.CreateJobs("Physics adapter barrier job", JPH::Color::sWhite, [&completedJobs]() {
+				completedJobs.fetch_add(1, std::memory_order_acq_rel);
+			}, jobs.data(), static_cast<JPH::uint32>(jobs.size()), 1U);
+			context.ExpectEqual(0, completedJobs.load(std::memory_order_acquire),
+				"Bulk-created jobs must wait for their dependencies.");
+			for(auto& job : jobs) {
 				barrier->AddJob(job);
 				job.RemoveDependency();
 			}

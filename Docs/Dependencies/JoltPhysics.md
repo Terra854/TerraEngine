@@ -1,12 +1,12 @@
 # Jolt Physics dependency
 
-This page records the approved Jolt Physics dependency boundary for TerraEngine. implementation check passed its Windows, Linux, float, double, sanitizer, determinism, lifecycle, query-bound, dependency-closure, and performance gates. implementation check then added the pristine approved submodule.
+TerraEngine builds the pinned Jolt Physics source below. Cooked colliders and physics exports carry the exact provider revision. Re-cook colliders and regenerate exports produced with Jolt 5.6.1 before using them with this build.
 
 ## Approved source and rationale
 
 - **Project:** Jolt Physics
-- **Version:** `5.6.1` development headers (`v5.6.0-18-g2e28006e`)
-- **Exact commit:** `2e28006e4a367624bb512bf2c37ca99a93d9d1ea`
+- **Version:** `5.7.0` development headers (`snapshot cb1a6244`)
+- **Exact commit:** `cb1a6244912555d12b580265ce7540de262eab44`
 - **Approved repository location:** `External/JoltPhysics`
 - **License:** MIT (copyright Jorrit Rouwe, 2021; see the upstream `LICENSE` file)
 
@@ -60,7 +60,7 @@ Jolt's standalone `ENABLE_INSTALL=ON` profile installs the `Jolt` library, publi
 
 ## Upgrade and source-integrity policy
 
-The pin is exact: changing the tag, commit, patches, provider, build surface, or source contents requires renewed planning and explicit approval. A future Jolt upgrade beyond 5.6.1 must repeat the provider comparison/spike, record fresh evidence, update this document, and obtain approval before implementation. Never silently substitute a downloaded package or a system-installed Jolt copy.
+The pin is exact: changing the tag, commit, patches, provider, build surface, or source contents requires renewed planning and explicit approval. A future Jolt upgrade beyond 5.7.0 must repeat the provider comparison/spike, record fresh evidence, update this document, and obtain approval before implementation. Never silently substitute a downloaded package or a system-installed Jolt copy.
 
 ## Reproducible verification
 
@@ -73,4 +73,4 @@ Get-Content "$src/LICENSE"
 rg -n "project\(JoltPhysics VERSION|JPH_BUILD_SHARED_LIBS|ENABLE_INSTALL|TARGET_UNIT_TESTS|TARGET_HELLO_WORLD|TARGET_PERFORMANCE_TEST|TARGET_SAMPLES|TARGET_VIEWER|ENABLE_OBJECT_STREAM|DISABLE_CUSTOM_ALLOCATOR|JPH_USE_EXTERNAL_PROFILE|JPH_USE_CPU_COMPUTE" "$src/Build/CMakeLists.txt"
 ```
 
-The first command must print `2e28006e4a367624bb512bf2c37ca99a93d9d1ea`; the license check must contain the MIT copyright, permission, and warranty clauses; and the CMake search must show the options documented above. The planning archive retains the complete measured backend-selection record.
+The first command must print `cb1a6244912555d12b580265ce7540de262eab44`; the license check must contain the MIT copyright, permission, and warranty clauses; and the CMake search must show the options documented above. The planning archive retains the complete measured backend-selection record.

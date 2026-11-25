@@ -15,7 +15,7 @@
 
 namespace TerraEngine::Tests {
 	namespace {
-		constexpr std::string_view kApprovedRecastCommit = "6dc1667f580357e8a2154c28b7867bea7e8ad3a7";
+		constexpr std::string_view kApprovedRecastCommit = "9f4ce64458dfae86e1239c525ddc219c4e9e06f1";
 		constexpr std::string_view kApprovedRecastUrl = "https://github.com/recastnavigation/recastnavigation.git";
 
 		struct CommandResult {
@@ -190,7 +190,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(0, gitlink.exitCode,
 				"Git must inspect the Recast parent gitlink used by the working tree.");
 			context.Expect(gitlink.output.find(kApprovedRecastCommit) != std::string::npos,
-				"The working-tree Recast gitlink must select the approved v1.6.0 source commit.");
+				"The working-tree Recast gitlink must select the approved source commit.");
 
 			const CommandResult providerHead = CaptureCommand(ProviderHeadCommand(sourceRoot));
 			context.ExpectEqual(0, providerHead.exitCode,

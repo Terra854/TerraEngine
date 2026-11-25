@@ -9,11 +9,11 @@ Build the engine/managed assembly first, then use the repository-bundled .NET
 SDK (not `dotnet` from `PATH`). Run from the repository root:
 
 ```powershell
-$dotnet = "External/dotnet/sdk/win-x64/10.0.303/dotnet.exe"
+$dotnet = "External/dotnet/sdk/win-x64/10.0.404/dotnet.exe"
 $assembly = (Resolve-Path "out/build/RelWithDebInfo/Build/Binaries/Managed/RelWithDebInfo/TerraEngine.CSharp.dll").Path
 $probeOut = "out/validation/managed-locomotion-abi"
 $probeIntermediate = Join-Path (Get-Location) "out/validation/managed-locomotion-abi-obj/"
-$env:DOTNET_ROOT = (Resolve-Path "External/dotnet/sdk/win-x64/10.0.303").Path
+$env:DOTNET_ROOT = (Resolve-Path "External/dotnet/sdk/win-x64/10.0.404").Path
 $env:DOTNET_MULTILEVEL_LOOKUP = "0"
 $env:DOTNET_CLI_HOME = Join-Path (Get-Location) "out/build/RelWithDebInfo/DotNetCliHome"
 $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = "0" # Keep disposable CLI homes out of the user PATH.

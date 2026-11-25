@@ -87,6 +87,16 @@ namespace TerraEngine::Physics::Backend {
 		return handle;
 	}
 
+	void PhysicsJobAdapter::CreateJobs(const char* name, JPH::ColorArg color,
+		const JobFunction& function, JobHandle* jobs, JPH::uint32 jobCount,
+		JPH::uint32 dependencyCount) {
+		// Jolt supplies the output slots. Give each job its own handle and
+		// dependency count through the adapter's bounded shared-pool path.
+		for(JPH::uint32 index = 0; index < jobCount; ++index) {
+			jobs[index] = CreateJob(name, color, function, dependencyCount);
+		}
+	}
+
 	void PhysicsJobAdapter::WaitForJobs(Barrier* barrier) {
 		if(barrier == nullptr) {
 			return;

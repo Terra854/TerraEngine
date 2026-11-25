@@ -115,13 +115,13 @@ namespace TerraEngine::Runtime {
 			const nlohmann::json& physics = manifest.at("physics");
 			if(!physics.is_object() || physics.value("schemaVersion", 0U) != 1U
 				|| !physics.contains("provider") || physics["provider"].value("identifier", std::string{}) != "Jolt"
-				|| physics["provider"].value("version", std::string{}) != "5.6.1"
-				|| physics["provider"].value("revision", std::string{}) != "2e28006e4a367624bb512bf2c37ca99a93d9d1ea"
+				|| physics["provider"].value("version", std::string{}) != "5.7.0"
+				|| physics["provider"].value("revision", std::string{}) != "cb1a6244912555d12b580265ce7540de262eab44"
 				|| physics.value("cookFormatVersion", 0U) != TerraEngine::Physics::kJoltCookPayloadFormatVersion
 				|| !physics.contains("materials") || !physics["materials"].is_array()
 				|| !physics.contains("colliders") || !physics["colliders"].is_array()
 				|| !physics.contains("validation") || physics["validation"].value("status", std::string{}) != "validated") {
-				result.diagnostic = "Physics export manifest does not require Jolt 5.6.1 revision 2e28006e4a367624bb512bf2c37ca99a93d9d1ea.";
+				result.diagnostic = "Physics export manifest does not require Jolt 5.7.0 revision cb1a6244912555d12b580265ce7540de262eab44.";
 				return result;
 			}
 			result.providerRuntimeReady = true;

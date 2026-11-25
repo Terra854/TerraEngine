@@ -1,15 +1,15 @@
 {
-	"sdkVersion": "10.0.303",
-	"archives": {
-		"win-x64": {
-			"file": "dotnet-sdk-10.0.303-win-x64.zip",
-			"url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.303/dotnet-sdk-10.0.303-win-x64.zip",
-			"sha512": "ad4ef6202e55babde1c65e1be7b468c3ecb738ccc2fb8bd3c2bb408a4f45d247c8c5a5f57fedc54ebee7cb5fc4f487772997f2d053010d2e1903b974cc64216d"
-		},
-		"linux-x64": {
-			"file": "dotnet-sdk-10.0.303-linux-x64.tar.gz",
-			"url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.303/dotnet-sdk-10.0.303-linux-x64.tar.gz",
-			"sha512": "538df11ceb9d86bdda061bab6ede3d1f6d46bb9ba087ae905643f3d456afe982949d1b952bceb305a5d22d2d6e69cc0e5100216ffcc709aaa86e867f2d9cdf9a"
-		}
-	}
+  "sdkVersion": "10.0.404",
+  "archives": {
+    "win-x64": {
+      "file": "dotnet-sdk-10.0.404-win-x64.zip",
+      "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-win-x64.zip",
+      "sha512": "330ddd2665b43cd2e428216a0d8ea1ac7bb19b5434fdc530e62010dc3b52823a620bf95489d628e1ed6f5122401793ee4887cca4a019122361a1231497f632ee"
+    },
+    "linux-x64": {
+      "file": "dotnet-sdk-10.0.404-linux-x64.tar.gz",
+      "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-x64.tar.gz",
+      "sha512": "577d0eb17fec33d029104c5c63a1ab0accc3e28776274abef2218dbac5af18d2109b5406d26b31d76f5c245215e3ba0926a94c20246c672c41847c9e1eb1dc50"
+    }
+  }
 }

@@ -3,7 +3,7 @@
 TerraEngine's gameplay physics API is provider-neutral. Public headers contain
 engine handles, UUIDs, generations, packets, and typed status values; Jolt types
 remain private to `Engine/Physics/Backend`. The runtime provider is pristine Jolt
-Physics 5.6.1 at commit `2e28006e4a367624bb512bf2c37ca99a93d9d1ea`.
+Physics 5.7.0 at commit `cb1a6244912555d12b580265ce7540de262eab44`.
 
 ## Commands
 

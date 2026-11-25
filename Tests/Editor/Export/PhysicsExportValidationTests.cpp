@@ -130,7 +130,7 @@ namespace TerraEngine::EditorTests {
 			const std::vector<std::byte> layers = Bytes(settingsDocument.at("layers").dump());
 			return {
 				{"schemaVersion", 1},
-				{"provider", {{"identifier", "Jolt"}, {"version", "5.6.1"}, {"revision", "2e28006e4a367624bb512bf2c37ca99a93d9d1ea"}}},
+				{"provider", {{"identifier", "Jolt"}, {"version", "5.7.0"}, {"revision", "cb1a6244912555d12b580265ce7540de262eab44"}}},
 				{"cookFormatVersion", 1},
 				{"settings", {{"packagePath", "ProjectSettings/PhysicsSettings.json"}, {"schemaVersion", 1}, {"contentHash", Hash(settings)}}},
 				{"layersHash", Hash(layers)}, {"defaultMaterialGuid", ""}, {"materials", nlohmann::json::array()},
@@ -186,7 +186,7 @@ namespace TerraEngine::EditorTests {
 				physics["provider"]["revision"] = "wrong-revision";
 				WritePhysicsPackage(workspace, physics, settings, validCollider);
 				std::string error;
-				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("2e28006e4a367624bb512bf2c37ca99a93d9d1ea") != std::string::npos, "Provider mismatch must name the approved Jolt revision.");
+				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("cb1a6244912555d12b580265ce7540de262eab44") != std::string::npos, "Provider mismatch must name the approved Jolt revision.");
 			}
 			{
 				PhysicsValidationWorkspace workspace;

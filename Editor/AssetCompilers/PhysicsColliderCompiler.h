@@ -19,7 +19,7 @@ namespace TerraEngine::AssetPipeline
 {
 	inline constexpr std::string_view kPhysicsColliderRecipeExtension = ".tecollider";
 	inline constexpr std::string_view kPhysicsCookedColliderExtension = ".tepcoll";
-	inline constexpr std::string_view kPhysicsColliderProviderRevision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
+	inline constexpr std::string_view kPhysicsColliderProviderRevision = "cb1a6244912555d12b580265ce7540de262eab44";
 
 	enum class PhysicsColliderCompileStage : std::uint8_t
 	{

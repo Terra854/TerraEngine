@@ -96,8 +96,8 @@ struct PhysicsExportManifest {
 
 	std::uint32_t schemaVersion = kSchemaVersion;
 	std::string providerIdentifier = "Jolt";
-	std::string providerVersion = "5.6.1";
-	std::string providerRevision = "2e28006e4a367624bb512bf2c37ca99a93d9d1ea";
+	std::string providerVersion = "5.7.0";
+	std::string providerRevision = "cb1a6244912555d12b580265ce7540de262eab44";
 	std::uint32_t cookFormatVersion = 1U;
 	std::string settingsPackagePath;
 	std::uint32_t settingsSchemaVersion = 1U;
