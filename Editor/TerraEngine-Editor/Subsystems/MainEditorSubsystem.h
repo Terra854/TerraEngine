@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <array>
+#include <deque>
 #include <functional>
 #include <future>
 #include <optional>
@@ -19,6 +20,7 @@
 #include <type_traits>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
@@ -352,6 +354,11 @@ private:
 	void PublishCommittedEditorTransactionsToUndo();
 	void RefreshViewportTextures(VulkanContext& vulkan);
 	void DrawMainMenuBar();
+	void DrawShaderInterfaceAlerts();
+	// Resource workers enqueue errors. Only the editor draw phase reads or dismisses them.
+	std::mutex m_ShaderInterfaceAlertMutex;
+	std::deque<std::string> m_ShaderInterfaceAlerts;
+	std::uint64_t m_ShaderInterfaceLogSink = 0;
 	// False keeps project owners alive when a copy receipt or cleanup must retry.
 	bool CloseCurrentProject();
 	void ExitEditor();

@@ -565,7 +565,7 @@ void ProjectBrowserWindow::OnGui() {
 					OpenCreateAssetModal("Create Shader Collection", "New Shader Collection", TerraEngine::Resource::kShaderCollectionExtension);
 				for (const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
 					if (ImGui::MenuItem(slot.label)) OpenCreateAssetModal(std::string("Create ") + slot.label,
-						std::string("New ") + slot.label, std::string(".surface") + slot.sourceSuffix);
+						std::string("New ") + slot.label, slot.sourceSuffix);
 				}
 				ImGui::EndMenu();
 			}

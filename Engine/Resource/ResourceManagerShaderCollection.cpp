@@ -26,6 +26,7 @@ namespace
 		ShaderStage stage = ShaderStage::Vertex;
 		std::filesystem::path path;
 		std::string key;
+		bool authoredOverride = false;
 	};
 
 	// Build a stable cache key from the resolved shader stage paths so callers
@@ -41,10 +42,10 @@ namespace
 		return combined.str();
 	}
 
-	// Verify that every fragment input has a matching vertex output by location,
+	// Verify that every fragment input has a matching geometry output by location,
 	// component type, and component count so pipelines cannot be built with
 	// incompatible stage interfaces.
-	bool ValidateInterfaceCompatibility(const Shader& vertexShader, const Shader& fragmentShader)
+	bool ValidateInterfaceCompatibility(const Shader& geometryShader, const Shader& fragmentShader)
 	{
 		if (fragmentShader.inputs.empty())
 		{
@@ -52,16 +53,18 @@ namespace
 			return true;
 		}
 
-
-		if (vertexShader.outputs.empty())
+		auto context = Logger::GetCurrentContext();
+		context.category = TerraEngine::Resource::kShaderInterfaceMismatchLogCategory;
+		const Logger::ScopedContext diagnosticContext(std::move(context));
+		if (geometryShader.outputs.empty())
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "Fragment shader requests inputs but vertex shader exposes no outputs.");
+			TERRAENGINE_LOG(LogLevel::Error, "Shader collection interface mismatch: fragment inputs need geometry outputs.");
 			return false;
 		}
 
 		std::unordered_map<std::uint32_t, const StageIOAttribute*> outputsByLocation;
 
-		for (const StageIOAttribute& output : vertexShader.outputs)
+		for (const StageIOAttribute& output : geometryShader.outputs)
 		{
 			outputsByLocation.emplace(output.location, &output);
 		}
@@ -73,7 +76,7 @@ namespace
 
 			if (found == outputsByLocation.end())
 			{
-				TERRAENGINE_LOG(LogLevel::Error, "Fragment input at location " << input.location << " is not provided by the vertex shader.");
+				TERRAENGINE_LOG(LogLevel::Error, "Shader collection interface mismatch: fragment input at location " << input.location << " is not provided by the geometry stage.");
 				return false;
 			}
 
@@ -81,7 +84,7 @@ namespace
 
 			if (input.componentType != source->componentType || input.componentCount != source->componentCount)
 			{
-				TERRAENGINE_LOG(LogLevel::Error, "Fragment input at location " << input.location << " does not match vertex output type/width.");
+				TERRAENGINE_LOG(LogLevel::Error, "Shader collection interface mismatch: fragment input at location " << input.location << " does not match geometry output type or width.");
 				return false;
 			}
 		}
@@ -109,6 +112,10 @@ namespace
 				return nullptr;
 			}
 
+			if (request.authoredOverride && !TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(*shader, request.path)) {
+				TERRAENGINE_LOG(LogLevel::Error, "Shader collection requires a compatible surface stage: " << request.path);
+				return nullptr;
+			}
 
 			if (shader->reflection.source.stage != static_cast<std::uint32_t>(request.stage))
 			{
@@ -169,7 +176,7 @@ namespace
 			&& !ValidateInterfaceCompatibility(
 				*geometryOutputShader, *fragmentShader))
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "Vertex and fragment stages in shader collection are incompatible; collection will not be created.");
+			TERRAENGINE_LOG(LogLevel::Error, "Geometry and fragment stage mismatch prevents shader collection publication.");
 			return nullptr;
 		}
 
@@ -256,7 +263,14 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 		}
 		for (const auto& stage : stagePaths) {
 			const auto path = (stage.path.is_absolute() ? stage.path : assetRoot / stage.path).lexically_normal();
-			stages.push_back({stage.stage, path, NormalizeKey(path)});
+			const auto key = NormalizeKey(path);
+			// Only an explicitly linked stage is reloaded on authored saves. The
+			// installed defaults share the same suffix as the project files.
+			const bool authoredOverride = authoredId != TerraEngine::EMPTY_UUID &&
+				std::any_of(TerraEngine::Resource::kShaderCollectionSlots.begin(), TerraEngine::Resource::kShaderCollectionSlots.end(),
+					[&](const auto& slot) { return slot.stage == stage.stage &&
+						key != NormalizeKey(engineRoot / "Shaders" / slot.defaultPackage); });
+			stages.push_back({stage.stage, path, key, authoredOverride});
 		}
 		const auto key = authoredId == TerraEngine::EMPTY_UUID ? BuildShaderCollectionKey(stages) : NormalizeKey(descriptor);
 		TerraEngine::UUID id = TerraEngine::EMPTY_UUID;
@@ -313,7 +327,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 	assembly->remaining = stages.size();
 	try {
 		for (const auto& stage : stages) assembly->dependencies.push_back(AdmitShaderDependency(stage.path, parent,
-			reload && TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(stage.path)));
+			reload && stage.authoredOverride));
 		{
 			std::lock_guard gate(m_PublicationGate);
 			for (const auto& dependency : assembly->dependencies) parent->dependencies.push_back(dependency);
@@ -342,7 +356,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 						auto collection = LoadShaderCollectionStages(stages, payloads);
 						if(collection && authoredId != TerraEngine::EMPTY_UUID) {
 							collection->inheritsAllDefaultStages = std::none_of(stages.begin(), stages.end(), [](const auto& stage) {
-								return TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(stage.path);
+								return stage.authoredOverride;
 							});
 							if(!collection->inheritsAllDefaultStages) collection->geometryPolicy = ShaderGeometryPolicy::CompatibleReplacement;
 						}

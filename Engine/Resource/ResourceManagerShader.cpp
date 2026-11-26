@@ -15,6 +15,7 @@
 #include <cstring>
 #include <exception>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "Core/Logger/Logger.h"
@@ -500,11 +501,76 @@ namespace
 		return modes;
 	}
 
+	// Task payloads use TaskPayloadWorkgroupEXT storage, so stage IO reflection
+	// does not include them. Compare the ordered integer arrays in the default
+	// payload ABI by element width, signedness and array length, independent of
+	// the module-local SPIR-V IDs assigned by DXC.
+	using TaskPayloadShape = std::vector<std::array<std::uint32_t, 3>>;
+
+	std::optional<TaskPayloadShape> ReadTaskPayloadShape(std::span<const std::uint32_t> words)
+	{
+		constexpr std::size_t headerWords = 5;
+		constexpr std::uint32_t taskPayloadStorage = 5402;
+		constexpr std::uint32_t opTypeInt = 21, opTypeArray = 28, opTypeStruct = 30,
+			opTypePointer = 32, opConstant = 43, opVariable = 59;
+		if(words.size() < headerWords || words.front() != 0x07230203u) return std::nullopt;
+		std::unordered_map<std::uint32_t, std::span<const std::uint32_t>> definitions;
+		std::uint32_t payloadPointer = 0;
+		for(std::size_t offset = headerWords; offset < words.size();) {
+			const auto count = words[offset] >> 16;
+			const auto opcode = words[offset] & 0xffffu;
+			if(count == 0 || count > words.size() - offset) return std::nullopt;
+			const auto instruction = words.subspan(offset, count);
+			if(opcode == opTypeInt || opcode == opTypeArray || opcode == opTypeStruct || opcode == opTypePointer) {
+				if(count < 2 || !definitions.emplace(instruction[1], instruction).second) return std::nullopt;
+			} else if(opcode == opConstant) {
+				if(count < 4 || !definitions.emplace(instruction[2], instruction).second) return std::nullopt;
+			} else if(opcode == opVariable) {
+				if(count < 4) return std::nullopt;
+				if(instruction[3] == taskPayloadStorage) {
+					if(payloadPointer != 0 || instruction[1] == 0) return std::nullopt;
+					payloadPointer = instruction[1];
+				}
+			}
+			offset += count;
+		}
+		const auto find = [&definitions](std::uint32_t id, std::uint32_t opcode, std::size_t count) {
+			const auto entry = definitions.find(id);
+			if(entry == definitions.end() || (entry->second.front() & 0xffffu) != opcode ||
+				entry->second.size() < count) return std::span<const std::uint32_t>{};
+			return entry->second;
+		};
+		const auto pointer = find(payloadPointer, opTypePointer, 4);
+		if(pointer.empty() || pointer[2] != taskPayloadStorage) return std::nullopt;
+		const auto payload = find(pointer[3], opTypeStruct, 3);
+		if(payload.empty()) return std::nullopt;
+		TaskPayloadShape shape;
+		for(const auto member : payload.subspan(2)) {
+			const auto array = find(member, opTypeArray, 4);
+			if(array.empty()) return std::nullopt;
+			const auto element = find(array[2], opTypeInt, 4);
+			const auto length = find(array[3], opConstant, 4);
+			if(element.empty() || length.size() != 4) return std::nullopt;
+			const auto lengthType = find(length[1], opTypeInt, 4);
+			if(lengthType.empty() || lengthType[2] != 32 || length[3] == 0) return std::nullopt;
+			shape.push_back({element[2], element[3], length[3]});
+		}
+		return shape;
+	}
+
+	std::optional<TaskPayloadShape> ReadTaskPayloadShape(std::span<const std::uint8_t> bytes)
+	{
+		if(bytes.size() % sizeof(std::uint32_t) != 0 || bytes.empty()) return std::nullopt;
+		std::vector<std::uint32_t> words(bytes.size() / sizeof(std::uint32_t));
+		std::memcpy(words.data(), bytes.data(), bytes.size());
+		return ReadTaskPayloadShape(words);
+	}
+
 	std::unique_ptr<Shader> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto bytes = manager.ReadFileBytes(resolvedPath);
 		auto shader = DecodeShaderBytes(bytes, {resolvedPath, nullptr, true});
-		if(shader && TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(resolvedPath)) {
+		if(shader && TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(*shader, resolvedPath)) {
 			// Compare the replacement's reflected interface against the installed
 			// stage. Shader implementation changes can reuse these exact bindings.
 			for(const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
@@ -514,26 +580,43 @@ namespace
 				const auto sameIo = [](const auto& a, const auto& b) {
 					return a.location == b.location && a.componentCount == b.componentCount && a.componentType == b.componentType;
 				};
-				bool geometryModesMatch = true;
-				if(reference && (slot.stage == ShaderStage::Task || slot.stage == ShaderStage::Mesh)) {
-					const auto expected = ReadGeometryExecutionModes(*reference);
-					geometryModesMatch = expected && ReadGeometryExecutionModes(*shader) == expected;
+				const auto mismatch = [&](const char* detail) -> std::unique_ptr<Shader> {
+					auto context = Logger::GetCurrentContext();
+					context.category = TerraEngine::Resource::kShaderInterfaceMismatchLogCategory;
+					const Logger::ScopedContext diagnosticContext(std::move(context));
+					TERRAENGINE_LOG(LogLevel::Error, "Replacement shader interface mismatch (" << slot.label
+						<< "): " << detail << ": " << resolvedPath);
+					return nullptr;
+				};
+				if(!reference || shader->binary.format != reference->binary.format)
+					return mismatch("default stage package or binary format");
+				if(slot.stage == ShaderStage::Task || slot.stage == ShaderStage::Mesh) {
+					const auto expectedPayload = ReadTaskPayloadShape(reference->bytecode);
+					if(!expectedPayload || ReadTaskPayloadShape(shader->bytecode) != expectedPayload
+						|| (!shader->meshMotionBytecode.empty() &&
+							ReadTaskPayloadShape(shader->meshMotionBytecode) != expectedPayload))
+						return mismatch("task-to-mesh payload member types or array lengths");
+					const auto expectedModes = ReadGeometryExecutionModes(*reference);
+					if(!expectedModes || ReadGeometryExecutionModes(*shader) != expectedModes)
+						return mismatch("workgroup size, mesh output topology or output capacity");
 				}
-				if(reference && geometryModesMatch && shader->binary.format == reference->binary.format
-					&& std::ranges::equal(shader->inputs, reference->inputs, sameIo)
-					&& std::ranges::equal(shader->outputs, reference->outputs, sameIo)
-					&& std::ranges::equal(shader->descriptorSets, reference->descriptorSets, [](const auto& a, const auto& b) {
-						return a.setIndex == b.setIndex && a.firstBinding == b.firstBinding && a.bindingCount == b.bindingCount;
-					})
-					&& std::ranges::equal(shader->descriptorBindings, reference->descriptorBindings, [](const auto& a, const auto& b) {
-						return a.binding == b.binding && a.type == b.type && a.arrayCount == b.arrayCount && a.visibility == b.visibility;
-					})
-					&& std::ranges::equal(shader->pushConstants, reference->pushConstants, [](const auto& a, const auto& b) {
-						return a.offsetBytes == b.offsetBytes && a.sizeBytes == b.sizeBytes && a.visibility == b.visibility;
-					})) return shader;
-				break;
+				if(!std::ranges::equal(shader->inputs, reference->inputs, sameIo))
+					return mismatch("input count, location or type");
+				if(!std::ranges::equal(shader->outputs, reference->outputs, sameIo))
+					return mismatch("output count, location or type");
+				if(!std::ranges::equal(shader->descriptorSets, reference->descriptorSets, [](const auto& a, const auto& b) {
+					return a.setIndex == b.setIndex && a.firstBinding == b.firstBinding && a.bindingCount == b.bindingCount;
+				}) || !std::ranges::equal(shader->descriptorBindings, reference->descriptorBindings, [](const auto& a, const auto& b) {
+					return a.binding == b.binding && a.type == b.type && a.arrayCount == b.arrayCount && a.visibility == b.visibility;
+				}) || !std::ranges::equal(shader->pushConstants, reference->pushConstants, [](const auto& a, const auto& b) {
+					return a.offsetBytes == b.offsetBytes && a.sizeBytes == b.sizeBytes && a.visibility == b.visibility;
+				})) return mismatch("descriptor or push constant layout");
+				return shader;
 			}
-			TERRAENGINE_LOG(LogLevel::Error, "Replacement shader does not match the default stage interface: " << resolvedPath);
+			auto context = Logger::GetCurrentContext();
+			context.category = TerraEngine::Resource::kShaderInterfaceMismatchLogCategory;
+			const Logger::ScopedContext diagnosticContext(std::move(context));
+			TERRAENGINE_LOG(LogLevel::Error, "Replacement shader interface mismatch: unsupported stage: " << resolvedPath);
 			return nullptr;
 		}
 		if(shader && !ValidateRuntimeGeometryContract(*shader, resolvedPath)) return nullptr;

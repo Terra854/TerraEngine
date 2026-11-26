@@ -2175,7 +2175,7 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 		return;
 	}
 
-	const std::string importerName = GetImporterName(absSourcePath);
+	std::string importerName = GetImporterName(absSourcePath);
 	AssetMetadata metadata;
 	std::filesystem::path metaFilePath = absSourcePath.string() + ".meta";
 	
@@ -2215,8 +2215,14 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	// Always normalize the metadata path back to the file that actually exists
 	// on disk so inspector labels and meta persistence follow asset renames.
 	metadata.sourcePath = std::filesystem::relative(absSourcePath, assetRoot);
+	// A shader sidecar can opt into the dedicated post-process or standalone
+	// shader ABI even though the source uses a standard stage suffix.
+	if(importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter && metadata.settings.contains("shaderUse"))
+		importerName = "ShaderImporter";
+	if(metadata.importerName != importerName) needsImport = true;
 	metadata.importerName = importerName;
-	const auto* compatibleStage = TerraEngine::Editor::Assets::FindCompatibleShaderSlot(absSourcePath);
+	const auto* compatibleStage = importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter
+		? TerraEngine::Editor::Assets::FindCompatibleShaderSlot(absSourcePath) : nullptr;
 	const char* variantVersionKey = !compatibleStage ? nullptr
 		: compatibleStage->stage == ShaderStage::Fragment ? "surfacePickingVariant"
 		: compatibleStage->stage == ShaderStage::Mesh ? "surfaceMeshMotionVariant" : nullptr;
@@ -3719,13 +3725,13 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (IsSupportedMeshSourceExtension(filePath)) return "MeshImporter";
 	if (IsSupportedTextureSourceExtension(filePath)) return "TextureImporter";
 	if (ext == ".hlsl" || ext == ".glsl") {
-		if (TerraEngine::Editor::Assets::FindCompatibleShaderSlot(filePath))
-			return TerraEngine::Editor::Assets::kCompatibleShaderImporter;
-		// Editable default stages compile to SPIR-V for diagnostics. Ordinary
-		// project shaders continue through runtime shader admission.
+		// Source-set stages retain their diagnostics-only compiler even though
+		// the standalone Project Browser templates use the same suffixes.
 		if (!TerraEngine::Editor::Assets::FindShaderSourceSet(filePath).empty())
 			return TerraEngine::Editor::Assets::GetShaderSourceSetStage(filePath)
 				? TerraEngine::Editor::Assets::kShaderSourceSetImporter : "GenericImporter";
+		if (TerraEngine::Editor::Assets::FindCompatibleShaderSlot(filePath))
+			return TerraEngine::Editor::Assets::kCompatibleShaderImporter;
 		return "ShaderImporter";
 	}
 	if (ext == TerraEngine::Resource::kShaderCollectionExtension) return TerraEngine::Editor::Assets::kShaderCollectionImporter;

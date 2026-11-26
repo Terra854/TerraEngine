@@ -8,7 +8,8 @@ Build and install the editor with `cmake --preset RelWithDebInfo` and
 `cmake --build --preset RelWithDebInfo`. In the Project Browser, open
 **Add → Shaders** and choose **Task Shader**, **Mesh Shader**, or
 **Fragment Shader**. Each entry creates a single HLSL file seeded with
-the corresponding engine shader. The editor compiles it in the background on
+the corresponding engine shader and uses a `.task.hlsl`, `.mesh.hlsl`, or
+`.frag.hlsl` suffix. The editor compiles it in the background on
 creation and on save. The import status and editor log show compile errors.
 Successful compiles write a TSPF containing SPIR-V under project `Build/Assets`.
 
@@ -16,7 +17,10 @@ Choose **Add → Shaders → Shader Collection** to create a single
 `.teshadercollection` asset. Assign it to a material and use the collection's
 Inspector to link the stages you want to override. Each empty field inherits
 the corresponding engine stage. Custom stages must preserve the default
-stage's renderer interface.
+stage's renderer interface. If a linked stage changes that interface, the
+editor shows a **Shader update rejected** banner above the workspace. The
+banner names the mismatch and stays visible until dismissed. A previously
+loaded collection keeps rendering while you fix the source.
 
 Select **MSAA** with VRS off to
 rasterize the same mesh shader collection at four samples. Keep the fragment
@@ -32,6 +36,10 @@ within each meshlet so consecutive frames can pair the same corners.
 From the repository root, run
 `pwsh -File Tests/Tools/ShaderAuthoring/TestInstalledShaderCollections.ps1`
 to verify parallel stage imports, default inheritance, and reload after a save.
+To check the banner interactively, link a valid task shader, then change the
+array length of one member of its task payload and save. The banner should
+identify the task-to-mesh payload mismatch. Dismiss the banner and restore the
+original array length to verify that the collection reloads.
 Run `pwsh -File Tests/Tools/ShaderAuthoring/TestInstalledMeshMsaaPicking.ps1`
 on a supported Vulkan GPU to verify native picking on built-in and displaced
 custom meshes with MSAA off and on. Add -IncludePostProcessModes to exercise FXAA, SMAA and TAA. Add -Compatibility to run the built-in mesh compatibility renderer.

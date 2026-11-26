@@ -18,7 +18,7 @@ namespace TerraEngine::Editor::Assets
 		const auto name = path.filename().u8string();
 		const std::string_view utf8(reinterpret_cast<const char*>(name.data()), name.size());
 		for(const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
-			if(utf8.ends_with(std::string(".surface") + slot.sourceSuffix)) return &slot;
+			if(utf8.ends_with(slot.sourceSuffix)) return &slot;
 		}
 		return nullptr;
 	}

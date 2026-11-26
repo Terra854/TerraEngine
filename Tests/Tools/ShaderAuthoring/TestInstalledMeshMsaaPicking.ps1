@@ -67,12 +67,12 @@ $templates = Join-Path $editor 'Project/Templates/ShaderSources/Default'
 $meshSource = Get-Content "$templates/Default.mesh.hlsl" -Raw
 $originalPosition = 'outVertex.position = mul(SceneUniforms.viewProj, worldPosition);'
 if (!$meshSource.Contains($originalPosition)) { throw 'The mesh shader test edit needs updating.' }
-$meshSource.Replace($originalPosition, "$originalPosition outVertex.position.y += 0.3 * outVertex.position.w;") | Set-Content "$assets/Custom.surface.mesh.hlsl"
+$meshSource.Replace($originalPosition, "$originalPosition outVertex.position.y += 0.3 * outVertex.position.w;") | Set-Content "$assets/Custom.mesh.hlsl"
 $fragment = Get-Content "$templates/Default.frag.hlsl" -Raw
 $originalColor = 'TERRAENGINE_CONVENTIONAL_RETURN(shaded, stablePrimitiveId);'
 if (!$fragment.Contains($originalColor)) { throw 'The fragment shader test edit needs updating.' }
-$fragment.Replace($originalColor, 'TERRAENGINE_CONVENTIONAL_RETURN(shaded.bgra, stablePrimitiveId);') | Set-Content "$assets/Custom.surface.frag.hlsl"
-Write-Json "$assets/Custom.teshadercollection" @{task='';mesh='Custom.surface.mesh.hlsl';fragment='Custom.surface.frag.hlsl'}
+$fragment.Replace($originalColor, 'TERRAENGINE_CONVENTIONAL_RETURN(shaded.bgra, stablePrimitiveId);') | Set-Content "$assets/Custom.frag.hlsl"
+Write-Json "$assets/Custom.teshadercollection" @{task='';mesh='Custom.mesh.hlsl';fragment='Custom.frag.hlsl'}
 Asset-Metadata 'Custom.teshadercollection' $collection 'ShaderCollectionImporter' 'Custom.teshadercollection'
 $cell = @{x='0';y='0';z='0'}
 function Fixture-Object($Id, $Name, $X, $Material) {

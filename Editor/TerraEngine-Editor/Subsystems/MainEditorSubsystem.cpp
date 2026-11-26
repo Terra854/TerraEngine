@@ -42,6 +42,7 @@
 #include "Engine/Scene/SceneGraphRuntime.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Resource/ShaderCollectionAsset.h"
 #include "Engine/UI/UISystem.h"
 #include "Engine/Scripting/ScriptGlue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
@@ -1573,7 +1574,11 @@ struct MainEditorSubsystem::SceneViewTraceState
 };
 
 MainEditorSubsystem::MainEditorSubsystem() = default;
-MainEditorSubsystem::~MainEditorSubsystem() = default;
+MainEditorSubsystem::~MainEditorSubsystem()
+{
+	// Detaching waits for worker callbacks before the alert queue is destroyed.
+	Logger::Instance().RemoveSink(m_ShaderInterfaceLogSink);
+}
 
 bool MainEditorSubsystem::RetireTerrainCopies() {
 	if(!m_TerrainCopies) return true;
@@ -1594,6 +1599,19 @@ bool MainEditorSubsystem::RetireTerrainCopies() {
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
 	ctx = &context;
+	if (m_ShaderInterfaceLogSink == 0) {
+		m_ShaderInterfaceLogSink = Logger::Instance().AddSink([this](const LogEntry& entry) {
+			if (entry.level != LogLevel::Error ||
+				entry.category != TerraEngine::Resource::kShaderInterfaceMismatchLogCategory) return;
+			// One shader can be linked by several collections. Collapse identical
+			// pending errors and bound the queue during large project imports.
+			constexpr std::size_t maxAlerts = 16;
+			std::lock_guard lock(m_ShaderInterfaceAlertMutex);
+			if (std::ranges::find(m_ShaderInterfaceAlerts, entry.message) != m_ShaderInterfaceAlerts.end()) return;
+			if (m_ShaderInterfaceAlerts.size() == maxAlerts) m_ShaderInterfaceAlerts.pop_back();
+			m_ShaderInterfaceAlerts.push_back(entry.message);
+		});
+	}
 	InitializeTerrainCopyService();
 	context.exportController = std::make_shared<EditorExportOperationController>();
 
@@ -4089,6 +4107,11 @@ void MainEditorSubsystem::DrawUI() {
 
 	DrawMainMenuBar();
 
+	// Show shader rejections even when the Inspector has a different asset open.
+	mainDrawStages.Measure("Editor.MainDraw.ShaderInterfaceAlerts", [&]() {
+		DrawShaderInterfaceAlerts();
+	});
+
 	// Toolbar
 	{
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 2));
@@ -4194,6 +4217,37 @@ void MainEditorSubsystem::DrawUI() {
 	RestoreSceneObjectsForRuntimeDuringPrefabEdit();
 }
 
+
+void MainEditorSubsystem::DrawShaderInterfaceAlerts()
+{
+	std::string message;
+	std::size_t count = 0;
+	{
+		std::lock_guard lock(m_ShaderInterfaceAlertMutex);
+		if (m_ShaderInterfaceAlerts.empty()) return;
+		message = m_ShaderInterfaceAlerts.front();
+		count = m_ShaderInterfaceAlerts.size();
+	}
+
+	// Draw on the UI thread without holding the worker queue lock. Keep the
+	// message visible until acknowledged, even when a last valid shader renders.
+	ImGui::Indent();
+	ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.43f, 1.0f), "Shader update rejected");
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Dismiss##ShaderInterfaceAlert")) {
+		std::lock_guard lock(m_ShaderInterfaceAlertMutex);
+		m_ShaderInterfaceAlerts.pop_front();
+	}
+	if (count > 1) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("%zu more", count - 1);
+	}
+	ImGui::PushTextWrapPos(0.0f);
+	ImGui::TextUnformatted(message.c_str());
+	ImGui::PopTextWrapPos();
+	ImGui::Unindent();
+	ImGui::Separator();
+}
 
 void MainEditorSubsystem::DrawMainMenuBar() {
 	if (ImGui::BeginMenuBar()) {
@@ -4584,6 +4638,11 @@ bool MainEditorSubsystem::CloseCurrentProject() {
 
 	// Clear Resources
 	ResourceManager::Instance().ClearCaches();
+	{
+		// Clear notices after the outgoing project's resource workers retire.
+		std::lock_guard lock(m_ShaderInterfaceAlertMutex);
+		m_ShaderInterfaceAlerts.clear();
+	}
 	// The outgoing project no longer owns physical work. Reopen a fresh hub
 	// request session for editor defaults without reviving its old tokens.
 	ResourceManager::Instance().BeginRequestSession();

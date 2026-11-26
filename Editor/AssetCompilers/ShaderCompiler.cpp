@@ -3,6 +3,7 @@
 // Manages the shader compilation process by invoking the DirectX Shader Compiler (DXC) and processing the resulting SPIR-V bytecode. It performs reflection on the compiled shaders to extract layout information and packages everything into a versioned binary format.
 
 #include "ShaderCompiler.h"
+#include "Engine/Resource/ShaderCollectionAsset.h"
 #include <array>
 #include <algorithm>
 #include <cctype>
@@ -1109,6 +1110,8 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	// Backend availability remains explicit in provenance. The compiler emits
 	// canonical SPIR-V and does not infer another backend artifact.
 	ShaderProvenanceBackendVariantExtension provenance{};
+	if(use == ShaderUse::CompatibleSurface)
+		provenance.featureMask |= TerraEngine::Resource::kCompatibleSurfaceShaderFeature;
 	provenance.normalizedSourceHash = HashNormalizedSource(input);
 	provenance.normalizedIncludeHash = 0u;
 	provenance.interfaceAbiHash = HashReflectionAbi(
