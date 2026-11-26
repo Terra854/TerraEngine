@@ -199,10 +199,8 @@ namespace TerraEngine::Renderer::Vulkan
 			auto& stage = owner.stages[index];
 			std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
 			for(auto& item : shaderStages) item.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; shaderStages[0].module = shaders.vertex; shaderStages[0].pName = "VSMain";
+			shaderStages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT; shaderStages[0].module = shaders.vertex; shaderStages[0].pName = "main";
 			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; shaderStages[1].module = shaders.fragments[index]; shaderStages[1].pName = "PSMain";
-			VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 			VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; viewport.viewportCount = 1; viewport.scissorCount = 1;
 			VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO}; raster.polygonMode = VK_POLYGON_MODE_FILL; raster.cullMode = VK_CULL_MODE_NONE; raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; raster.lineWidth = 1;
 			VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO}; samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -213,7 +211,7 @@ namespace TerraEngine::Renderer::Vulkan
 			const std::array dynamicStates{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
 			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO}; dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size()); dynamic.pDynamicStates = dynamicStates.data();
 			VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-			info.stageCount = 2; info.pStages = shaderStages.data(); info.pVertexInputState = &vertex; info.pInputAssemblyState = &assembly;
+			info.stageCount = 2; info.pStages = shaderStages.data();
 			info.pViewportState = &viewport; info.pRasterizationState = &raster; info.pMultisampleState = &samples;
 			info.pDepthStencilState = &depth; info.pColorBlendState = &blend; info.pDynamicState = &dynamic;
 			info.layout = stage.layout; info.renderPass = stage.renderPass;
@@ -295,7 +293,7 @@ namespace TerraEngine::Renderer::Vulkan
 			CreateImage(*pass, pass->intermediates[1], VK_FORMAT_R16G16B16A16_SFLOAT, source.extent, "SMAA immutable weights");
 			CreateIntermediateRenderPass(*pass, 0); CreateIntermediateRenderPass(*pass, 1); CreateDescriptors(*pass);
 			ShaderModules shaders{pass->device};
-			shaders.vertex = LoadShader(pass->device, "Shaders/PostProcess/PostProcessFullscreen.vert.spv");
+			shaders.vertex = LoadShader(pass->device, "Shaders/PostProcess/PostProcessFullscreen.mesh.spv");
 			const std::array logicalShaders{"Shaders/PostProcess/SMAAEdges.frag.spv", "Shaders/PostProcess/SMAAWeights.frag.spv", "Shaders/PostProcess/SMAAResolve.frag.spv"};
 			for(std::size_t index = 0; index < pass->stages.size(); ++index)
 			{ shaders.fragments[index] = LoadShader(pass->device, logicalShaders[index]); CreatePipeline(*pass, index, shaders); }
@@ -338,7 +336,7 @@ namespace TerraEngine::Renderer::Vulkan
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, stage.pipeline);
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, stage.layout, 0, 1, &stage.descriptor, 0, nullptr);
 			vkCmdPushConstants(command, stage.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pass.constants), &pass.constants);
-			vkCmdDraw(command, 3, 1, 0, 0); vkCmdEndRenderPass(command);
+			vkCmdDrawMeshTasksEXT(command, 1, 1, 1); vkCmdEndRenderPass(command);
 			barrier.oldLayout = barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,

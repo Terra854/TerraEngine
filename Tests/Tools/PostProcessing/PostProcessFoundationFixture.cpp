@@ -1327,8 +1327,7 @@ namespace
 				GraphicsSettingValue{GraphicsSettingId::BloomIntensity,0.2f},
 				GraphicsSettingValue{GraphicsSettingId::LensDirtEnabled,mode!=0},
 				GraphicsSettingValue{GraphicsSettingId::LensDirtIntensity,mode==1 ? 0.0f : 1.0f},
-				GraphicsSettingValue{GraphicsSettingId::LensDirtTexture,textureId},
-				GraphicsSettingValue{GraphicsSettingId::GeometryRasterMode,std::uint32_t{1}}};
+				GraphicsSettingValue{GraphicsSettingId::LensDirtTexture,textureId}};
 			auto bootstrapValues=values;bootstrapValues[3].value=false;
 			auto input=View(owner.context,frame,RenderViewType::Game,RenderOutputKind::GameView,2u,kExtent,0.0f,true,false,bootstrapValues);
 			input.projectionMatrix=glm::orthoRH_ZO(-3.2f,3.2f,-1.8f,1.8f,0.1f,25.0f);
@@ -1353,7 +1352,7 @@ namespace
 					owner.context.GetLatestRendererRecoverySnapshot().renderSessionGeneration,owner.context.GetBackendResourceGeneration()));
 				const auto native=owner.context.ReadRecordedGraphicsViews(frame);
 				const auto draw=std::find_if(native.begin(),native.end(),[](const auto& value){return value.publicationIndex==0;});
-				if(draw!=native.end() && draw->indexedDrawCount==geometry.surfaces.size())break;
+				if(draw!=native.end() && owner.context.GetLatestRenderStats(RenderViewType::Game).drawCalls >= geometry.surfaces.size())break;
 				Require(std::chrono::steady_clock::now()<deadline,"Lens dirt HDR geometry never finished native preparation.");
 				++frame;owner.context.BeginFrame();
 				input.referenceFrame.frameId=frame;
@@ -1426,11 +1425,10 @@ namespace
 	{
 		constexpr glm::uvec2 output{640u, 360u}, internal{320u, 180u};
 		const std::array values{
-			GraphicsSettingValue{GraphicsSettingId::GeometryRasterMode, std::uint32_t{1}},
 			GraphicsSettingValue{GraphicsSettingId::UpscalingMode, std::uint32_t{1}},
 			GraphicsSettingValue{GraphicsSettingId::InternalResolutionScale, 0.5f}};
 		const auto capabilities = owner.context.ReadGraphicsCatalogCapabilities(true);
-		Require(capabilities.temporalUpscalingSupported, "The RTX adapter lacks the indexed half-extent candidate.");
+		Require(capabilities.temporalUpscalingSupported, "The RTX adapter lacks the mesh half-extent candidate.");
 		// An empty geometric fixture isolates actual framebuffers and HUD
 		// ordering. The moving-edge fixture separately proves geometry/motion.
 		auto& resources = ResourceManager::Instance();
@@ -1485,7 +1483,7 @@ namespace
 			std::pair{GraphicsSettingId::ScreenSpaceIndirectEnabled, "ssgi"}};
 		for(std::uint32_t mask = 1u; mask <= 7u; ++mask)
 		{
-			std::vector<GraphicsSettingValue> values{{GraphicsSettingId::GeometryRasterMode, std::uint32_t{1}}};
+			std::vector<GraphicsSettingValue> values;
 			std::vector<std::string> timingsExpected{"screen-space-composite"};
 			for(std::size_t i = 0; i < requested.size(); ++i)
 			{
@@ -1550,8 +1548,7 @@ namespace
 				while(!recorded)
 				{
 					owner.context.BeginFrame();
-					const std::array values{GraphicsSettingValue{GraphicsSettingId::GeometryRasterMode,std::uint32_t{1}},
-						GraphicsSettingValue{GraphicsSettingId::ExposureMode,std::uint32_t{1}},
+					const std::array values{GraphicsSettingValue{GraphicsSettingId::ExposureMode,std::uint32_t{1}},
 						GraphicsSettingValue{effects[effect].first,true}};
 					auto input=View(owner.context,frame,RenderViewType::Game,RenderOutputKind::GameView,2u,kExtent,0,false,false,values);
 					input.sceneViewGridVisible=false;
@@ -1658,7 +1655,6 @@ namespace
 			const auto draw=[&](float cameraX) {
 				owner.context.BeginFrame();
 				const std::array values{
-					GraphicsSettingValue{GraphicsSettingId::GeometryRasterMode,std::uint32_t{1}},
 					GraphicsSettingValue{GraphicsSettingId::MotionBlurEnabled,mode!=0},
 					GraphicsSettingValue{GraphicsSettingId::MotionBlurStrength,mode==1 ? 0.0f : 1.0f},
 					GraphicsSettingValue{GraphicsSettingId::MotionBlurCameraContribution,1.0f},
@@ -1680,7 +1676,10 @@ namespace
 				// This protected production entry first qualifies the actual sealed
 				// indexed draws, then prepares the motion/depth/pipeline variants.
 				// Do not let message argument evaluation race the reason output.
-				const bool prepared=owner.context.PrepareIndexedRasterCandidate(*probe,0,*candidate,reason,preparationPending);
+				// Only active blur requests the extra camera-motion mesh pass.
+				const bool prepared=mode==2
+					? owner.context.PrepareIndexedRasterCandidate(*probe,0,*candidate,reason,preparationPending)
+					: owner.context.PrepareFixedExposureView(input,*candidate,reason);
 				if(!prepared)
 				{
 					row["lastPreparation"]={{"frameId",frame},{"pending",preparationPending},{"reason",reason}};
@@ -1696,7 +1695,7 @@ namespace
 				Draw(owner,publication);
 				const auto recorded=owner.context.ReadRecordedGraphicsViews(frame);
 				const auto found=std::find_if(recorded.begin(),recorded.end(),[](const auto& value){return value.publicationIndex==0;});
-				return found!=recorded.end() && found->indexedDrawCount==geometry.surfaces.size()
+				return found!=recorded.end() && found->indexedDrawCount==(mode==2 ? geometry.surfaces.size() : 0u)
 					&& found->rasterSampleCount==1 && found->width==kExtent.x && found->height==kExtent.y;
 			};
 			// Allow only actual immutable topology preparation to settle. No moving
@@ -1712,7 +1711,7 @@ namespace
 				predecessorFrame=frame;predecessor=owner.context.ReadAcceptedRenderFramePublication(frame);
 				Require(predecessor && predecessor->frameId==frame,"Camera translation predecessor was not actually accepted.");
 				++frame;
-				Require(draw(0.06f*float(step)),"Continuous camera-motion frame lost its actual indexed geometry.");
+				Require(draw(0.06f*float(step)),"Continuous camera-motion frame lost its mesh geometry.");
 			}
 			const auto accepted=owner.context.ReadAcceptedRenderFramePublication(frame);
 			Require(accepted && accepted->presentationInputs.size()==1 && accepted->presentationInputs[0].graphicsSettings,
@@ -1725,9 +1724,9 @@ namespace
 				"Camera-only blur controls differ from their consumed publication.");
 			GraphicsAAConfiguration aa;
 			Require(ResolveGraphicsAAConfiguration(settings.values,aa)==GraphicsRequestReason::None
-				&& aa.raster==GraphicsGeometryRasterMode::Indexed && aa.upscaling==GraphicsUpscalingMode::Off
+				&& aa.upscaling==GraphicsUpscalingMode::Off
 				&& aa.sampleCount==1 && presentation.graphicsView && predecessor->presentationInputs.size()==1,
-				"Camera blur evidence must use the same actual native indexed AA-Off view.");
+				"Camera blur evidence must use the same actual native AA-Off view.");
 			Require(presentation.graphicsView==predecessor->presentationInputs[0].graphicsView
 				&& std::abs(presentation.viewMatrix[3].x+0.18f)<0.00001f
 				&& std::abs(predecessor->presentationInputs[0].viewMatrix[3].x+0.12f)<0.00001f,

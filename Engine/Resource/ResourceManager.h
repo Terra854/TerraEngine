@@ -792,6 +792,9 @@ public:
 	std::shared_future<TerraEngine::UUID> LoadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
 	// Reassemble from accepted stage owners after explicit shader reloads finish.
 	std::shared_future<TerraEngine::UUID> ReloadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
+	// Load a stable material-facing identity from a collection descriptor.
+	std::shared_future<TerraEngine::UUID> LoadAuthoredShaderCollectionAsync(const TerraEngine::UUID& id,
+		const std::filesystem::path& descriptor, const std::filesystem::path& stageRoot);
 	std::shared_future<TerraEngine::UUID> LoadTextureAsync(const std::filesystem::path& path);
 	// Profile preparation uses the ordinary worker/request publication path.
 	// UUID overload pins the registered identity at admission; Acquire never IOs.
@@ -1057,8 +1060,9 @@ private:
 	bool IdentityStillCurrentLocked(const RequestPtr& request, const TerraEngine::UUID& id) const;
 	void ScheduleRequestWork(const RequestPtr& request, std::function<void()> work, bool inlineDispatch = false);
 	void InvokeRequestHook(const std::string& key, unsigned boundary);
-	RequestPtr AdmitShaderDependency(const std::filesystem::path& path, const RequestPtr& consumer);
-	std::shared_future<TerraEngine::UUID> RequestShaderCollection(const std::vector<ShaderStagePath>& paths, bool reload = false);
+	RequestPtr AdmitShaderDependency(const std::filesystem::path& path, const RequestPtr& consumer, bool reload = false);
+	std::shared_future<TerraEngine::UUID> RequestShaderCollection(const std::vector<ShaderStagePath>& paths, bool reload = false,
+		const TerraEngine::UUID& authoredId = TerraEngine::EMPTY_UUID, const std::filesystem::path& descriptor = {});
 	std::shared_future<TerraEngine::UUID> RequestAudioClip(const std::filesystem::path& path,
 		const TerraEngine::UUID& expectedIdentity = TerraEngine::EMPTY_UUID, bool reload = false);
 

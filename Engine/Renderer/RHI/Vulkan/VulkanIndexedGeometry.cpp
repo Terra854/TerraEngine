@@ -38,7 +38,7 @@ namespace TerraEngine::Renderer::Vulkan
 		if (meshletCount == 0 || pastLast >= geometry.firstIndexByMeshlet.size()) return std::nullopt;
 		const auto firstIndex = geometry.firstIndexByMeshlet[meshletOffset];
 		const auto endIndex = geometry.firstIndexByMeshlet[static_cast<std::size_t>(pastLast)];
-		if (endIndex <= firstIndex || endIndex > geometry.indices.size()) return std::nullopt;
+		if (endIndex <= firstIndex) return std::nullopt;
 		return IndexedCornerSection{firstIndex, endIndex - firstIndex, meshletOffset, meshletCount};
 	}
 
@@ -59,7 +59,7 @@ namespace TerraEngine::Renderer::Vulkan
 			|| (!source.meshletVertexRemapDecoded.empty() && source.meshletVertexRemapDecoded.size() != layout.meshletVertexRemapCount))
 			return reject("Indexed vertex remap bytes do not match the accepted count.");
 		// Read the same little-endian bytes as ByteAddressBuffer.Load. A decoded
-		// optional cache cannot silently disagree with what the vertex shader sees.
+		// optional cache cannot silently disagree with what the mesh shader sees.
 		for (std::uint32_t index = 0; index < layout.meshletVertexRemapCount; ++index)
 		{
 			const auto offset = static_cast<std::size_t>(index) * remapStride;
@@ -103,18 +103,6 @@ namespace TerraEngine::Renderer::Vulkan
 				if (end > layout.meshletCount) return reject("Indexed section exceeds the accepted meshlet table.");
 				const auto first = firstIndexByMeshlet[section.meshletOffset];
 				candidate.sections.push_back({first, firstIndexByMeshlet[static_cast<std::size_t>(end)] - first, section.meshletOffset, section.meshletCount});
-			}
-			candidate.indices.reserve(static_cast<std::size_t>(indexCount));
-			for (std::uint32_t meshlet = 0; meshlet < layout.meshletCount; ++meshlet)
-			{
-				const auto primitiveCount = source.meshletRecords[meshlet].primitiveIndexCount / kIndexedTriangleCornerCount;
-				for (std::uint32_t primitive = 0; primitive < primitiveCount; ++primitive)
-					for (std::uint32_t corner = 0; corner < kIndexedTriangleCornerCount; ++corner)
-					{
-						std::uint32_t token = 0;
-						if (!TryEncodeIndexedCornerToken(meshlet, primitive, corner, token)) return reject("Indexed token validation changed during preparation.");
-						candidate.indices.push_back(token);
-					}
 			}
 			// One move is the publication point. All source validation and owned
 			// allocation completed before the caller's previous result is replaced.

@@ -10,6 +10,7 @@
 #include "ExportOutputTransaction.h"
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
+#include "../TerraEngine-Editor/Assets/ShaderSourceTemplates.h"
 #include "NativeAotProjectWorkspace.h"
 #include "io/PathNormalizer.h"
 #include "validation/AnimationPackValidator.h"
@@ -679,9 +680,8 @@ static nlohmann::json BuildStreamingPolicyManifest()
 	return policy;
 }
 
-// CopyRuntimeShaderTree stages every engine-owned shader into the TEPAK input.
-// Some renderer features still reference shaders from nested editor/history
-// folders, so the export package keeps the complete installed shader layout.
+// CopyRuntimeShaderTree stages runtime shaders while omitting the
+// editor-only viewport overlay, which Game views never create.
 static bool CopyRuntimeShaderTree(const std::filesystem::path& shadersSrc, const std::filesystem::path& shadersDest, std::string& outError) {
 	if (!std::filesystem::exists(shadersSrc)) {
 		outError = "Runtime shader directory not found: " + PathToUtf8(shadersSrc);
@@ -696,6 +696,8 @@ static bool CopyRuntimeShaderTree(const std::filesystem::path& shadersSrc, const
 		}
 
 		const auto relative = std::filesystem::relative(entry.path(), shadersSrc);
+		const auto stem = relative.stem().stem();
+		if (*relative.begin() == "Editor" || stem == "TerrainBrushPreview") continue;
 		const auto dest = shadersDest / relative;
 		std::filesystem::create_directories(dest.parent_path());
 		std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
@@ -1399,6 +1401,9 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				if (!entry.is_regular_file()) continue;
 
 				const std::filesystem::path relative = std::filesystem::relative(entry.path(), rawAssets);
+				// Editable engine shader sets and their compiler outputs belong to the editor.
+				if (!TerraEngine::Editor::Assets::FindShaderSourceSet(relative).empty()) continue;
+				if (TerraEngine::Editor::Assets::FindCompatibleShaderSlot(relative)) continue;
 				// Exclude .meta files from the exported build.
 
 				if (entry.path().extension() == ".meta") continue;
@@ -1430,6 +1435,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				if(entry.path().extension() == ".tecollider") continue;
 
 				auto relative = std::filesystem::relative(entry.path(), compiledAssets);
+				if (!TerraEngine::Editor::Assets::FindShaderSourceSet(relative).empty()) continue;
 				if(TerraEngine::Export::IsForbiddenAnimationRuntimePath(relative.generic_string())) continue;
 				auto dest = stagingDir / relative;
 				std::filesystem::create_directories(dest.parent_path());
@@ -1808,6 +1814,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					}
 					else if (importer == "TextureImporter") type = AssetType::Texture;
 					else if (importer == "MaterialImporter") type = AssetType::Material;
+					else if (importer == TerraEngine::Editor::Assets::kShaderCollectionImporter) type = AssetType::ShaderCollection;
 					else if(importer == "PhysicsMaterialImporter") type = AssetType::PhysicsMaterial;
 					else if(importer == "PhysicsColliderRecipeImporter" || importer == "CookedColliderImporter") type = AssetType::CookedCollider;
 					else if(importer == "AudioClipImporter") type = AssetType::AudioClip;

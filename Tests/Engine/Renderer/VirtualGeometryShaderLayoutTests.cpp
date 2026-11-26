@@ -825,7 +825,7 @@ namespace TerraEngine::Tests
 				ShaderContains(vulkanContext,
 					"impl->BuildPipelineKey(selection.collectionId, selection.materialFlags,")
 					&& ShaderContains(vulkanContext,
-						"selection.conventionalVisibilityIdentity);"),
+						"selection.conventionalVisibilityIdentity, raster);"),
 				"Prepared-resource fallback checks should use the generation-aware pipeline key and the matching identity-target variant.");
 			context.Expect(ShaderContains(vulkanContext, "prepared.ensuredGeneration == generation")
 				&& ShaderContains(vulkanContext, "if (exact == pass->second.end() || !exact->second.pipeline || !exact->second.layout) return false;")

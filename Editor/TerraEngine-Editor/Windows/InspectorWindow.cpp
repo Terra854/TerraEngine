@@ -4,6 +4,8 @@
 // It synchronizes changes made in the UI back to the underlying engine objects, ensuring real-time feedback in the scene.
 
 #include "InspectorWindow.h"
+#include "../Assets/ShaderSourceTemplates.h"
+#include "Engine/Utilities/AtomicFileWrite.h"
 #if defined(TERRAENGINE_EDITOR_TESTS)
 #include "Tests/Support/InspectorNameObservation.h"
 namespace TerraEngine::EditorTests {
@@ -5370,6 +5372,33 @@ void InspectorWindow::OnGui() {
 
 		if (ext == ".tepostprofile" || ext == ".teposteffect") {
 			DrawPostProcessAssetInspector(*selectedAsset);
+		} else if (ext == TerraEngine::Resource::kShaderCollectionExtension) {
+			std::ifstream source(*selectedAsset);
+			auto document = nlohmann::json::parse(source, nullptr, false);
+			source.close();
+			if (!document.is_object()) { ImGui::TextUnformatted("Shader collection could not be read."); return; }
+			bool changed = false;
+			for (const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
+				const auto value = document.find(slot.key);
+				const std::string path = value != document.end() && value->is_string() ? value->get<std::string>() : std::string{};
+				if (!ImGui::BeginCombo(slot.label, path.empty() ? "Engine Default" : path.c_str())) continue;
+				if (ImGui::Selectable("Engine Default", path.empty())) { document[slot.key] = ""; changed = true; }
+				// Offer compiled/imported stages of the matching type only. Store
+				// the path relative to Assets so the project remains portable.
+				for (const auto& [file, asset] : AssetDatabase::Instance().GetAssets()) {
+					if (asset.importerName != TerraEngine::Editor::Assets::kCompatibleShaderImporter
+						|| !TerraEngine::Resource::IsShaderCollectionStagePath(asset.sourcePath, slot)) continue;
+					const auto option = asset.sourcePath.generic_u8string();
+					const std::string label(reinterpret_cast<const char*>(option.data()), option.size());
+					if (ImGui::Selectable(label.c_str(), label == path)) { document[slot.key] = label; changed = true; }
+				}
+				ImGui::EndCombo();
+			}
+			if (changed) {
+				const auto saved = TerraEngine::Utilities::AtomicFileWriteTransaction(*selectedAsset).Commit(document.dump(2));
+				if (saved.committed) AssetDatabase::Instance().ImportAssetWithProgress(*selectedAsset, true);
+				else TERRAENGINE_LOG(LogLevel::Error, "Could not save shader collection: " << saved.reason);
+			}
 		} else if (ext == ".tmat") {
 			DrawMaterialInspector(*selectedAsset);
 		} else if (TerraEngine::AssetPipeline::IsModelPackageSourceExtension(*selectedAsset)) {

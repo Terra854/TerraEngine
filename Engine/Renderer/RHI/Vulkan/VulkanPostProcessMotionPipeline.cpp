@@ -9,7 +9,7 @@ namespace TerraEngine::Renderer::Vulkan
 		struct ShaderVariable { std::uint32_t pointerType, storage; };
 		// Only the small interface grammar needed by this fixed shader family is
 		// inspected. Every instruction is bounds checked before reading operands.
-		bool ValidateShader(std::span<const std::uint32_t> words, bool vertex,
+		bool ValidateShader(std::span<const std::uint32_t> words,
 			bool camera, std::string& reason)
 		{
 			auto fail = [&](const char* text) { reason = text; return false; };
@@ -27,7 +27,7 @@ namespace TerraEngine::Renderer::Vulkan
 				const auto* w = words.data() + offset;
 				if (opcode == 15) // OpEntryPoint: exactly one expected-stage main.
 				{
-					if (count < 5 || main || w[1] != (vertex ? 0u : 4u) || w[3] != 0x6e69616du || w[4] != 0u)
+					if (count < 5 || main || w[1] != 4u || w[3] != 0x6e69616du || w[4] != 0u)
 						return fail("Motion shader must have one matching main entry point.");
 					main = true;
 				}
@@ -44,7 +44,7 @@ namespace TerraEngine::Renderer::Vulkan
 					if (w[2] == 30 && !locations.emplace(w[1], w[3]).second)
 						return fail("Motion shader has duplicate location decorations.");
 					// Fragment depth/sample-mask outputs would change source coverage.
-					if (!vertex && w[2] == 11 && (w[3] == 22 || w[3] == 20))
+					if (w[2] == 11 && (w[3] == 22 || w[3] == 20))
 						return fail("Motion fragment shader cannot write depth or sample coverage.");
 				}
 				offset += count;
@@ -54,9 +54,7 @@ namespace TerraEngine::Renderer::Vulkan
 			for (const auto& [id, variable] : variables)
 			{
 				const auto location = locations.find(id);
-				if (vertex && variable.storage == 1 && location != locations.end())
-					return fail("Motion vertex shader must use vertex pulling without attributes.");
-				if (vertex || variable.storage != 3) continue;
+				if (variable.storage != 3) continue;
 				if (location == locations.end() || location->second > (camera ? 1u : 0u))
 					return fail("Motion fragment output does not match its target count.");
 				const auto bit = 1u << location->second;
@@ -68,16 +66,8 @@ namespace TerraEngine::Renderer::Vulkan
 				if (scalar == floats.end() || scalar->second != 32)
 					return fail("Motion fragment attachments require float4 outputs.");
 			}
-			return vertex || mask == (camera ? 3u : 1u) || fail("Motion fragment output is missing.");
+			return mask == (camera ? 3u : 1u) || fail("Motion fragment output is missing.");
 		}
-	}
-
-	bool ValidateMotionRasterShaders(std::span<const std::uint32_t> vertexWords,
-		std::span<const std::uint32_t> fragmentWords, bool cameraMotion, std::string& reason)
-	{
-		reason.clear();
-		return ValidateShader(vertexWords, true, cameraMotion, reason)
-			&& ValidateShader(fragmentWords, false, cameraMotion, reason);
 	}
 
 	MotionRasterPipeline::~MotionRasterPipeline()
@@ -99,13 +89,21 @@ namespace TerraEngine::Renderer::Vulkan
 			reason = "Motion pipeline requires exact live targets, three layouts, and valid source raster state.";
 			return {};
 		}
-		if (!ValidateMotionRasterShaders(request.vertexWords, request.fragmentWords, request.targets->usesCameraMotion, reason)) return {};
+		// Both shipping geometry variants are mesh shaders. Validate the
+		// depth-equal fragment contract for the selected attachment count.
+		if (request.meshWords.empty()) {
+			reason = "Motion raster requires a mesh shader.";
+			return {};
+		}
+		if (!ValidateShader(request.fragmentWords, request.targets->usesCameraMotion, reason)) return {};
 		auto result = std::make_shared<MotionRasterPipeline>();
 		result->device = device;
 		result->targets = request.targets;
 		VkPipelineLayoutCreateInfo layout{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
 		layout.setLayoutCount = static_cast<std::uint32_t>(request.setLayouts.size());
 		layout.pSetLayouts = request.setLayouts.data();
+		layout.pushConstantRangeCount = static_cast<std::uint32_t>(request.pushConstants.size());
+		layout.pPushConstantRanges = request.pushConstants.data();
 		if (vkCreatePipelineLayout(device, &layout, nullptr, &result->layout) != VK_SUCCESS)
 		{
 			reason = "Motion pipeline layout creation failed."; return {};
@@ -114,12 +112,16 @@ namespace TerraEngine::Renderer::Vulkan
 		// its compiled state, so modules can be released before publication.
 		struct Modules
 		{
-			VkDevice device; std::array<VkShaderModule, 2> handles{};
+			VkDevice device; std::array<VkShaderModule, 3> handles{};
 			~Modules() { for (auto handle : handles) if (handle) vkDestroyShaderModule(device, handle, nullptr); }
 		} modules{ device };
-		const std::array code{ request.vertexWords, request.fragmentWords };
-		std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
-		for (std::size_t i = 0; i < code.size(); ++i)
+		const std::array code{ request.meshWords, request.fragmentWords, request.taskWords };
+		const std::array kinds{ VK_SHADER_STAGE_MESH_BIT_EXT,
+			VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_TASK_BIT_EXT };
+		const std::array entries{ request.meshEntry, "main", request.taskEntry };
+		const std::size_t stageCount = !request.taskWords.empty() ? 3u : 2u;
+		std::array<VkPipelineShaderStageCreateInfo, 3> stages{};
+		for (std::size_t i = 0; i < stageCount; ++i)
 		{
 			VkShaderModuleCreateInfo info{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
 			info.codeSize = code[i].size_bytes(); info.pCode = code[i].data();
@@ -128,12 +130,9 @@ namespace TerraEngine::Renderer::Vulkan
 				reason = "Motion shader module creation failed."; return {};
 			}
 			stages[i] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-			stages[i].stage = i == 0 ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
-			stages[i].module = modules.handles[i]; stages[i].pName = "main";
+			stages[i].stage = kinds[i];
+			stages[i].module = modules.handles[i]; stages[i].pName = entries[i];
 		}
-		VkPipelineVertexInputStateCreateInfo vertex{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-		VkPipelineInputAssemblyStateCreateInfo assembly{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-		assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 		VkPipelineViewportStateCreateInfo viewport{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
 		viewport.viewportCount = viewport.scissorCount = 1;
 		VkPipelineRasterizationStateCreateInfo raster{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
@@ -152,8 +151,7 @@ namespace TerraEngine::Renderer::Vulkan
 		VkPipelineDynamicStateCreateInfo dynamic{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
 		dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size()); dynamic.pDynamicStates = dynamicStates.data();
 		VkGraphicsPipelineCreateInfo pipeline{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-		pipeline.stageCount = static_cast<std::uint32_t>(stages.size()); pipeline.pStages = stages.data();
-		pipeline.pVertexInputState = &vertex; pipeline.pInputAssemblyState = &assembly;
+		pipeline.stageCount = static_cast<std::uint32_t>(stageCount); pipeline.pStages = stages.data();
 		pipeline.pViewportState = &viewport; pipeline.pRasterizationState = &raster;
 		pipeline.pMultisampleState = &samples; pipeline.pDepthStencilState = &depth;
 		pipeline.pColorBlendState = &blend; pipeline.pDynamicState = &dynamic;

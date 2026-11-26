@@ -224,7 +224,7 @@ namespace
 		case AssetType::Material:
 			return { ".tmat" };
 		case AssetType::ShaderCollection:
-			return { ".tspf" };
+			return { ".tspf", ".teshadercollection" };
 		case AssetType::PhysicsMaterial:
 			return { ".tephysmat" };
 		case AssetType::CookedCollider:
@@ -1074,6 +1074,8 @@ std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Shader& resource
 {
 	std::uint64_t bytes = sizeof(Shader);
 	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.storage));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.identityBytecode));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.meshMotionBytecode));
 	return bytes;
 }
 
@@ -1653,6 +1655,9 @@ void ResourceManager::Initialize()
 
 					if (auto guid = TerraEngine::ParseUUID(guidStr)) {
 						RegisterAssetPath(*guid, path, static_cast<AssetType>(typeInt));
+						if(typeInt == static_cast<std::uint32_t>(AssetType::ShaderCollection)
+							&& std::filesystem::path(path).extension() == ".teshadercollection")
+							(void)LoadAuthoredShaderCollectionAsync(*guid, assetRoot / path, assetRoot);
 						++registeredAssetCount;
 					}
 				}

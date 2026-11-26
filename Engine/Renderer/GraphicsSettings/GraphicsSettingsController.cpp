@@ -456,7 +456,7 @@ namespace TerraEngine::Renderer::GraphicsSettings
 				{
 					GraphicsAAConfiguration configuration;
 					reason = ResolveGraphicsAAConfiguration(candidate.snapshot.values, configuration);
-					if(reason != GraphicsRequestReason::None) detail = "The AA/upscaling/raster tuple is incompatible; required coverage and temporal modes use indexed raster with VRS off.";
+					if(reason != GraphicsRequestReason::None) detail = "The AA, upscaling and raster settings are incompatible. MSAA and temporal modes require VRS off.";
 					else
 					{
 						// Samples and dimensions are derived from the canonical value
@@ -558,7 +558,7 @@ namespace TerraEngine::Renderer::GraphicsSettings
 			const bool processingChange=std::any_of(found->second.affectedSettings.begin(),found->second.affectedSettings.end(),
 				[](const auto id){return id >= GraphicsSettingId::AntiAliasingMode;});
 			const bool qualifiedRaster = aaConfiguration.antiAliasing != GraphicsAntiAliasingMode::Off
-				|| aaConfiguration.upscaling != GraphicsUpscalingMode::Off || aaConfiguration.raster == GraphicsGeometryRasterMode::Indexed;
+				|| aaConfiguration.upscaling != GraphicsUpscalingMode::Off;
 			if(canonical.activation == GraphicsActivation::Rebuild && processingChange && qualifiedRaster
 				&& postProcessResourceGeneration == 0)
 				return impl->Fail(candidate.requestId,GraphicsRequestReason::PreparationFailed,"The selected AA variant has no trusted native preparation certificate.");

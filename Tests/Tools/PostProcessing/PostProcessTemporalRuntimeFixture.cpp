@@ -118,7 +118,6 @@ namespace TerraEngine::Tests
 				{"outputKind",static_cast<unsigned>(input.output.kind)},{"publicationIndex",index},
 				{"cameraId",input.graphicsCamera ? ToHexString(input.graphicsCamera->cameraId) : ""},
 				{"aaMode",UInt(settings,GraphicsSettingId::AntiAliasingMode)},{"upscalingMode",UInt(settings,GraphicsSettingId::UpscalingMode)},
-				{"geometryRasterMode",UInt(settings,GraphicsSettingId::GeometryRasterMode)},
 				{"sampleCount",actual->rasterSampleCount},{"indexedDraws",actual->indexedDrawCount},
 				{"meshTaskDraws",nullptr},{"meshTaskDrawCountAvailable",false},{"recordedMotionDraws",actual->recordedMotionDrawCount},
 				{"temporalRecordingId",std::to_string(actual->temporalRecordingId)},{"temporalPreviousFrameId",std::to_string(actual->temporalPreviousFrameId)},

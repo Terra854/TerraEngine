@@ -1,4 +1,5 @@
 #include "VulkanPostProcessTemporalView.h"
+#include "VulkanContextImpl.h"
 #include "Resource/ResourceManager.h"
 
 #include <cstring>
@@ -23,7 +24,7 @@ namespace TerraEngine::Renderer::Vulkan
 	std::shared_ptr<TemporalViewResources> PrepareTemporalViewResources(
 		VkPhysicalDevice physicalDevice, PostProcessTargetBundle& targets,
 		const PostProcessTargetImage& sceneColor, const PostProcessTargetImage& sceneDepth,
-		const PostProcessTargetImage& resolvedColor, bool cameraOnlyMotion, std::string& reason)
+		const PostProcessTargetImage& resolvedColor, bool cameraOnlyMotion, std::string& reason, bool mesh)
 	{
 		try
 		{
@@ -32,14 +33,22 @@ namespace TerraEngine::Renderer::Vulkan
 			view->motion = PrepareMotionRasterTargets(physicalDevice, targets.device, targets.allocator,
 				sceneDepth.view, sceneDepth.format, sceneDepth.extent, cameraOnlyMotion, reason);
 			if(!view->motion) return {};
-			view->motionLayout = CreatePostProcessMotionBufferLayout(targets.device, reason);
+			view->meshMotion = mesh;
+			view->motionLayout = CreatePostProcessMotionBufferLayout(targets.device, reason, mesh);
 			if(!view->motionLayout) return {};
-			view->motionVertexShader = ReadShaderWords(cameraOnlyMotion
-				? "Shaders/PostProcess/IndexedMotionCamera.vert.spv" : "Shaders/PostProcess/IndexedMotionTotal.vert.spv");
-			view->motionFragmentShader = ReadShaderWords(cameraOnlyMotion
-				? "Shaders/PostProcess/IndexedMotionCamera.frag.spv" : "Shaders/PostProcess/IndexedMotionTotal.frag.spv");
-			if(!ValidateMotionRasterShaders(view->motionVertexShader, view->motionFragmentShader, cameraOnlyMotion, reason))
-				return {};
+			if(mesh) {
+				view->motionFragmentShader = ReadShaderWords("Shaders/PostProcess/MeshTemporalMotion.frag.spv");
+				if(view->motionFragmentShader.empty()) { reason = "Mesh temporal fragment is missing."; return {}; }
+			} else {
+				view->compatibilityMeshShader = ReadShaderWords(cameraOnlyMotion
+					? "Shaders/PostProcess/IndexedMotionCamera.mesh.spv" : "Shaders/PostProcess/IndexedMotionTotal.mesh.spv");
+				view->motionFragmentShader = ReadShaderWords(cameraOnlyMotion
+					? "Shaders/PostProcess/IndexedMotionCamera.frag.spv" : "Shaders/PostProcess/IndexedMotionTotal.frag.spv");
+				if(view->compatibilityMeshShader.empty() || view->motionFragmentShader.empty()) {
+					reason = "Compatibility motion shaders are missing.";
+					return {};
+				}
+			}
 			TemporalPassInputs inputs{sceneColor, sceneDepth, view->motion->totalMotion, resolvedColor,
 				VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_1_BIT, TemporalViewFrameState::kSlotCount};
 			view->resolve = PrepareTemporalPass(physicalDevice, targets, inputs, reason);
@@ -67,7 +76,10 @@ namespace TerraEngine::Renderer::Vulkan
 		MotionRasterPipelineRequest request;
 		request.targets = view.motion;
 		request.setLayouts = {sourceLayouts[0], sourceLayouts[1], view.motionLayout->layout};
-		request.vertexWords = view.motionVertexShader;
+		request.meshWords = view.compatibilityMeshShader;
+		// The push constants select the first meshlet, count and motion row.
+		const VkPushConstantRange range{VK_SHADER_STAGE_MESH_BIT_EXT, 0u, 3u * sizeof(std::uint32_t)};
+		request.pushConstants = std::span(&range, 1u);
 		request.fragmentWords = view.motionFragmentShader;
 		request.cullMode = cullMode;
 		request.frontFace = frontFace;
@@ -83,6 +95,42 @@ namespace TerraEngine::Renderer::Vulkan
 		}
 		try { view.variants.push_back({sourceLayouts, cullMode, frontFace, std::move(prepared)}); }
 		catch(const std::bad_alloc&) { reason = "Could not retain the indexed motion pipeline."; return nullptr; }
+		return view.variants.back().owner.get();
+	}
+
+	const MotionRasterPipeline* PrepareMeshTemporalMotionVariant(TemporalViewResources& view,
+		const VulkanPipeline& surface, std::string& reason)
+	{
+		if(!view.meshMotion || !surface.sourceCollection || surface.setLayouts.size() != 2u) return nullptr;
+		const std::array layouts{surface.setLayouts[0], surface.setLayouts[1]};
+		for(const auto& variant : view.variants)
+			if(variant.meshCollection == surface.sourceCollection && variant.sourceLayouts == layouts
+				&& variant.cullMode == surface.rasterCullMode && variant.frontFace == surface.rasterFrontFace)
+				return variant.owner.get();
+		MotionRasterPipelineRequest request;
+		request.targets = view.motion;
+		request.setLayouts = {layouts[0], layouts[1], view.motionLayout->layout};
+		request.fragmentWords = view.motionFragmentShader;
+		request.cullMode = surface.rasterCullMode; request.frontFace = surface.rasterFrontFace;
+		request.pushConstants = surface.pushConstants;
+		for(const auto& binding : surface.sourceCollection->stages) {
+			if(!binding.shader) continue;
+			const auto& shader = *binding.shader;
+			const char* entry = shader.stringTable.data() + shader.binary.entryPointOffset;
+			if(binding.stage == ShaderStage::Mesh) {
+				request.meshWords = shader.meshMotionBytecode; request.meshEntry = entry;
+			} else if(binding.stage == ShaderStage::Task && surface.hasTaskStage) {
+				request.taskWords = {reinterpret_cast<const std::uint32_t*>(shader.bytecode.data()),
+					shader.bytecode.size() / sizeof(std::uint32_t)};
+				request.taskEntry = entry;
+			}
+		}
+		if(request.meshWords.empty() || (surface.hasTaskStage && request.taskWords.empty())) return nullptr;
+		// Retain the exact collection and pipeline until this view's borrowers retire.
+		auto pipeline = PrepareMotionRasterPipeline(view.device, request, reason);
+		if(!pipeline || view.variants.size() >= 32u) return nullptr;
+		view.variants.push_back({layouts, surface.rasterCullMode, surface.rasterFrontFace,
+			std::move(pipeline), surface.sourceCollection});
 		return view.variants.back().owner.get();
 	}
 

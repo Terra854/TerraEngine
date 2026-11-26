@@ -774,7 +774,7 @@ namespace TerraEngine::Tests
 			resize->outputHeight = 360u;
 			resize->internalWidth = 640u;
 			resize->internalHeight = 180u;
-			resize->values = {{GraphicsSettingId::GeometryRasterMode, std::uint32_t{1}},
+			resize->values = {
 				{GraphicsSettingId::UpscalingMode, std::uint32_t{1}}, {GraphicsSettingId::InternalResolutionScale, 0.5f}};
 			frame.cameraGraphicsSettings = {resize};
 			Renderer::BindGraphicsCameraViewProvenance(view, frame, camera);
@@ -800,7 +800,7 @@ namespace TerraEngine::Tests
 			auto planned = std::make_shared<GraphicsSettingsSnapshot>();
 			planned->target = {GraphicsScope::Camera, camera, GraphicsViewIdentity{RenderViewType::Game, 7u, 8u, RenderOutputKind::OffscreenTexture}};
 			planned->lifecycle = frame.graphicsSettingsLifecycle;
-			planned->values = {{GraphicsSettingId::GeometryRasterMode, std::uint32_t{1}}, {GraphicsSettingId::UpscalingMode, std::uint32_t{1}},
+			planned->values = { {GraphicsSettingId::UpscalingMode, std::uint32_t{1}},
 				{GraphicsSettingId::InternalResolutionScale, 0.5f}};
 			planned->outputWidth = 640u; planned->outputHeight = 360u;
 			planned->internalWidth = 320u; planned->internalHeight = 180u;

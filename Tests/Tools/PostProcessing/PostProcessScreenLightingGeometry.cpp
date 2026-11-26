@@ -116,7 +116,7 @@ namespace TerraEngine::TestSupport
 			Renderer::Vulkan::IndexedCornerGeometry topology;
 			std::string reason;
 			Check(Renderer::Vulkan::TryBuildIndexedCornerGeometry(mesh,topology,reason),"Generated fixture failed actual indexed topology validation.");
-			Check(topology.indices.size()==quads.size()*6,"Generated fixture indexed corner count is incomplete.");
+			Check(!topology.firstIndexByMeshlet.empty() && topology.firstIndexByMeshlet.back()==quads.size()*6,"Generated fixture indexed corner count is incomplete.");
 			surface.meshGeneration=mesh->publicationGeneration; surface.materialGeneration=mat->publicationGeneration;
 			result.surfaces.push_back(surface);
 		};

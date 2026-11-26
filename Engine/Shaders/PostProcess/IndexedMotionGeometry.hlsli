@@ -1,5 +1,5 @@
 // Bounded owner-mesh vertex pulling for the actual indexed motion pass.
-// Matches DefaultIndexed.vert.hlsl corner tokens/packed source ownership.
+// Matches DefaultIndexed.mesh.hlsl corner tokens/packed source ownership.
 #ifndef TERRAENGINE_INDEXED_MOTION_GEOMETRY_HLSLI
 #define TERRAENGINE_INDEXED_MOTION_GEOMETRY_HLSLI
 #include "../VirtualGeometry/VirtualGeometryPackedVertex.hlsli"

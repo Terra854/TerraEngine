@@ -40,7 +40,7 @@ namespace TerraEngine
 		ColorCurve = 80, ColorCurveStrength = 81, ColorLut = 82, ColorLutStrength = 83,
 		BloomEnabled = 84, BloomThreshold = 85, BloomIntensity = 86,
 		BloomSpread = 87, BloomSoftKnee = 88,
-		UpscalingMode = 89, UpscalingSharpness = 90, GeometryRasterMode = 91,
+		UpscalingMode = 89, UpscalingSharpness = 90,
 		GtaoEnabled = 92,
 		GtaoIntensity = 93,
 		GtaoQuality = 94,
@@ -89,7 +89,6 @@ namespace TerraEngine
 	public enum GraphicsUpscalingMode : uint { Off = 0, Temporal = 1 }
 
 	/// <summary>Selects a real supported raster path without a validation or debug route override.</summary>
-	public enum GraphicsGeometryRasterMode : uint { Automatic = 0, Indexed = 1 }
 
 	/// <summary>Selects a fixed or adaptive exposure in a graphics settings batch.</summary>
 	public enum GraphicsExposureMode : uint { Legacy = 0, Fixed = 1, Automatic = 2 }

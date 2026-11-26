@@ -197,14 +197,12 @@ namespace TerraEngine::Renderer::Vulkan
 				VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, kind == Kind::Dirt ? 32u : 48u};
 				VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; layout.setLayoutCount = 1; layout.pSetLayouts = &pass->descriptors; layout.pushConstantRangeCount = 1; layout.pPushConstantRanges = &push;
 				Require(vkCreatePipelineLayout(pass->device, &layout, nullptr, &pass->layout) == VK_SUCCESS, "HDR lens pipeline layout creation failed.");
-				Module vertex(pass->device), fragment(pass->device); LoadModule(vertex, "Shaders/PostProcess/PostProcessFullscreen.vert.spv");
+				Module vertex(pass->device), fragment(pass->device); LoadModule(vertex, "Shaders/PostProcess/PostProcessFullscreen.mesh.spv");
 				LoadModule(fragment, kind == Kind::Dirt ? "Shaders/PostProcess/LensDirt.frag.spv" : "Shaders/PostProcess/LensFlare.frag.spv", &kind);
 				std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
 				for(auto& stage : stages) stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-				stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vertex.value; stages[0].pName = "VSMain";
+				stages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT; stages[0].module = vertex.value; stages[0].pName = "main";
 				stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fragment.value; stages[1].pName = "PSMain";
-				VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-				VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 				VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; viewport.viewportCount = viewport.scissorCount = 1;
 				VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO}; raster.polygonMode = VK_POLYGON_MODE_FILL; raster.cullMode = VK_CULL_MODE_NONE; raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; raster.lineWidth = 1;
 				VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO}; samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -213,8 +211,7 @@ namespace TerraEngine::Renderer::Vulkan
 				VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO}; blend.attachmentCount = 1; blend.pAttachments = &attachment;
 				const std::array<VkDynamicState, 2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
 				VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO}; dynamic.dynamicStateCount = 2; dynamic.pDynamicStates = dynamicStates.data();
-				VkGraphicsPipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO}; pipeline.stageCount = 2; pipeline.pStages = stages.data();
-				pipeline.pVertexInputState = &vertexInput; pipeline.pInputAssemblyState = &assembly; pipeline.pViewportState = &viewport; pipeline.pRasterizationState = &raster;
+				VkGraphicsPipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO}; pipeline.stageCount = 2; pipeline.pStages = stages.data(); pipeline.pViewportState = &viewport; pipeline.pRasterizationState = &raster;
 				pipeline.pMultisampleState = &samples; pipeline.pDepthStencilState = &depth; pipeline.pColorBlendState = &blend; pipeline.pDynamicState = &dynamic;
 				pipeline.layout = pass->layout; pipeline.renderPass = renderPass;
 				Require(vkCreateGraphicsPipelines(pass->device, VK_NULL_HANDLE, 1, &pipeline, nullptr, &pass->pipeline) == VK_SUCCESS, "HDR lens exact graphics pipeline creation failed.");
@@ -241,7 +238,7 @@ namespace TerraEngine::Renderer::Vulkan
 			vkCmdSetViewport(command, 0, 1, &viewport); vkCmdSetScissor(command, 0, 1, &scissor);
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.pipeline);
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.layout, 0, 1, &pass.set, 0, nullptr);
-			vkCmdPushConstants(command, pass.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, bytes, constants); vkCmdDraw(command, 3, 1, 0, 0); vkCmdEndRenderPass(command);
+			vkCmdPushConstants(command, pass.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, bytes, constants); vkCmdDrawMeshTasksEXT(command, 1, 1, 1); vkCmdEndRenderPass(command);
 			// Compatible render pass supplies COLOR_ATTACHMENT->SHADER_READ layout.
 			LensHdrImageState colorWrite{VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT};
 			Barrier(command, pass.output, colorWrite, kFinished);

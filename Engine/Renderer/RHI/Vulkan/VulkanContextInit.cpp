@@ -1102,7 +1102,6 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			mesh.descriptorSetsByLayout.clear();
 		}
 
-		DestroyBufferImmediate(mesh.indexedCornerBuffer);
 		mesh.indexedTopology.reset();
 		vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
@@ -1387,6 +1386,14 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			vkDestroyDescriptorSetLayout(device, uiFontDescriptorSetLayout, nullptr);
 			uiFontDescriptorSetLayout = VK_NULL_HANDLE;
 		}
+		if (uiMeshInputLayout != VK_NULL_HANDLE) {
+			vkDestroyDescriptorSetLayout(device, uiMeshInputLayout, nullptr);
+			uiMeshInputLayout = VK_NULL_HANDLE;
+		}
+		if (uiMeshInputPool != VK_NULL_HANDLE) {
+			vkDestroyDescriptorPool(device, uiMeshInputPool, nullptr);
+			uiMeshInputPool = VK_NULL_HANDLE;
+		}
 
 		if (uiFontAtlasImage.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, uiFontAtlasImage.sampler, nullptr);
@@ -1409,7 +1416,8 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	uiFontAtlasHeight = 0;
 	// Each runtime UI buffer belongs to one fence slot. Cleanup runs after the
 	// device-idle lifetime gate, so every slot can now be destroyed together.
-	for (VulkanBuffer& buffer : uiStaticVertexBuffers) {
+	for (const auto& slot : uiStaticVertexBuffers) {
+		const auto& buffer = slot.buffer;
 		if (buffer.buffer != VK_NULL_HANDLE) {
 			vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
 		}
@@ -1420,7 +1428,8 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		vmaDestroyBuffer(allocator, uiInstanceBuffer.buffer, uiInstanceBuffer.allocation);
 		uiInstanceBuffer.buffer = VK_NULL_HANDLE;
 	}
-	for (VulkanBuffer& buffer : uiSdfVertexBuffers) {
+	for (const auto& slot : uiSdfVertexBuffers) {
+		const auto& buffer = slot.buffer;
 		if (buffer.buffer != VK_NULL_HANDLE) {
 			vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
 		}

@@ -231,7 +231,7 @@ namespace TerraEngine::Renderer::Vulkan
 				"Custom pass requires the exact published SPIR-V fragment entry.");
 			std::vector<std::uint32_t> fragment(shader.bytecode.size()/4);
 			if(!fragment.empty()) std::memcpy(fragment.data(),shader.bytecode.data(),shader.bytecode.size());
-			Require(Entry(fragment,4,d.entryPoint)&&Entry(info.fullscreenVertex,0,"VSMain"),"Custom fragment or bundled fullscreen vertex module has an invalid entry.");
+			Require(Entry(fragment,4,d.entryPoint)&&Entry(info.fullscreenVertex,0,"main"),"Custom fragment or bundled fullscreen vertex module has an invalid entry.");
 			Resource::PostProcessEffectParameterReflection reflection;
 			Require(Resource::ReflectPostProcessEffectParameters(shader,reflection,reason)&&reflection.parameterBytes==d.parameterBytes
 				&&reflection.parameters.size()==d.parameters.size(),"Custom parameter layout no longer matches its compiled SPIR-V.");
@@ -369,10 +369,8 @@ namespace TerraEngine::Renderer::Vulkan
 			Require(vkCreateShaderModule(info.device,&module,nullptr,&modules.vertex)==VK_SUCCESS,"Custom fullscreen vertex module failed.");
 			module.codeSize=fragment.size()*4;module.pCode=fragment.data();Require(vkCreateShaderModule(info.device,&module,nullptr,&modules.fragment)==VK_SUCCESS,"Custom fragment module failed.");
 			std::array<VkPipelineShaderStageCreateInfo,2> stages{};for(auto& s:stages)s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=modules.vertex;stages[0].pName="VSMain";
+			stages[0].stage=VK_SHADER_STAGE_MESH_BIT_EXT;stages[0].module=modules.vertex;stages[0].pName="main";
 			stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=modules.fragment;stages[1].pName=d.entryPoint.c_str();
-			VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};assembly.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 			VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};viewport.viewportCount=viewport.scissorCount=1;
 			VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};raster.polygonMode=VK_POLYGON_MODE_FILL;raster.cullMode=VK_CULL_MODE_NONE;raster.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE;raster.lineWidth=1;
 			VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};samples.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
@@ -380,7 +378,7 @@ namespace TerraEngine::Renderer::Vulkan
 			VkPipelineColorBlendAttachmentState write{};write.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
 			VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};blend.attachmentCount=1;blend.pAttachments=&write;
 			const std::array<VkDynamicState,2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dynamic.dynamicStateCount=2;dynamic.pDynamicStates=dynamicStates.data();
-			VkGraphicsPipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};pipeline.stageCount=2;pipeline.pStages=stages.data();pipeline.pVertexInputState=&vertex;pipeline.pInputAssemblyState=&assembly;pipeline.pViewportState=&viewport;pipeline.pRasterizationState=&raster;pipeline.pMultisampleState=&samples;pipeline.pDepthStencilState=&depth;pipeline.pColorBlendState=&blend;pipeline.pDynamicState=&dynamic;pipeline.layout=pass->layout;pipeline.renderPass=pass->renderPass;
+			VkGraphicsPipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};pipeline.stageCount=2;pipeline.pStages=stages.data();pipeline.pViewportState=&viewport;pipeline.pRasterizationState=&raster;pipeline.pMultisampleState=&samples;pipeline.pDepthStencilState=&depth;pipeline.pColorBlendState=&blend;pipeline.pDynamicState=&dynamic;pipeline.layout=pass->layout;pipeline.renderPass=pass->renderPass;
 			Require(vkCreateGraphicsPipelines(info.device,VK_NULL_HANDLE,1,&pipeline,nullptr,&pass->pipeline)==VK_SUCCESS,"Custom compatible fullscreen pipeline failed.");
 			reason.clear();return pass;
 		}
@@ -403,7 +401,7 @@ namespace TerraEngine::Renderer::Vulkan
 		vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pass.pipeline);
 		if(pass.set)vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pass.layout,0,1,&pass.set,0,nullptr);
 		if(!pushBytes.empty())vkCmdPushConstants(command,pass.layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,static_cast<std::uint32_t>(pushBytes.size()),pushBytes.data());
-		vkCmdDraw(command,3,1,0,0);vkCmdEndRenderPass(command);
+		vkCmdDrawMeshTasksEXT(command, 1, 1, 1);vkCmdEndRenderPass(command);
 		barrier.oldLayout=barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
 		vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
 		CustomPostProcessRecordedOutput recorded;recorded.command=command;recorded.stage=pass.prepared->descriptor.stage;recorded.domain=pass.prepared->descriptor.domain;

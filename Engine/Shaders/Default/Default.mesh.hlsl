@@ -121,6 +121,18 @@ struct PushConstants
 // installed ABI. Keep the local alias while existing helper names migrate.
 #define PSIn TerraSurfaceInput
 
+// The motion build stores the same final positions as the color build. A
+// template-based custom shader can change outVertex.position in either emitter;
+// it does not need another entry point or a matching vertex shader.
+#if defined(TERRAENGINE_MESH_TEMPORAL_MOTION)
+#include "../PostProcess/MeshTemporalPositionHistory.hlsli"
+#define TE_MESH_VERTEX_OUTPUT MeshTemporalVertex
+#define TE_WRITE_MESH_VERTEX(target, vertex, meshlet, corner) target = CaptureMeshTemporalVertex(vertex.position, meshlet, corner, kMaxMeshletVertices)
+#else
+#define TE_MESH_VERTEX_OUTPUT PSIn
+#define TE_WRITE_MESH_VERTEX(target, vertex, meshlet, corner) target = vertex
+#endif
+
 static const uint kMaxMeshletVertices = 64;
 static const uint kMaxMeshletTriangles = 124;
 // Fragment-stage SV_PrimitiveID is local to this meshlet. Keeping this stride
@@ -659,7 +671,7 @@ void EmitMeshlet(
 	uint groupThreadIndex,
 	DefaultGpuAnimationGraphicsRecord animationRecord,
 	bool gpuDeformationAvailable,
-	out vertices PSIn outputVertices[kMaxMeshletVertices],
+	out vertices TE_MESH_VERTEX_OUTPUT outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles],
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
@@ -776,7 +788,7 @@ void EmitMeshlet(
 			((SceneUniforms.selectedVirtualPageNeedCount & 0xFFu) << 16u) |
 			((packetRunDebugId & 0xFFu) << 24u);
 		outVertex.objectIdentity = gMeshShaderObjectIdentity;
-		outputVertices[vertexIndex] = outVertex;
+		TE_WRITE_MESH_VERTEX(outputVertices[vertexIndex], outVertex, meshletIndex, vertexIndex);
 	}
 
 	for (uint primitiveIndex = groupThreadIndex;
@@ -813,7 +825,7 @@ void EmitPageLocalMeshlet(
 	TeAnimatedGraphicsBridge deformationBridge,
 	TeAnimatedGraphicsPage deformationPage,
 	bool hasCanonicalDeformation,
-	out vertices PSIn outputVertices[kMaxMeshletVertices],
+	out vertices TE_MESH_VERTEX_OUTPUT outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles],
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
@@ -910,7 +922,7 @@ void EmitPageLocalMeshlet(
 			((SceneUniforms.selectedVirtualPageNeedCount & 0xFFu) << 16u) |
 			((packetRunDebugId & 0xFFu) << 24u);
 		outVertex.objectIdentity = gMeshShaderObjectIdentity;
-		outputVertices[vertexIndex] = outVertex;
+		TE_WRITE_MESH_VERTEX(outputVertices[vertexIndex], outVertex, meshletIndex, vertexIndex);
 	}
 
 	for (uint primitiveIndex = groupThreadIndex;
@@ -945,7 +957,7 @@ void main(
 	in payload TaskPayload taskPayload,
 	uint3 groupId : SV_GroupID,
 	uint groupThreadIndex : SV_GroupIndex,
-	out vertices PSIn outputVertices[kMaxMeshletVertices],
+	out vertices TE_MESH_VERTEX_OUTPUT outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles],
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {

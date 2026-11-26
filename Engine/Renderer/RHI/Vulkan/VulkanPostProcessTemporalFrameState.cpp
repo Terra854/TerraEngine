@@ -63,6 +63,7 @@ namespace TerraEngine::Renderer::Vulkan
 		{
 			plan.previous = accepted;
 			plan.previousMeshes = acceptedMeshes;
+			plan.previousMeshMotion = acceptedMeshMotion;
 		}
 		// A reset still binds a distinct legal descriptor slot. Reuse the
 		// accepted slot as a read-only dummy when its layout is already GENERAL.
@@ -129,6 +130,7 @@ namespace TerraEngine::Renderer::Vulkan
 		// Keep the exact CPU mesh publications that produced accepted depth.
 		// Retain these independently so older descriptor pools can retire.
 		acceptedMeshes = match->motionBuffers->prepared.meshes;
+		acceptedMeshMotion = match->motionBuffers->meshMotion;
 		match->submittedWithoutEpoch = true;
 		return true;
 	}

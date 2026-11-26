@@ -1,4 +1,4 @@
-// Owned graphics state for the depth-tested indexed motion pass.
+// Owned graphics state for the depth-tested mesh motion pass.
 #pragma once
 
 #include <array>
@@ -11,16 +11,21 @@ namespace TerraEngine::Renderer::Vulkan
 	struct MotionRasterPipelineRequest
 	{
 		std::shared_ptr<const MotionRasterTargets> targets;
-		// Borrow the actual global, qualified indexed-mesh, and immutable motion
+		// Borrow the actual global, qualified source mesh, and immutable motion
 		// layouts, in that order. Their owners must outlive this pipeline's use.
 		std::array<VkDescriptorSetLayout, 3> setLayouts{};
-		std::span<const std::uint32_t> vertexWords;
 		std::span<const std::uint32_t> fragmentWords;
 		// Copy these values from the accepted opaque draw, including two-sided
 		// and mirrored geometry. A guessed default can lose equal-depth coverage.
 		VkCullModeFlags cullMode = VK_CULL_MODE_BACK_BIT;
 		VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 		VkPipelineCache cache = VK_NULL_HANDLE;
+		// Mesh replay keeps the task and push ABI of the color pipeline.
+		std::span<const std::uint32_t> meshWords;
+		std::span<const std::uint32_t> taskWords;
+		std::span<const VkPushConstantRange> pushConstants;
+		const char* meshEntry = "main";
+		const char* taskEntry = "main";
 	};
 
 	struct MotionRasterPipeline
@@ -35,19 +40,9 @@ namespace TerraEngine::Renderer::Vulkan
 		~MotionRasterPipeline();
 	};
 
-	// Bounded ABI admission, not a substitute for the shader compiler's SPIR-V
-	// validation. This pure check requires vertex pulling, no push constants,
-	// and exactly the selected one- or two-color fragment interface.
-	bool ValidateMotionRasterShaders(std::span<const std::uint32_t> vertexWords,
-		std::span<const std::uint32_t> fragmentWords, bool cameraMotion, std::string& reason);
-
-	// Protected native preparation only: no commands or submissions. Keep the
-	// returned owner through every borrowing command's completion. Recording must
-	// bind its three descriptor sets, positive viewport and scissor matching the
-	// source depth, then issue the exact accepted indexed draws (vertexOffset=0,
-	// instanceCount=1, firstInstance=motion row). Rebind the subsequent graphics
-	// pipeline explicitly; Vulkan has no implicit restore operation. No push
-	// range is exposed because these exact shaders have no push-constant block.
+	// Prepare native state without submitting work. Retain the owner until
+	// completion and replay the source coverage with the same viewport/scissor
+	// and source layouts. The push ranges describe the chosen mesh variant.
 	std::shared_ptr<MotionRasterPipeline> PrepareMotionRasterPipeline(VkDevice device,
 		const MotionRasterPipelineRequest& request, std::string& reason);
 }

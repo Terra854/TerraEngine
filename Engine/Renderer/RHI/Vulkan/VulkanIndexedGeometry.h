@@ -26,15 +26,11 @@ namespace TerraEngine::Renderer::Vulkan
 	struct IndexedCornerGeometry
 	{
 		// GPU handoff requires this exact immutable owner. The const-reference
-		// overload remains useful for CPU checks but is not upload admission.
+		// overload remains useful for CPU checks but has no GPU owner.
 		std::shared_ptr<const Mesh> sourceOwner;
 		std::uint64_t cpuPublicationGeneration = 0;
-		// These are real UINT32 raster indices, not the existing uint8 local
-		// primitive bytes. SV_VertexID decodes the token, then pulls the packed
-		// owner vertex through the existing mesh storage-buffer descriptors.
-		std::vector<std::uint32_t> indices;
-		// Prefix offsets translate the exact selected meshlet span to a native
-		// index range, even when a selected LOD is only part of an authored section.
+		// Prefix corner counts validate any selected meshlet range without
+		// generating another index stream. The GPU reads packed meshlet data.
 		std::vector<std::uint32_t> firstIndexByMeshlet;
 		std::vector<IndexedCornerSection> sections;
 		bool operator==(const IndexedCornerGeometry&) const = default;
@@ -43,7 +39,7 @@ namespace TerraEngine::Renderer::Vulkan
 	// All three corners carry the same primitive identity without requiring
 	// geometryShader or a fragment-stage SV_PrimitiveID input. Failure preserves
 	// the previous output token, including when the uint64 intermediate overflows
-	// the UINT32 raster index domain.
+	// the UINT32 corner token domain.
 	[[nodiscard]] TERRAENGINE_API bool TryEncodeIndexedCornerToken(
 		std::uint32_t meshletIndex, std::uint32_t primitiveIndex,
 		std::uint32_t corner, std::uint32_t& output) noexcept;
@@ -55,8 +51,8 @@ namespace TerraEngine::Renderer::Vulkan
 
 	// Reads only the caller's immutable Mesh. No ObjectManager, resource manager,
 	// GPU object, or live scene is accessed. A worker may prepare this owned result;
-	// the protected uploader must retain the exact Mesh owner/publication and
-	// publish its INDEX_BUFFER only after the complete upload succeeds.
+	// the protected boundary retains the exact Mesh owner/publication before
+	// making its packed meshlet data available to compatibility mesh draws.
 	// This validates topology/addressability, not material/deformation/MSAA
 	// capability. Rejection or allocation failure never changes the prior output.
 	[[nodiscard]] TERRAENGINE_API bool TryBuildIndexedCornerGeometry(

@@ -1,7 +1,5 @@
-// Genuine indexed-raster vertex assembly for ordinary Default owner meshes.
-// The uint32 index buffer contains corner tokens, not owner vertex indices:
-// ((meshletIndex * 124 + primitiveIndex) * 3 + corner). Native preparation must
-// validate the complete indexed slice and call vkCmdDrawIndexed with vertexOffset0.
+// Compatibility raster for ordinary Default owner meshes. Mesh groups reuse
+// the validated corner token ABI, including the stable primitive identity.
 #pragma pack_matrix(column_major)
 
 // Reuse the exact installed surface/push ABI without compiling another fragment
@@ -97,7 +95,7 @@ float3 IndexedTransformNormal(float3 value)
 	return normalize(value.x*normalAxisX+value.y*normalAxisY+value.z*normalAxisZ);
 }
 
-DefaultIndexedVertexOutput main(uint cornerToken : SV_VertexID)
+DefaultIndexedVertexOutput PullCorner(uint cornerToken)
 {
 	uint stable=cornerToken/3u,meshletIndex=stable/124u,primitiveIndex=stable%124u,corner=cornerToken%3u;
 	DefaultIndexedVertexOutput rejected=RejectedIndexedVertex(stable);
@@ -170,4 +168,39 @@ DefaultIndexedVertexOutput main(uint cornerToken : SV_VertexID)
 	output.surface.objectIdentity=uint4(0,0,0,0);
 	output.stablePrimitiveId=stable;
 	return output;
+}
+
+
+// A meshlet is partitioned into eight 16-triangle ranges. Each group emits
+// at most 48 vertices and retains the previous triangle/corner order.
+struct IndexedMeshPrimitive
+{
+	nointerpolation uint stablePrimitiveId : TEXCOORD6;
+};
+[outputtopology("triangle")]
+[numthreads(16, 1, 1)]
+void main(uint lane : SV_GroupIndex, uint3 group : SV_GroupID,
+	out vertices TerraSurfaceInput vertices[48], out indices uint3 triangles[16],
+	out primitives IndexedMeshPrimitive primitives[16])
+{
+	uint physicalCount, stride;
+	indexedMeshlets.GetDimensions(physicalCount, stride);
+	const uint meshlet = SceneUniforms.virtualMeshletOffset + group.x / 8u;
+	const uint first = (group.x % 8u) * 16u;
+	uint count = 0u;
+	if(meshlet >= SceneUniforms.virtualMeshletOffset && meshlet < physicalCount && stride == 16u
+		&& meshlet - SceneUniforms.virtualMeshletOffset < SceneUniforms.virtualMeshletCount)
+	{
+		const uint trianglesInMeshlet = min(indexedMeshlets[meshlet].primitiveIndexCount / 3u, 124u);
+		if(first < trianglesInMeshlet) count = min(16u, trianglesInMeshlet - first);
+	}
+	SetMeshOutputCounts(count * 3u, count);
+	if(lane >= count) return;
+	const uint base = (meshlet * 124u + first + lane) * 3u;
+	const uint outputBase = lane * 3u;
+	[unroll]
+	for(uint corner = 0u; corner < 3u; ++corner)
+		vertices[outputBase + corner] = PullCorner(base + corner).surface;
+	triangles[lane] = uint3(outputBase, outputBase + 1u, outputBase + 2u);
+	primitives[lane].stablePrimitiveId = base / 3u;
 }

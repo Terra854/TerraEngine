@@ -4,6 +4,7 @@
 
 #include "AssetDatabase.h"
 #include "ModelPackagePrivatePaths.h"
+#include "ShaderSourceTemplates.h"
 #include "ThreadPool/ThreadPool.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "Engine/Core/Logger/Logger.h"
@@ -629,6 +630,9 @@ namespace {
 		}
 		if(RuntimeAssetTypeForCookedPostProcessImporter(metadata.importerName))
 			return CheckCookedPostProcessSource(buildRoot / metadata.compiledPath, metadata.importerName, metadata.guid).Passed();
+		if (metadata.importerName == TerraEngine::Editor::Assets::kShaderSourceSetImporter)
+			return TerraEngine::Editor::Assets::ShaderSourceSetOutputIsCurrent(
+				TerraEngine::Editor::Assets::FindShaderSourceSet(absSourcePath), buildRoot / metadata.compiledPath);
 		return std::filesystem::exists(buildRoot / metadata.compiledPath);
 	}
 
@@ -1895,6 +1899,8 @@ bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) con
 		|| importerName == "MeshImporter"
 		|| importerName == "AudioClipImporter"
 		|| importerName == "ShaderImporter"
+		|| importerName == TerraEngine::Editor::Assets::kShaderSourceSetImporter
+		|| importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter
 		|| RuntimeAssetTypeForCookedPostProcessImporter(importerName).has_value()
 		|| importerName == "PhysicsColliderRecipeImporter"
 		|| RuntimeAssetTypeForCookedAnimationImporter(importerName).has_value()
@@ -2042,6 +2048,19 @@ void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus st
 		}
 	} else if (status == FileStatus::Erased) {
 		RemoveAsset(path);
+	}
+
+	// A stage can include another stage, and every stage can include the
+	// bundle's headers. Queue the other stages through the import executor.
+	const auto sourceSet = TerraEngine::Editor::Assets::FindShaderSourceSet(path);
+	if (sourceSet.empty() || (extension != ".hlsl" && extension != ".hlsli")) return;
+	std::error_code error;
+	for (std::filesystem::directory_iterator entry(sourceSet / "Default", error), end;
+		!error && entry != end; entry.increment(error)) {
+		if (entry->path() != path && TerraEngine::Editor::Assets::GetShaderSourceSetStage(entry->path())
+			&& entry->is_regular_file(error)) {
+			ImportAssetWithProgress(entry->path(), status != FileStatus::Created);
+		}
 	}
 }
 
@@ -2197,6 +2216,16 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	// on disk so inspector labels and meta persistence follow asset renames.
 	metadata.sourcePath = std::filesystem::relative(absSourcePath, assetRoot);
 	metadata.importerName = importerName;
+	const auto* compatibleStage = TerraEngine::Editor::Assets::FindCompatibleShaderSlot(absSourcePath);
+	const char* variantVersionKey = !compatibleStage ? nullptr
+		: compatibleStage->stage == ShaderStage::Fragment ? "surfacePickingVariant"
+		: compatibleStage->stage == ShaderStage::Mesh ? "surfaceMeshMotionVariant" : nullptr;
+	if(variantVersionKey && (!metadata.settings.contains(variantVersionKey) || metadata.settings[variantVersionKey] != 1)) {
+		// Recook existing stages to add the picking or temporal motion code.
+		// The updated stamp is saved only after a successful compile.
+		metadata.settings[variantVersionKey] = 1;
+		needsImport = true;
+	}
 	if (RuntimeAssetTypeForCookedAnimationImporter(importerName))
 	{
 		// A cooked envelope owns its durable identity. New loose imports adopt that
@@ -2257,6 +2286,8 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	if (metadata.importerName == "MeshImporter" || TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) compiledRelativePath.replace_extension(".temf");
 	else if (metadata.importerName == "TextureImporter") compiledRelativePath.replace_extension(".tetf");
 	else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
+	else if (metadata.importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter) compiledRelativePath.replace_extension(".tspf");
+	else if (metadata.importerName == TerraEngine::Editor::Assets::kShaderSourceSetImporter) compiledRelativePath.replace_extension(".spv");
 	else if (metadata.importerName == "MaterialImporter") compiledRelativePath.replace_extension(".tmat");
 	else if (metadata.importerName == "PhysicsColliderRecipeImporter") compiledRelativePath.replace_extension(".tepcoll");
 	// Source media keeps its .meta UUID across move, rename, and reimport while
@@ -2315,6 +2346,7 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 
 				if (!compiled) {
 					TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << absSourcePath);
+					if(variantVersionKey) return;
 				}
 			}
 		}
@@ -2590,6 +2622,26 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 			// buffers invalid before submit. The renderer/resource residency path
 			// owns descriptor-safe retirement once a later frame observes the new
 			// asset revision.
+			}
+		}
+	}
+
+	// Publish collections by their own GUID. A shader save reloads only the
+	// collections that reference that source, retaining the last good owner if
+	// a newly compiled replacement fails its runtime interface checks.
+	if (metadata.importerName == TerraEngine::Editor::Assets::kShaderCollectionImporter) {
+		(void)ResourceManager::Instance().LoadAuthoredShaderCollectionAsync(metadata.guid, buildRoot / metadata.compiledPath, buildRoot);
+	} else if (needsImport && metadata.importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter) {
+		const auto* slot = TerraEngine::Editor::Assets::FindCompatibleShaderSlot(absSourcePath);
+		for (const auto& [path, collection] : assets) {
+			if (!slot || collection.importerName != TerraEngine::Editor::Assets::kShaderCollectionImporter) continue;
+			std::ifstream source(path);
+			const auto document = nlohmann::json::parse(source, nullptr, false);
+			if (!document.is_object()) continue;
+			const auto reference = document.find(slot->key);
+			if (reference != document.end() && reference->is_string()
+				&& std::filesystem::u8path(reference->get<std::string>()) == metadata.sourcePath) {
+				(void)ResourceManager::Instance().LoadAuthoredShaderCollectionAsync(collection.guid, buildRoot / collection.compiledPath, buildRoot);
 			}
 		}
 	}
@@ -3666,7 +3718,17 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (TerraEngine::AssetPipeline::IsModelPackageSourceExtension(filePath)) return TerraEngine::AssetPipeline::GetModelPackageImporterName(filePath);
 	if (IsSupportedMeshSourceExtension(filePath)) return "MeshImporter";
 	if (IsSupportedTextureSourceExtension(filePath)) return "TextureImporter";
-	if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
+	if (ext == ".hlsl" || ext == ".glsl") {
+		if (TerraEngine::Editor::Assets::FindCompatibleShaderSlot(filePath))
+			return TerraEngine::Editor::Assets::kCompatibleShaderImporter;
+		// Editable default stages compile to SPIR-V for diagnostics. Ordinary
+		// project shaders continue through runtime shader admission.
+		if (!TerraEngine::Editor::Assets::FindShaderSourceSet(filePath).empty())
+			return TerraEngine::Editor::Assets::GetShaderSourceSetStage(filePath)
+				? TerraEngine::Editor::Assets::kShaderSourceSetImporter : "GenericImporter";
+		return "ShaderImporter";
+	}
+	if (ext == TerraEngine::Resource::kShaderCollectionExtension) return TerraEngine::Editor::Assets::kShaderCollectionImporter;
 
 	if (ext == ".tmat") return "MaterialImporter";
 	if (ext == ".tepostprofile") return "PostProcessProfileImporter";
@@ -4319,14 +4381,25 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
 	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
 	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
-	const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
+	// Append to the native path so Unicode project and shader names survive.
+	auto stagedCompiledPath = fullCompiledPath;
+	stagedCompiledPath += "." + UuidToString(metadata.guid) + ".tmp";
 	const std::filesystem::path stagedShaderBytecodePath = std::filesystem::path(stagedCompiledPath).replace_extension(".spv");
 	std::error_code cleanupError;
 	std::filesystem::remove(stagedCompiledPath, cleanupError);
 	std::filesystem::remove(stagedShaderBytecodePath, cleanupError);
 
+	const bool sourceSet = metadata.importerName == TerraEngine::Editor::Assets::kShaderSourceSetImporter;
+	const auto* compatibleSlot = metadata.importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter
+		? TerraEngine::Editor::Assets::FindCompatibleShaderSlot(fullSourcePath) : nullptr;
 	std::string stage = "vs";
-	if (metadata.settings.contains("stage")) {
+	if (compatibleSlot) {
+		stage = compatibleSlot->profile;
+	} else if (sourceSet) {
+		const char* sourceStage = TerraEngine::Editor::Assets::GetShaderSourceSetStage(fullSourcePath);
+		if (!sourceStage) return false;
+		stage = sourceStage;
+	} else if (metadata.settings.contains("stage")) {
 		stage = metadata.settings["stage"];
 	} else {
 		const std::string filename = fullSourcePath.filename().string();
@@ -4345,8 +4418,8 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 
 	// Fullscreen shaders opt in explicitly. Unknown/non-string values fail closed
 	// instead of weakening the ordinary authored surface push/binding policy.
-	ShaderUse shaderUse = ShaderUse::Surface;
-	if (metadata.settings.contains("shaderUse")) {
+	ShaderUse shaderUse = compatibleSlot ? ShaderUse::CompatibleSurface : (sourceSet ? ShaderUse::SourceSet : ShaderUse::Surface);
+	if (!sourceSet && !compatibleSlot && metadata.settings.contains("shaderUse")) {
 		const auto& value = metadata.settings["shaderUse"];
 		if (!value.is_string() || (value != "surface" && value != "post-process")) {
 			TERRAENGINE_LOG(LogLevel::Error, "ShaderImporter shaderUse must be surface or post-process: " << fullSourcePath); return false;
@@ -4367,6 +4440,8 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 		+ L" --stage " + QuoteCommandLineArgument(stage)
 		+ L" --entry " + QuoteCommandLineArgument(entry);
 	if (shaderUse == ShaderUse::PostProcess) commandLine += L" --shader-use post-process";
+	if (shaderUse == ShaderUse::SourceSet) commandLine += L" --shader-use source-set";
+	if (shaderUse == ShaderUse::CompatibleSurface) commandLine += L" --shader-use compatible-surface";
 	if (!target.empty()) {
 		commandLine += L" --target " + QuoteCommandLineArgument(target);
 	}
@@ -4396,6 +4471,7 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 #else
 	std::filesystem::path dxcPath = toolsDir / "dxc";
 #endif
+	if (sourceSet || compatibleSlot) dxcPath = GetEditorExecutableDirectory() / "dxc";
 	if (!CompileShader(fullSourcePath, stagedCompiledPath, stage, target, entry, dxcPath, shaderUse)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
@@ -4520,7 +4596,9 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 		return CompileTextureWithProcess(metadata, progressState);
 	} 
 
-	else if (metadata.importerName == "ShaderImporter") {
+	else if (metadata.importerName == "ShaderImporter"
+		|| metadata.importerName == TerraEngine::Editor::Assets::kShaderSourceSetImporter
+		|| metadata.importerName == TerraEngine::Editor::Assets::kCompatibleShaderImporter) {
 		return CompileShaderWithProcess(metadata, progressState);
 	} 
 	else if(metadata.importerName == "PhysicsColliderRecipeImporter") {
@@ -4603,7 +4681,8 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 		}
 		return true;
 	}
-	else if (metadata.importerName == "MaterialImporter") {
+	else if (metadata.importerName == "MaterialImporter"
+		|| metadata.importerName == TerraEngine::Editor::Assets::kShaderCollectionImporter) {
 		std::error_code ec;
 		std::filesystem::copy_file(fullSourcePath, fullCompiledPath, std::filesystem::copy_options::overwrite_existing, ec);
 		return !ec;
@@ -4677,7 +4756,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 
 		else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; knownResource = true; }
 
-		else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; knownResource = true; }
+		else if (metadata.importerName == "ShaderImporter" || metadata.importerName == TerraEngine::Editor::Assets::kShaderCollectionImporter) { type = AssetType::ShaderCollection; knownResource = true; }
 	else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; knownResource = true; }
 	else if (metadata.importerName == "TerrainImporter") { type = AssetType::Terrain; knownResource = true; }
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"

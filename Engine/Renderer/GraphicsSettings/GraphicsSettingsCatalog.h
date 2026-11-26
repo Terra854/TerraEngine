@@ -37,7 +37,6 @@ namespace TerraEngine::Renderer::GraphicsSettings
 		std::uint32_t spatialAAModeMask = 1u;
 		// These flags are independent native implementation qualifications, not
 		// physical-device feature guesses. Unimplemented variants stay unavailable.
-		bool indexedRasterSupported = false;
 		bool msaa4Supported = false;
 		bool taaSupported = false;
 		bool temporalUpscalingSupported = false;
@@ -60,7 +59,6 @@ namespace TerraEngine::Renderer::GraphicsSettings
 	{
 		GraphicsAntiAliasingMode antiAliasing = GraphicsAntiAliasingMode::Off;
 		GraphicsUpscalingMode upscaling = GraphicsUpscalingMode::Off;
-		GraphicsGeometryRasterMode raster = GraphicsGeometryRasterMode::Automatic;
 		float internalScale = 1.0f;
 		float sharpening = 0.0f;
 		std::uint32_t sampleCount = 1u;

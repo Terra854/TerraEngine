@@ -172,7 +172,12 @@ bool VulkanContext::Impl::PrepareIndexedRasterView(
 			if (!materialOwner || materialOwner->publicationGeneration == 0
 				|| materialOwner->header.textureCount > materialOwner->textures.size())
 				return reject("Indexed view material publication is unavailable or incomplete.");
-			const auto collectionId = materialOwner->header.shaderCollectionId;
+			auto collectionId = materialOwner->header.shaderCollectionId;
+			if (collectionId != TerraEngine::EMPTY_UUID && collectionId != defaultId && collectionId != defaultTaskId) {
+				// An empty authored collection inherits the built-in indexed pipeline.
+				const auto owner = resources.AcquireShaderCollectionSnapshot(collectionId);
+				if (owner && owner->inheritsAllDefaultStages) collectionId = defaultId;
+			}
 			if ((collectionId != TerraEngine::EMPTY_UUID && collectionId != defaultId && collectionId != defaultTaskId)
 				|| materialOwner->header.alphaMode > static_cast<std::uint32_t>(AlphaMode::Mask)
 				|| (materialOwner->header.flags & TerrainLayerBlend) != 0)
@@ -231,9 +236,8 @@ bool VulkanContext::Impl::PrepareIndexedRasterView(
 			const auto gpu = meshCache.find(request.id);
 			if (gpu != meshCache.end() && gpu->second.sourceOwner == request.owner
 				&& gpu->second.cpuPublicationGeneration == request.owner->publicationGeneration
-				&& gpu->second.indexedCornerBuffer.buffer != VK_NULL_HANDLE && gpu->second.indexedAllocationGeneration != 0
+				&& gpu->second.indexedAllocationGeneration != 0
 				&& gpu->second.allocationGeneration != 0 && gpu->second.indexedTopology
-				&& gpu->second.indexedCornerBuffer.size >= static_cast<VkDeviceSize>(gpu->second.indexedTopology->indices.size()) * sizeof(std::uint32_t)
 				&& IndexedRangesMatch(request, *gpu->second.indexedTopology))
 			{
 				const auto obsolete = state.jobs.find(request.id);

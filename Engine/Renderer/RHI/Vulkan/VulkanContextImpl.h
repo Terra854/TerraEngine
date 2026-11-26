@@ -176,9 +176,8 @@ struct VulkanMesh {
 	VulkanBuffer meshMorphDeltaBuffer;
 	VulkanBuffer meshDecodeInfoBuffer;
 	VulkanBuffer indexBuffer;
-	// Optional true raster index stream. The existing indexBuffer above remains
-	// packed uint8 local topology storage for task/mesh shaders.
-	VulkanBuffer indexedCornerBuffer;
+	// Compatibility mesh replay retains the validated CPU topology owner.
+	// The packed meshlet buffers above supply all GPU geometry.
 	std::shared_ptr<const TerraEngine::Renderer::Vulkan::IndexedCornerGeometry> indexedTopology;
 	std::uint64_t indexedAllocationGeneration = 0;
 
@@ -2219,6 +2218,14 @@ struct VulkanContext::Impl {
 	VkPipeline sdfTextPipeline = VK_NULL_HANDLE;
 	VkPipelineLayout sdfTextPipelineLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout uiFontDescriptorSetLayout = VK_NULL_HANDLE;
+	// Each live UI upload slot owns immutable mesh input descriptors.
+	VkDescriptorSetLayout uiMeshInputLayout = VK_NULL_HANDLE;
+	VkDescriptorPool uiMeshInputPool = VK_NULL_HANDLE;
+	struct UIMeshUpload
+	{
+		VulkanBuffer buffer;
+		VkDescriptorSet descriptor = VK_NULL_HANDLE;
+	};
 	VkDescriptorSet uiFontDescriptorSet = VK_NULL_HANDLE;
 	VulkanImage uiFontAtlasImage{};
 	int uiFontAtlasWidth = 0;
@@ -2234,9 +2241,9 @@ struct VulkanContext::Impl {
 	// Runtime UI vertices are rewritten by the CPU. Index by frame-fence slot
 	// and render snapshot so another view in the same frame cannot overwrite
 	// an earlier command. Empty entries allocate no GPU storage.
-	std::vector<VulkanBuffer> uiStaticVertexBuffers;
+	std::vector<UIMeshUpload> uiStaticVertexBuffers;
 	VulkanBuffer uiInstanceBuffer{};
-	std::vector<VulkanBuffer> uiSdfVertexBuffers;
+	std::vector<UIMeshUpload> uiSdfVertexBuffers;
 
 	// Optional pass-owned HUD variants avoid reusing incompatible legacy pipelines.
 	void CreateUIPipelines(VkRenderPass renderPass, TerraEngine::Renderer::Vulkan::PostProcessPassResources* outputs = nullptr);

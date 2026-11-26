@@ -25,7 +25,7 @@ namespace TerraEngine::Tests {
 			// Authored source directories also contain Shaders. Only an installed
 			// compiled closure can initialize real GPU pipelines for these draws.
 			for(const auto* relative : {"Shaders/Default.mesh.tspf", "Shaders/Default.frag.tspf",
-				"Shaders/Default.task.tspf", "Shaders/UI/UI_Instanced.vert.spv", "Shaders/UI/UI_Instanced.frag.spv"}) {
+				"Shaders/Default.task.tspf", "Shaders/UI/UI_Overlay.mesh.spv", "Shaders/UI/UI_Instanced.frag.spv"}) {
 				if(!std::filesystem::is_regular_file(root / relative) || std::filesystem::file_size(root / relative) == 0) return false;
 			}
 			return true;

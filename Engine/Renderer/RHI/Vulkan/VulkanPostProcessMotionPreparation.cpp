@@ -47,11 +47,6 @@ namespace TerraEngine::Renderer::Vulkan
 				|| state.presentationIndex>=root.presentationInputs.size() || state.presentationIndex>=root.views.size()) return false;
 			const auto& input=root.presentationInputs[state.presentationIndex]; const auto& selection=root.views[state.presentationIndex];
 			if(!input.graphicsSettings) return false;
-			const auto raster=std::find_if(input.graphicsSettings->values.begin(),input.graphicsSettings->values.end(),[](const auto& value) {
-				return value.id==GraphicsSettings::GraphicsSettingId::GeometryRasterMode;
-			});
-			if(raster==input.graphicsSettings->values.end() || !std::holds_alternative<std::uint32_t>(raster->value)
-				|| std::get<std::uint32_t>(raster->value)!=1u) return false;
 			// Runtime publications can leave the output extent implicit. In that
 			// case the consumed settings carry the exact native output extent.
 			const bool matchesNativeRuntimeExtent = input.output.kind == RenderOutputKind::MainRuntimeView

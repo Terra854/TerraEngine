@@ -7,6 +7,7 @@
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Resource/ShaderPackage.h"
+#include "Resource/ShaderCollectionAsset.h"
 
 #include <algorithm>
 #include <array>
@@ -209,7 +210,7 @@ namespace
 		const ShaderDecodeDiagnostics& diagnostics,
 		std::span<const std::uint8_t> fileBytes,
 		std::size_t knownPayloadEnd,
-		std::optional<ShaderProvenanceBackendVariantExtension>& provenance)
+		Shader& shader)
 	{
 		if(knownPayloadEnd >= fileBytes.size())
 		{
@@ -246,7 +247,27 @@ namespace
 			return diagnostics.Fail("TSPV extension is invalid");
 		}
 
-		provenance = parsed;
+		shader.provenance = parsed;
+		const auto trailing = fileBytes.subspan(knownPayloadEnd + sizeof(extensionHeader) + extensionHeader.payloadSize);
+		if(trailing.size() >= sizeof(extensionHeader)) {
+			std::memcpy(&extensionHeader, trailing.data(), sizeof(extensionHeader));
+			const bool identity = extensionHeader.magic == kShaderIdentityExtensionMagicValue;
+			const bool meshMotion = extensionHeader.magic == kShaderMeshMotionExtensionMagicValue;
+			if(identity || meshMotion) {
+				// Copy into word-aligned storage for VkShaderModuleCreateInfo.
+				const auto stage = identity ? ShaderStage::Fragment : ShaderStage::Mesh;
+				if(shader.reflection.source.stage != static_cast<std::uint32_t>(stage)
+					|| extensionHeader.payloadSize < 5u * sizeof(std::uint32_t)
+					|| extensionHeader.payloadSize % sizeof(std::uint32_t) != 0u
+					|| extensionHeader.payloadSize != trailing.size() - sizeof(extensionHeader))
+					return diagnostics.Fail("Shader variant extension size or stage is invalid");
+				auto& bytecode = identity ? shader.identityBytecode : shader.meshMotionBytecode;
+				bytecode.resize(extensionHeader.payloadSize / sizeof(std::uint32_t));
+				std::memcpy(bytecode.data(), trailing.data() + sizeof(extensionHeader), extensionHeader.payloadSize);
+				if(bytecode.front() != 0x07230203u)
+					return diagnostics.Fail("Shader variant extension is missing SPIR-V magic");
+			}
+		}
 		return true;
 	}
 
@@ -438,7 +459,7 @@ namespace
 			static_cast<std::size_t>(header.stageOutputCount) * sizeof(StageIOAttribute));
 		IncludeRange(header.stringTableOffset, header.stringTableSize);
 		if(!LoadShaderProvenance(diagnostics, fileBytes, knownPayloadEnd,
-			shader->provenance))
+			*shader))
 		{
 			return nullptr;
 		}
@@ -453,10 +474,68 @@ namespace
 
 	// Existing resource loads retain their cache/publication and geometry policy.
 	// Only the shared byte parser is reused by detached package consumers.
+	// Reflection omits mesh execution modes, including the workgroup size the
+	// CPU uses for task batching. Compare literal modes without module-local IDs.
+	std::optional<std::vector<std::vector<std::uint32_t>>> ReadGeometryExecutionModes(const Shader& shader)
+	{
+		constexpr std::size_t headerWords = 5;
+		constexpr std::uint32_t opExecutionMode = 16, opExecutionModeId = 331;
+		if(shader.bytecode.size() < headerWords * sizeof(std::uint32_t)
+			|| shader.bytecode.size() % sizeof(std::uint32_t) != 0) return std::nullopt;
+		std::vector<std::uint32_t> words(shader.bytecode.size() / sizeof(std::uint32_t));
+		std::memcpy(words.data(), shader.bytecode.data(), shader.bytecode.size());
+		std::vector<std::vector<std::uint32_t>> modes;
+		for(std::size_t offset = headerWords; offset < words.size();) {
+			const auto count = words[offset] >> 16;
+			const auto opcode = words[offset] & 0xffff;
+			if(count == 0 || count > words.size() - offset || opcode == opExecutionModeId) return std::nullopt;
+			if(opcode == opExecutionMode) {
+				if(count < 3) return std::nullopt;
+				modes.emplace_back(words.data() + offset + 2, words.data() + offset + count);
+			}
+			offset += count;
+		}
+		std::ranges::sort(modes);
+		if(modes.empty()) return std::nullopt;
+		return modes;
+	}
+
 	std::unique_ptr<Shader> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto bytes = manager.ReadFileBytes(resolvedPath);
 		auto shader = DecodeShaderBytes(bytes, {resolvedPath, nullptr, true});
+		if(shader && TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(resolvedPath)) {
+			// Compare the replacement's reflected interface against the installed
+			// stage. Shader implementation changes can reuse these exact bindings.
+			for(const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
+				if(shader->reflection.source.stage != static_cast<std::uint32_t>(slot.stage)) continue;
+				const auto referencePath = manager.ResolveEngineAssetPath(std::filesystem::path("Shaders") / slot.defaultPackage);
+				const auto reference = DecodeShaderBytes(manager.ReadFileBytes(referencePath), {referencePath, nullptr, true});
+				const auto sameIo = [](const auto& a, const auto& b) {
+					return a.location == b.location && a.componentCount == b.componentCount && a.componentType == b.componentType;
+				};
+				bool geometryModesMatch = true;
+				if(reference && (slot.stage == ShaderStage::Task || slot.stage == ShaderStage::Mesh)) {
+					const auto expected = ReadGeometryExecutionModes(*reference);
+					geometryModesMatch = expected && ReadGeometryExecutionModes(*shader) == expected;
+				}
+				if(reference && geometryModesMatch && shader->binary.format == reference->binary.format
+					&& std::ranges::equal(shader->inputs, reference->inputs, sameIo)
+					&& std::ranges::equal(shader->outputs, reference->outputs, sameIo)
+					&& std::ranges::equal(shader->descriptorSets, reference->descriptorSets, [](const auto& a, const auto& b) {
+						return a.setIndex == b.setIndex && a.firstBinding == b.firstBinding && a.bindingCount == b.bindingCount;
+					})
+					&& std::ranges::equal(shader->descriptorBindings, reference->descriptorBindings, [](const auto& a, const auto& b) {
+						return a.binding == b.binding && a.type == b.type && a.arrayCount == b.arrayCount && a.visibility == b.visibility;
+					})
+					&& std::ranges::equal(shader->pushConstants, reference->pushConstants, [](const auto& a, const auto& b) {
+						return a.offsetBytes == b.offsetBytes && a.sizeBytes == b.sizeBytes && a.visibility == b.visibility;
+					})) return shader;
+				break;
+			}
+			TERRAENGINE_LOG(LogLevel::Error, "Replacement shader does not match the default stage interface: " << resolvedPath);
+			return nullptr;
+		}
 		if(shader && !ValidateRuntimeGeometryContract(*shader, resolvedPath)) return nullptr;
 		return shader;
 	}
@@ -625,17 +704,23 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderAsync(const std
 }
 
 ResourceManager::RequestPtr ResourceManager::AdmitShaderDependency(
-	const std::filesystem::path& path, const RequestPtr& consumer)
+	const std::filesystem::path& path, const RequestPtr& consumer, bool reload)
 {
 	if (!IsCompiledShaderPath(path)) return {};
+	const std::string mapKey = std::to_string(static_cast<std::uint32_t>(ResourceKind::Shader))
+		+ ":" + NormalizeKey(path);
+	if (reload) {
+		std::lock_guard gate(m_PublicationGate);
+		const auto pending = m_Requests.find(mapKey);
+		// Collections queued together reuse an already pending stage refresh.
+		if (pending != m_Requests.end() && !pending->second->terminal) reload = false;
+	}
 	// A collection owns a consumer lease rather than a direct request. Losing
 	// that parent's authority therefore cannot leave private stage work alive.
 	LoadOrSchedule<Shader>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadShaderFile(*this, resolvedPath);
-	}, false, false, false, consumer);
+	}, false, reload, false, consumer);
 	std::lock_guard gate(m_PublicationGate);
-	const std::string mapKey = std::to_string(static_cast<std::uint32_t>(ResourceKind::Shader))
-		+ ":" + NormalizeKey(path);
 	const auto found = m_Requests.find(mapKey);
 	return found == m_Requests.end() ? RequestPtr{} : found->second;
 }

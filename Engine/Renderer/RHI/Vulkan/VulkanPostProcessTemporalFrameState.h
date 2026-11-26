@@ -8,12 +8,14 @@
 namespace TerraEngine::Renderer::Vulkan
 {
 	struct PostProcessMotionBuffers;
+	struct MeshMotionPositionOwner;
 	struct TemporalViewFramePlan
 	{
 		PostProcessHistoryRecording provenance;
 		std::array<TemporalHistorySlotState, 4> layouts{};
 		std::optional<TemporalAcceptedHistory> previous;
 		std::shared_ptr<const PostProcessMotionMeshOwners> previousMeshes;
+		std::shared_ptr<const MeshMotionPositionOwner> previousMeshMotion;
 		std::uint32_t writeSlot = 0u;
 		std::uint32_t readSlot = 0u;
 	};
@@ -68,6 +70,7 @@ namespace TerraEngine::Renderer::Vulkan
 		std::array<std::uint64_t, 3> completed{};
 		std::optional<TemporalAcceptedHistory> accepted;
 		std::shared_ptr<const PostProcessMotionMeshOwners> acceptedMeshes;
+		std::shared_ptr<const MeshMotionPositionOwner> acceptedMeshMotion;
 		std::uint64_t generation = 0u;
 	};
 }

@@ -96,6 +96,8 @@ namespace TerraEngine::Renderer {
 		// Dithering is owned by the final camera composite.
 		bool outputDithering = false;
 		bool motionBlur = false;
+		// These effects need additional mesh outputs or camera-only motion.
+		[[nodiscard]] bool RequiresEffectGeometry() const noexcept { return screenSpaceLighting || motionBlur; }
 		std::uint8_t customStages = 0u;
 		// Multisample coverage is resolved by the camera raster pass. The
 		// resulting single-sample image still needs the composition boundary.

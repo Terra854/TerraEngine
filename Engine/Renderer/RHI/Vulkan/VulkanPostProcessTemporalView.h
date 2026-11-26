@@ -5,6 +5,8 @@
 #include "VulkanPostProcessMotionPipeline.h"
 #include "VulkanPostProcessTemporalFrameState.h"
 
+struct VulkanPipeline;
+struct ShaderCollection;
 namespace TerraEngine::Renderer::Vulkan
 {
 	struct TemporalViewResources
@@ -15,7 +17,8 @@ namespace TerraEngine::Renderer::Vulkan
 		std::shared_ptr<PostProcessMotionBufferLayout> motionLayout;
 		std::shared_ptr<TemporalViewFrameState> frameState;
 		std::uint32_t resolveOutput = 0u;
-		std::vector<std::uint32_t> motionVertexShader;
+		bool meshMotion = false;
+		std::vector<std::uint32_t> compatibilityMeshShader;
 		std::vector<std::uint32_t> motionFragmentShader;
 		struct MotionVariant
 		{
@@ -23,6 +26,7 @@ namespace TerraEngine::Renderer::Vulkan
 			VkCullModeFlags cullMode = 0u;
 			VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 			std::shared_ptr<MotionRasterPipeline> owner;
+			std::shared_ptr<const ShaderCollection> meshCollection;
 		};
 		std::vector<MotionVariant> variants;
 	};
@@ -39,11 +43,13 @@ namespace TerraEngine::Renderer::Vulkan
 	std::shared_ptr<TemporalViewResources> PrepareTemporalViewResources(
 		VkPhysicalDevice physicalDevice, PostProcessTargetBundle& targets,
 		const PostProcessTargetImage& sceneColor, const PostProcessTargetImage& sceneDepth,
-		const PostProcessTargetImage& resolvedColor, bool cameraOnlyMotion, std::string& reason);
+		const PostProcessTargetImage& resolvedColor, bool cameraOnlyMotion, std::string& reason, bool mesh = false);
 
 	const MotionRasterPipeline* PrepareTemporalMotionVariant(TemporalViewResources& view,
 		std::array<VkDescriptorSetLayout, 2> sourceLayouts, VkCullModeFlags cullMode,
 		VkFrontFace frontFace, VkPipelineCache cache, std::string& reason);
+	const MotionRasterPipeline* PrepareMeshTemporalMotionVariant(TemporalViewResources& view,
+		const VulkanPipeline& surface, std::string& reason);
 
 	glm::vec2 TemporalJitter(std::uint32_t phase, VkExtent2D extent) noexcept;
 	glm::mat4 ApplyTemporalJitter(glm::mat4 viewProjection, glm::vec2 jitterUV) noexcept;

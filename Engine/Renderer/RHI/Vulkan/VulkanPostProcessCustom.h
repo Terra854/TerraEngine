@@ -44,7 +44,7 @@ namespace TerraEngine::Renderer::Vulkan
 		VkPhysicalDevice physicalDevice=VK_NULL_HANDLE;
 		VkDevice device=VK_NULL_HANDLE;
 		std::shared_ptr<const PreparedPostProcessCustomPass> prepared;
-		// Exact installed PostProcessFullscreen.vert SPIR-V, entry VSMain.
+		// Exact installed fullscreen mesh SPIR-V, entry main.
 		std::span<const std::uint32_t> fullscreenVertex;
 		CustomPostProcessStage stage=CustomPostProcessStage::HdrScene;
 		CustomPostProcessDomain domain=CustomPostProcessDomain::LinearHdr;

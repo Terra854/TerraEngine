@@ -66,7 +66,7 @@ namespace TerraEngine::Tests
 			{
 				IndexedFixture fixture(narrow); IndexedCornerGeometry output; std::string reason = "previous error";
 				test.Expect(TryBuildIndexedCornerGeometry(fixture.mesh, output, reason) && reason.empty(), "Both real remap encodings prepare.");
-				test.Expect(output.cpuPublicationGeneration == 19 && output.indices == std::vector<std::uint32_t>{0, 1, 2, 372, 373, 374}, "Tokens preserve owner meshlet identity and source publication.");
+				test.Expect(output.cpuPublicationGeneration == 19 && output.firstIndexByMeshlet == std::vector<std::uint32_t>{0, 3, 6}, "Corner prefixes retain the selected meshlet ranges and source publication.");
 				test.Expect(output.sections == std::vector<IndexedCornerSection>{{3, 3, 1, 1}, {0, 6, 0, 2}}, "Each authored section gets its exact raster draw range.");
 				test.Expect(ResolveIndexedCornerRange(output, 1, 1) == IndexedCornerSection{3, 3, 1, 1}
 					&& !ResolveIndexedCornerRange(output, 1, 0) && !ResolveIndexedCornerRange(output, 1, 2),

@@ -4,8 +4,11 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 #include <array>
+#include <map>
 #include <memory>
+#include <span>
 #include <string>
+#include <tuple>
 
 namespace TerraEngine::Renderer::Vulkan
 {
@@ -26,6 +29,22 @@ namespace TerraEngine::Renderer::Vulkan
 		VmaAllocation allocation=nullptr;
 		VkDeviceSize size=0;
 	};
+	struct MeshMotionPositionOwner
+	{
+		VmaAllocator allocator = nullptr;
+		PostProcessMotionUploadBuffer positions;
+		// The key includes immutable geometry and shader generations. A changed
+		// owner leaves the previous index invalid for the whole draw.
+		using Key = std::tuple<UUID, UUID, UUID, std::uint64_t, std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t>;
+		std::map<Key, std::uint32_t> rows;
+		~MeshMotionPositionOwner();
+	};
+	struct MeshMotionDrawInput
+	{
+		MeshMotionPositionOwner::Key identity;
+		std::uint32_t firstMeshlet = 0u;
+		std::uint32_t meshletCount = 0u;
+	};
 	struct PostProcessMotionBuffers
 	{
 		VkDevice device=VK_NULL_HANDLE;
@@ -37,13 +56,21 @@ namespace TerraEngine::Renderer::Vulkan
 		// Retains actual current/accepted previous roots and CPU byte owners.
 		// This private copy contains the exact selector rows uploaded below.
 		PreparedPostProcessMotion prepared;
+		std::shared_ptr<MeshMotionPositionOwner> meshMotion;
+		std::shared_ptr<const MeshMotionPositionOwner> previousMeshMotion;
+		std::uint32_t dynamicRowStride = 0u;
 		~PostProcessMotionBuffers();
 		PostProcessMotionBuffers()=default;
 		PostProcessMotionBuffers(const PostProcessMotionBuffers&)=delete;
 		PostProcessMotionBuffers& operator=(const PostProcessMotionBuffers&)=delete;
 	};
 	[[nodiscard]] std::shared_ptr<PostProcessMotionBufferLayout> CreatePostProcessMotionBufferLayout(
-		VkDevice device,std::string& reason) noexcept;
+		VkDevice device,std::string& reason, bool mesh = false) noexcept;
+	[[nodiscard]] std::shared_ptr<PostProcessMotionBuffers> PrepareMeshMotionBuffers(
+		VkPhysicalDevice physicalDevice, VkDevice device, VmaAllocator allocator,
+		std::shared_ptr<PostProcessMotionBufferLayout> layout, PreparedPostProcessMotion prepared,
+		std::span<const MeshMotionDrawInput> draws,
+		std::shared_ptr<const MeshMotionPositionOwner> previous, std::string& reason);
 	// Parent first qualifies actual pipeline/index/mesh owners at its protected
 	// boundary, setting only the view/draw qualification bits on a private DTO.
 	// This factory never manufactures those bits or mutates immutable inputs.

@@ -237,18 +237,17 @@ namespace TerraEngine::Renderer::GraphicsSettings
 		aa.available = true;
 		aa.activation = GraphicsActivation::Rebuild;
 		aa.unavailableReason = GraphicsRequestReason::None;
-		aa.detail = "One spatial mode at native scale and one sample; every affected view prepares before publication.";
 		// Off never needs an effect pipeline. Each additional option requires its
 		// own native qualification bit; unrelated color support cannot enable AA.
 		for(std::uint32_t mode = 0; mode <= static_cast<std::uint32_t>(GraphicsAntiAliasingMode::CMAA2); ++mode)
 			if(mode == 0 || (capabilities.spatialAAModeMask & (1u << mode)) != 0) aa.options.emplace_back(mode);
-		if(capabilities.indexedRasterSupported && capabilities.msaa4Supported) aa.options.emplace_back(std::uint32_t{4});
-		if(capabilities.indexedRasterSupported && capabilities.taaSupported) aa.options.emplace_back(std::uint32_t{5});
-		aa.detail = "Spatial AA uses native single-sample output. Required MSAA/temporal variants use qualified indexed raster with VRS off.";
+		if(capabilities.msaa4Supported) aa.options.emplace_back(std::uint32_t{4});
+		if(capabilities.taaSupported) aa.options.emplace_back(std::uint32_t{5});
+		aa.detail = "4x MSAA, TAA and temporal upscaling support mesh raster with VRS off.";
 		catalog.push_back(std::move(aa));
-		const bool upscaleSupported = capabilities.indexedRasterSupported && capabilities.temporalUpscalingSupported;
+		const bool upscaleSupported = capabilities.temporalUpscalingSupported;
 		for(const auto id : {GraphicsSettingId::InternalResolutionScale, GraphicsSettingId::UpscalingMode,
-			GraphicsSettingId::UpscalingSharpness, GraphicsSettingId::GeometryRasterMode})
+			GraphicsSettingId::UpscalingSharpness})
 		{
 			GraphicsSettingDescriptor field;
 			field.id = id;
@@ -281,11 +280,9 @@ namespace TerraEngine::Renderer::GraphicsSettings
 				field.valueKind = GraphicsValueKind::Unsigned32;
 				field.defaultValue = std::uint32_t{0};
 				field.options = {std::uint32_t{0}};
-				const bool raster = id == GraphicsSettingId::GeometryRasterMode;
-				field.name = raster ? "geometry.rasterMode" : "postProcess.upscalingMode";
-				if(raster ? capabilities.indexedRasterSupported : upscaleSupported) field.options.emplace_back(std::uint32_t{1});
-				field.detail = raster ? "Automatic preserves legacy routing; Indexed selects a qualified ordinary indexed renderer."
-					: "Temporal reconstruction requires indexed raster, VRS off, half internal extent and standalone AA Off.";
+				field.name = "postProcess.upscalingMode";
+				if(upscaleSupported) field.options.emplace_back(std::uint32_t{1});
+				field.detail = "Temporal upscaling requires VRS off, half internal extent and standalone AA Off.";
 			}
 			catalog.push_back(std::move(field));
 		}
@@ -301,7 +298,7 @@ namespace TerraEngine::Renderer::GraphicsSettings
 	bool IsGraphicsAASetting(GraphicsSettingId id) noexcept
 	{
 		return id == GraphicsSettingId::AntiAliasingMode || id == GraphicsSettingId::InternalResolutionScale
-			|| id == GraphicsSettingId::UpscalingMode || id == GraphicsSettingId::UpscalingSharpness || id == GraphicsSettingId::GeometryRasterMode;
+			|| id == GraphicsSettingId::UpscalingMode || id == GraphicsSettingId::UpscalingSharpness;
 	}
 	GraphicsRequestReason ValidateGraphicsAASettingValue(const GraphicsSettingDescriptor& descriptor, const GraphicsValue& value) noexcept
 	{
@@ -332,13 +329,12 @@ namespace TerraEngine::Renderer::GraphicsSettings
 		bool vrs = false;
 		for(const auto& field : values)
 		{
-			if(field.id == GraphicsSettingId::AntiAliasingMode || field.id == GraphicsSettingId::UpscalingMode || field.id == GraphicsSettingId::GeometryRasterMode)
+			if(field.id == GraphicsSettingId::AntiAliasingMode || field.id == GraphicsSettingId::UpscalingMode)
 			{
 				const auto* mode = std::get_if<std::uint32_t>(&field.value);
 				if(!mode || *mode > (field.id == GraphicsSettingId::AntiAliasingMode ? 5u : 1u)) return GraphicsRequestReason::InvalidValue;
 				if(field.id == GraphicsSettingId::AntiAliasingMode) next.antiAliasing = static_cast<GraphicsAntiAliasingMode>(*mode);
-				else if(field.id == GraphicsSettingId::UpscalingMode) next.upscaling = static_cast<GraphicsUpscalingMode>(*mode);
-				else next.raster = static_cast<GraphicsGeometryRasterMode>(*mode);
+				else next.upscaling = static_cast<GraphicsUpscalingMode>(*mode);
 			}
 			else if(field.id == GraphicsSettingId::InternalResolutionScale || field.id == GraphicsSettingId::UpscalingSharpness)
 			{
@@ -354,14 +350,13 @@ namespace TerraEngine::Renderer::GraphicsSettings
 			}
 		}
 		if(next.internalScale <= 0.0f || next.sharpening < 0.0f || next.sharpening > 1.0f) return GraphicsRequestReason::InvalidValue;
-		const bool indexed = next.raster == GraphicsGeometryRasterMode::Indexed;
 		const bool upscale = next.upscaling == GraphicsUpscalingMode::Temporal;
 		const bool coverage = next.antiAliasing == GraphicsAntiAliasingMode::MSAA;
 		const bool temporal = next.antiAliasing == GraphicsAntiAliasingMode::TAA;
 		// Qualify the complete tuple before deriving any new effective metadata.
 		// Additional renderer/VRS combinations must be implemented and qualified
 		// explicitly before expanding these initial supported configurations.
-		if((indexed && vrs) || ((coverage || temporal || upscale) && (!indexed || vrs))) return GraphicsRequestReason::Unsupported;
+		if(vrs && (coverage || temporal || upscale)) return GraphicsRequestReason::Unsupported;
 		if(upscale ? (next.antiAliasing != GraphicsAntiAliasingMode::Off || next.internalScale != 0.5f)
 			: (next.internalScale != 1.0f || next.sharpening != 0.0f)) return GraphicsRequestReason::Unsupported;
 		next.sampleCount = coverage ? 4u : 1u;

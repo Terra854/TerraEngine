@@ -169,15 +169,13 @@ namespace TerraEngine::Renderer::Vulkan
 		bool CreatePipeline(TonePass& pass, bool lookups)
 		{
 			ShaderModules shaders{pass.device};
-			shaders.vertex = LoadModule(pass.device, "Shaders/PostProcess/PostProcessFullscreen.vert.spv");
+			shaders.vertex = LoadModule(pass.device, "Shaders/PostProcess/PostProcessFullscreen.mesh.spv");
 			shaders.fragment = LoadModule(pass.device, lookups ? "Shaders/PostProcess/ToneMapLookups.frag.spv" : "Shaders/PostProcess/ToneMap.frag.spv");
 			if(!shaders.vertex || !shaders.fragment) return false;
 			std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
 			for(auto& stage : stages) stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT; stages[0].module=shaders.vertex; stages[0].pName="VSMain";
+			stages[0].stage=VK_SHADER_STAGE_MESH_BIT_EXT; stages[0].module=shaders.vertex; stages[0].pName="main";
 			stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module=shaders.fragment; stages[1].pName="PSMain";
-			VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; assembly.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 			VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; viewport.viewportCount=1; viewport.scissorCount=1;
 			VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO}; raster.polygonMode=VK_POLYGON_MODE_FILL; raster.cullMode=VK_CULL_MODE_NONE; raster.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE; raster.lineWidth=1;
 			VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO}; samples.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
@@ -187,7 +185,7 @@ namespace TerraEngine::Renderer::Vulkan
 			const std::array<VkDynamicState, 2> states{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
 			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO}; dynamic.dynamicStateCount=2; dynamic.pDynamicStates=states.data();
 			VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-			info.stageCount=2; info.pStages=stages.data(); info.pVertexInputState=&vertex; info.pInputAssemblyState=&assembly; info.pViewportState=&viewport;
+			info.stageCount=2; info.pStages=stages.data(); info.pViewportState=&viewport;
 			info.pRasterizationState=&raster; info.pMultisampleState=&samples; info.pDepthStencilState=&depth; info.pColorBlendState=&blend; info.pDynamicState=&dynamic;
 			info.layout=pass.layout; info.renderPass=pass.renderPass;
 			return vkCreateGraphicsPipelines(pass.device,VK_NULL_HANDLE,1,&info,nullptr,&pass.pipeline)==VK_SUCCESS;
@@ -262,7 +260,7 @@ namespace TerraEngine::Renderer::Vulkan
 		vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pass.pipeline);
 		vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pass.layout,0,1,&pass.descriptor,0,nullptr);
 		vkCmdPushConstants(command,pass.layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(constants),&constants);
-		vkCmdDraw(command,3,1,0,0);
+		vkCmdDrawMeshTasksEXT(command, 1, 1, 1);
 		vkCmdEndRenderPass(command);
 		// The compatible render pass performs the final layout transition. Make
 		// its completed color writes visible to the next fragment/compute reader.

@@ -15,6 +15,8 @@
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Resource/ShaderCollection.h"
+#include "Resource/ShaderCollectionAsset.h"
+#include <nlohmann/json.hpp>
 
 namespace
 {
@@ -199,7 +201,40 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderCollectionAsync
 	return RequestShaderCollection(stagePaths);
 }
 
-std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(const std::vector<ShaderStagePath>& stagePaths, bool reload)
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadAuthoredShaderCollectionAsync(const TerraEngine::UUID& id,
+	const std::filesystem::path& descriptor, const std::filesystem::path& stageRoot)
+{
+	if(id == TerraEngine::EMPTY_UUID || id == GetDefaultShaderCollectionID() || id == GetDefaultTaskShaderCollectionID())
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	const auto bytes = ReadFileBytes(descriptor);
+	const auto document = nlohmann::json::parse(bytes, nullptr, false);
+	if(!document.is_object()) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	std::error_code pathError;
+	const bool diskDescriptor = std::filesystem::is_regular_file(descriptor, pathError);
+	std::vector<ShaderStagePath> stages;
+	for(const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
+		const auto value = document.find(slot.key);
+		if(value != document.end() && !value->is_string()) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+		const auto linkedSource = value == document.end() ? std::string{} : value->get<std::string>();
+		if(linkedSource.empty()) {
+			stages.push_back({slot.stage, ResolveEngineAssetPath(std::filesystem::path("Shaders") / slot.defaultPackage)});
+		} else {
+			auto path = std::filesystem::u8path(linkedSource);
+			if(!TerraEngine::Resource::IsShaderCollectionStagePath(path, slot)) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+			const auto package = stageRoot / path.replace_extension(".tspf");
+			// On editor startup, the descriptor can arrive ahead of the stage
+			// workers. The importer retries when the referenced stage finishes.
+			// Archive paths have no physical file to probe here.
+			if(diskDescriptor && !std::filesystem::is_regular_file(package, pathError))
+				return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+			stages.push_back({slot.stage, package});
+		}
+	}
+	return RequestShaderCollection(stages, true, id, descriptor);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(const std::vector<ShaderStagePath>& stagePaths, bool reload,
+	const TerraEngine::UUID& authoredId, const std::filesystem::path& descriptor)
 {
 	std::vector<StageRequest> stages;
 	RequestPtr parent;
@@ -223,15 +258,16 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 			const auto path = (stage.path.is_absolute() ? stage.path : assetRoot / stage.path).lexically_normal();
 			stages.push_back({stage.stage, path, NormalizeKey(path)});
 		}
-		const auto key = BuildShaderCollectionKey(stages);
+		const auto key = authoredId == TerraEngine::EMPTY_UUID ? BuildShaderCollectionKey(stages) : NormalizeKey(descriptor);
 		TerraEngine::UUID id = TerraEngine::EMPTY_UUID;
 		{
 			std::unique_lock lock(shaderCollectionCache.mutex);
 			if (const auto found = shaderCollectionCache.pathToId.find(key); found != shaderCollectionCache.pathToId.end()) {
 				id = found->second;
+				if(authoredId != TerraEngine::EMPTY_UUID && id != authoredId) return MakeReadyFuture(TerraEngine::EMPTY_UUID);
 				if (!reload && shaderCollectionCache.resources.contains(id)) return MakeReadyFuture(id);
 			} else {
-				id = TerraEngine::GenerateUUID();
+				id = authoredId == TerraEngine::EMPTY_UUID ? TerraEngine::GenerateUUID() : authoredId;
 				shaderCollectionCache.pathToId[key] = id;
 				try { shaderCollectionCache.idToPath[id] = key; }
 				catch (...) { shaderCollectionCache.pathToId.erase(key); throw; }
@@ -276,13 +312,14 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 	auto assembly = std::make_shared<Assembly>();
 	assembly->remaining = stages.size();
 	try {
-		for (const auto& stage : stages) assembly->dependencies.push_back(AdmitShaderDependency(stage.path, parent));
+		for (const auto& stage : stages) assembly->dependencies.push_back(AdmitShaderDependency(stage.path, parent,
+			reload && TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(stage.path)));
 		{
 			std::lock_guard gate(m_PublicationGate);
 			for (const auto& dependency : assembly->dependencies) parent->dependencies.push_back(dependency);
 		}
 		for (const auto& dependency : assembly->dependencies) {
-			SubscribeRequest(dependency, [this, parent, stages, assembly](RequestOutcome outcome) {
+			SubscribeRequest(dependency, [this, parent, stages, assembly, authoredId](RequestOutcome outcome) {
 				try {
 				bool dispatch = false;
 				{
@@ -295,7 +332,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 					FinishRequest(parent, outcome == RequestOutcome::Failed ? RequestOutcome::Failed : RequestOutcome::Canceled,
 						"A required shader dependency did not publish.");
 				} else if (dispatch) {
-					ScheduleRequestWork(parent, [this, parent, stages, assembly] {
+					ScheduleRequestWork(parent, [this, parent, stages, assembly, authoredId] {
 						std::vector<std::pair<TerraEngine::UUID, std::shared_ptr<const Shader>>> payloads;
 						{
 							std::lock_guard gate(m_PublicationGate);
@@ -303,6 +340,12 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestShaderCollection(c
 						}
 						InvokeRequestHook(parent->key, 0U);
 						auto collection = LoadShaderCollectionStages(stages, payloads);
+						if(collection && authoredId != TerraEngine::EMPTY_UUID) {
+							collection->inheritsAllDefaultStages = std::none_of(stages.begin(), stages.end(), [](const auto& stage) {
+								return TerraEngine::Resource::IsCompatibleSurfaceShaderPackage(stage.path);
+							});
+							if(!collection->inheritsAllDefaultStages) collection->geometryPolicy = ShaderGeometryPolicy::CompatibleReplacement;
+						}
 						InvokeRequestHook(parent->key, 1U);
 						FinalizeLoad(parent->key, shaderCollectionCache, parent->id, std::move(collection), parent->version, parent);
 					});

@@ -196,6 +196,12 @@ struct ShaderProvenanceExtensionHeader
 };
 static_assert(sizeof(ShaderProvenanceExtensionHeader) == 8u, "TSPV extension envelope must remain byte-stable.");
 
+// TSPI follows provenance and contains aligned-compatible SPIR-V for the
+// same fragment entry point with the renderer's object identity output.
+inline constexpr std::uint32_t kShaderIdentityExtensionMagicValue = 0x49505354u; // 'TSPI'
+// TSPM stores the same authored mesh workgroup instrumented for motion capture.
+inline constexpr std::uint32_t kShaderMeshMotionExtensionMagicValue = 0x4d505354u; // 'TSPM'
+
 struct ShaderProvenanceBackendVariantExtension
 {
 	std::uint32_t version = kShaderProvenanceExtensionVersion;
@@ -244,4 +250,6 @@ struct Shader
 	std::span<const std::uint8_t> bytecode;
 	std::string_view stringTable;
 	std::optional<ShaderProvenanceBackendVariantExtension> provenance;
+	std::vector<std::uint32_t> identityBytecode;
+	std::vector<std::uint32_t> meshMotionBytecode;
 };

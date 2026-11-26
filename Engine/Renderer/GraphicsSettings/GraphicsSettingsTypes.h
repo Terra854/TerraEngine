@@ -95,7 +95,6 @@ namespace TerraEngine::Renderer::GraphicsSettings
 		BloomSoftKnee = 88,
 		UpscalingMode = 89,
 		UpscalingSharpness = 90,
-		GeometryRasterMode = 91,
 		GtaoEnabled = 92,
 		GtaoIntensity = 93,
 		GtaoQuality = 94,
@@ -141,7 +140,6 @@ namespace TerraEngine::Renderer::GraphicsSettings
 	// choices. A temporal upscaler owns reconstruction while standalone AA is Off.
 	enum class GraphicsAntiAliasingMode : std::uint32_t { Off = 0, FXAA = 1, SMAA = 2, CMAA2 = 3, MSAA = 4, TAA = 5 };
 	enum class GraphicsUpscalingMode : std::uint32_t { Off = 0, Temporal = 1 };
-	enum class GraphicsGeometryRasterMode : std::uint32_t { Automatic = 0, Indexed = 1 };
 
 	// Native typed values retain full-width byte budgets. String and UUID values
 	// are owned copies for authored effect parameters and asset references.

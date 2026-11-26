@@ -315,14 +315,16 @@ namespace TerraEngine::EditorTests {
 			Touch(layout.nativeAotNugetConfig, "offline-config");
 			Touch(layout.nativeAotGlobalJson, "sdk-pin");
 			Touch(layout.fontDirectory / "Roboto-Medium.ttf", "font-payload");
+			// The editor install contains these overlays, but the Game archive
+			// must use runtime shaders exclusively.
+			Touch(layout.shaderDirectory / "Editor/SceneViewGrid.vert.spv");
+			Touch(layout.shaderDirectory / "Terrain/TerrainBrushPreview.vert.tspf");
 
 			const std::vector<std::filesystem::path> requiredShaders = {
 				"Default.task.tspf",
 				"Default.mesh.tspf",
 				"Default.frag.tspf",
 				"Default.ConventionalVisibilityIdentity.frag.spv",
-				"Editor/SceneViewGrid.vert.spv",
-				"Editor/SceneViewGrid.frag.spv",
 				"Sky/SkyBackground.task.tspf",
 				"Sky/SkyBackground.mesh.tspf",
 				"Sky/SkyBackground.frag.tspf",
@@ -330,11 +332,8 @@ namespace TerraEngine::EditorTests {
 				"Terrain/TerrainVisibility.mesh.tspf",
 				"Terrain/TerrainVisibility.frag.tspf",
 				"Terrain/TerrainSurface.comp.tspf",
-				"UI/ui_instanced.vert.spv",
-				"UI/ui_instanced.frag.spv",
-				"UI/ui_static.vert.spv",
+				"UI/UI_Overlay.mesh.spv",
 				"UI/ui_static.frag.spv",
-				"UI/ui_sdf_text.vert.spv",
 				"UI/ui_sdf_text.frag.spv",
 				"Lighting/ClusterDepthMask.comp.spv",
 				"Lighting/ClusterGrid.comp.spv",
@@ -533,6 +532,13 @@ namespace TerraEngine::EditorTests {
 			context.Expect(std::find(observedStages.begin(), observedStages.end(), ExportStage::ManagedCompilation) == observedStages.end(), "Content-only export should skip managed compilation entirely.");
 			context.Expect(std::find(observedStages.begin(), observedStages.end(), ExportStage::AssetStaging) != observedStages.end(), "Progress should identify asset staging separately from archive packaging.");
 			context.Expect(std::find(observedStages.begin(), observedStages.end(), ExportStage::Complete) != observedStages.end(), "Progress should expose the final protected publication outcome.");
+			if (result.success) {
+				const auto reader = tepak::PackReader::Open(result.packageResult.outputPath);
+				const auto& entries = reader.GetEntries();
+				context.Expect(std::none_of(entries.begin(), entries.end(), [](const auto& entry) {
+					return entry.normalizedPath.starts_with("shaders/") && entry.normalizedPath.find(".vert.") != std::string::npos;
+				}), "The exported runtime shader tree must omit both editor vertex stages.");
+			}
 			context.Expect(sourceTimestamp == std::filesystem::last_write_time(sourceScene), "Headless export should read project content without rewriting the live source scene.");
 		});
 

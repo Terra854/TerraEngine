@@ -48,13 +48,13 @@ camera's own output. A runtime Game request affects the Game defaults.
 | Area | Controls |
 | --- | --- |
 | Spatial anti-aliasing | Off, FXAA, SMAA and CMAA2. Choose one mode per supported view. |
-| Multisample anti-aliasing | 4× MSAA requires the qualified indexed path and VRS off. Set `GraphicsSettingId.GeometryRasterMode` to `GraphicsGeometryRasterMode.Indexed` and request MSAA in the same batch after discovery. |
-| Temporal anti-aliasing | Native TAA and half-extent temporal reconstruction on the indexed path with VRS off. The upscaler takes AA Off and `InternalResolutionScale` 0.5 in the same request. |
+| Multisample anti-aliasing | 4× MSAA works with the mesh shader path. Turn VRS off and request `GraphicsAntiAliasingMode.MSAA` after capability discovery. |
+| Temporal anti-aliasing | Native TAA and half-extent temporal reconstruction support Automatic mesh rendering with VRS off. The upscaler takes AA Off and `InternalResolutionScale` 0.5 in the same request. |
 | Exposure | Legacy, fixed EV compensation and automatic metering with EV bounds and independent brighten and darken rates. |
 | Bloom | Independent enable, threshold, intensity, spread and soft knee. |
 | Tone mapping | Legacy, Neutral, Filmic and GT7. Set `GraphicsSettingId.ToneMappingMode` to `(uint)GraphicsToneMappingMode.GT7` to select GT7. |
 | Color grading | Independent enable, temperature, tint, contrast, saturation, lift, gain, color curve and LUT. Curve and LUT assets have separate strengths. |
-| Screen-space lighting | Separate GTAO, SSR and SSGI controls for qualified opaque indexed views. Screen misses retain the existing environment and indirect lighting. |
+| Screen-space lighting | Separate GTAO, SSR and SSGI controls for qualified opaque views. Screen misses retain the existing environment and indirect lighting. |
 | HDR camera effects | Independently configure depth of field, motion blur, bloom lens dirt and lens flare. Depth of field exposes focus distance, focus range and blur strength. Lens dirt uses a texture mask, and lens flare has its own threshold and intensity. |
 | Atmosphere | Volumetric height fog exposes density, base height, height falloff and maximum distance. Screen-space sun shafts have a separate toggle and intensity. |
 | Presentation lens effects | Independent vignette, film grain, chromatic aberration and lens distortion with adjustable contribution. These run after anti-aliasing and before HUD and editor overlays. |
@@ -86,9 +86,10 @@ Each defaults to Off. Dithering is strongest at the native output extent.
 Scaling an editor viewport can filter its pattern. Raw previews and dedicated
 linear float captures preserve the camera values for inspection.
 
-The Vulkan temporal path uses single-sample, opaque Default surfaces on
-the indexed raster route with VRS disabled. Native TAA keeps the viewport
-extent. Temporal upscaling renders Game views at half width and height and
+Vulkan TAA uses single-sample mesh raster with VRS disabled and keeps the
+viewport extent. The motion pass replays opaque mesh shaders, including custom
+deformation captured by the default mesh template. Surfaces without a valid
+prior motion sample reject history at those pixels. Temporal upscaling renders Game views at half width and height and
 composites the HUD at the output extent. Camera cuts and viewport resizes
 restart history from phase zero. The 640 × 360 TAA cut and 800 × 450 resize
 fixtures produced first images identical to fresh views at the same pose.

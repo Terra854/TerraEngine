@@ -7,23 +7,14 @@ explicit Raw/Processed backend readbacks. It never renders UI quads as AA input,
 substitutes a software rasterizer, or renders additional simulation frames while
 waiting for readback.
 
-The default `--route exploratory` produces **exploratory direct-mesh evidence**.
-The frozen `moving-edges-v1` controls require indexed raster. Exploratory
-`collection.json` therefore has
-`evidenceKind: NativeExploratoryDirectMeshReadback`, `controlsVerified: false`,
-`frozenIndexedRouteSatisfied: false`, and `qualificationComplete: false`.
-It cannot be assembled into a manifest accepted by the scorer. An actual
-exploratory run has completed all 240 genuine Raw/Processed images, establishing
-collection progress without establishing the indexed-route or image-quality gate.
-Use `--route indexed` only with an installed engine that advertises and prepares
-setting ID91 (`geometry.rasterMode=Indexed`). Every accepted phase must expose
-that effective value and exactly four actual recorded native indexed draws at
-the requested Scene extent. Unsupported or rejected indexed requests fail;
-they never fall back to exploratory collection.
-The separate fixed-phase seeks also do not certify temporal previous-state
-continuity. Neither limitation can be removed by relabeling the output JSON.
-Even successful indexed collection requires separate image scoring and integrated
-acceptance; `qualificationComplete` remains false.
+The host captures the ordinary mesh shader path. Each phase verifies the
+actual sample count and extent against the recorded camera commands. Temporal
+runs also verify motion draw counts and the identity of the previous accepted
+frame. Native image scoring and integrated acceptance remain separate.
+
+The archived `moving-edges-v1` spatial score requires indexed-route evidence
+from its original renderer. Current mesh captures use a different route and
+cannot qualify for that score.
 
 ## Build dependencies
 
@@ -117,20 +108,13 @@ $hostExe = Join-Path $install Tests/Tools/PostProcessing/PostProcessMovingEdgesC
 foreach ($mode in @('Reference4x','OffNative','FXAA','SMAA','CMAA2')) {
   & $hostExe --install-root $install --project-root $project `
     --scene Assets/Scenes/MovingEdges.tescene --fixture $fixture `
-    --route indexed --mode $mode --output-root (Join-Path ./out/validation/moving-edge-images $mode)
+    --mode $mode --output-root (Join-Path ./out/validation/moving-edge-images $mode)
   if ($LASTEXITCODE -ne 0) { throw "Native capture failed for $mode" }
 }
 
-# Assembly preserves original native IDs and validates source profile, poses,
-# completed indexed-draw proofs, exact effective extents, and image byte hashes.
-& $hostExe --assemble-spatial ./out/validation/moving-edge-images
-if ($LASTEXITCODE -ne 0) { throw 'Indexed capture assembly failed' }
-pwsh -NoProfile -Command '& ./Tests/Tools/PostProcessing/TestPostProcessImageQuality.ps1 -Manifest ./out/validation/moving-edge-images/manifest.json -Output ./out/validation/moving-edge-score.json -Modes @("FXAA","SMAA","CMAA2")'
 ```
 
-For diagnostics on an engine without indexed support, use `--route exploratory`
-and a different fresh output directory. The assembler deliberately rejects those
-collections. No native AA image-quality pass is implied by completed PNG files.
+The mesh captures remain separate from the archived indexed spatial score.
 
 Each completed collection contains 64 ordered warmup receipts and 120 measured
 Raw/Processed PNG pairs for phases 64â€“183. Setup frames used for real binding and
@@ -154,7 +138,7 @@ and integrated acceptance.
 
 These options are separate from the spatial assembler and the default 184-frame
 continuous run. Use an engine containing command-side `temporalJitterPhase`
-observations and accepted cut detection. Missing TAA/indexed capability, rejected
+observations and accepted cut detection. Missing TAA capability, rejected
 settings, wrong frozen geometry, or missing reset evidence fails the collection.
 
 ```powershell
@@ -162,7 +146,7 @@ foreach ($sequence in @('cut','resize')) {
   foreach ($role in @('reset','fresh')) {
     & $hostExe --install-root $install --project-root $project `
       --scene Assets/Scenes/MovingEdges.tescene --fixture $fixture `
-      --route indexed --mode TAA --temporal-sequence $sequence `
+      --mode TAA --temporal-sequence $sequence `
       --temporal-role $role --output-root (Join-Path ./out/validation/taa-reset "$sequence-$role")
     if ($LASTEXITCODE -ne 0) { throw "TAA $sequence/$role collection failed" }
   }
@@ -170,7 +154,7 @@ foreach ($sequence in @('cut','resize')) {
 ```
 
 Each command starts a separate process and must use a fresh output directory.
-`reset` retains active indexed TAA through 64 frozen continuous warmup frames,
+`reset` retains active mesh TAA through 64 frozen continuous warmup frames,
 then records the four exact saved poses in `separateSequences.cut` or `.resize`.
 The cut jumps to the frozen canonical camera position; resize changes the real
 Scene target from 640x360 to 800x450. It never substitutes a requested snapshot
@@ -184,8 +168,7 @@ actual settings activation publication, not a subsequent redraw. If activation
 already consumed temporal history, the command fails rather than relabeling the
 next frame as fresh. Sample index zero in both roles must have native predecessor0 and
 jitter sample index zero. Sample indices oneâ€“3 must name the immediately preceding accepted sequence
-frame and corresponding jitter phase. Every phase joins four actual indexed
-and motion draws plus native temporal recording identity to completed Raw and
+frame and corresponding jitter phase. Every phase joins four recorded motion draws plus native temporal recording identity to completed Raw and
 Processed readbacks with matching session, source allocation and settings.
 
 Each collection writes four actual PNG pairs and preserves the frozen pose
@@ -207,12 +190,12 @@ recipe, animation, spatial-AA run, or temporal sequence:
 ```powershell
 & $hostExe --install-root $install --project-root $project `
   --scene Assets/Scenes/MovingEdges.tescene --fixture $fixture `
-  --route indexed --mode OffNative --depth-of-field-native `
+  --mode OffNative --depth-of-field-native `
   --output-root ./out/validation/native-depth-of-field
 if ($LASTEXITCODE -ne 0) { throw 'Native depth-of-field collection failed' }
 ```
 
-The bare switch requires the indexed route and OffNative AA at native 640x360,
+The bare switch requires OffNative AA at native 640x360,
 sample1. It cannot be combined with the separate temporal sequence options.
 The host seeks the identical frozen sample index zero between every Engine update. Normal
 Game-scoped typed transactions request baseline-Off, focus1m, focus8m,
@@ -269,8 +252,7 @@ or quantized to force a matching hash.
 
 ## Half-resolution baseline and temporal reconstruction
 
-These are independent indexed lanes; `--assemble-spatial` continues to accept
-only its frozen spatial mode set. Collect the candidate, comparators and
+Collect the candidate, comparators and
 oversampled reference through Game View using the same imported scene, cooked
 payloads and 184 frozen poses in separate fresh directories:
 
@@ -278,7 +260,7 @@ payloads and 184 frozen poses in separate fresh directories:
 foreach ($mode in @('OffHalf','OffNative','Reference4x','TemporalUpscale')) {
   & $hostExe --install-root $install --project-root $project `
     --scene Assets/Scenes/MovingEdges.tescene --fixture $fixture `
-    --route indexed --view game --mode $mode `
+    --view game --mode $mode `
     --output-root (Join-Path ./out/validation/temporal-upscale-images $mode)
   if ($LASTEXITCODE -ne 0) { throw "Native capture failed for $mode" }
 }
@@ -291,12 +273,12 @@ foreach ($mode in @('OffHalf','OffNative','Reference4x','TemporalUpscale')) {
 OffHalf uses standalone AA Off and a real 320×180 Game target with no scaling
 option. OffNative and Reference4x use the same Game output at 640×360 and
 2560×1440. The native Game TemporalUpscale lane atomically
-requests Game-scoped ID64=Off, ID91=Indexed, ID89=Temporal and ID66=0.5 through
+requests Game-scoped ID64=Off, ID89=Temporal and ID66=0.5 through
 `QueueGraphicsSettingsRequest`, with a 640×360 Game output target. It requires
 actual `temporalUpscalingSupported` capability. All retain the unchanged
 640×360 world projection, material witnesses and pose protocol.
 
-Collection checks the effective graph, exact native four-draw indexed counters,
+Collection checks the effective graph, native raster and motion counters,
 actual internal/output command extents, sample count and reconstruction history.
 TemporalUpscale Raw must originate at 320×180 and Processed at 640×360. Native
 backend source dimensions and decoded PNG dimensions must both match; resizing
@@ -323,7 +305,7 @@ Game frame, frozen projection matrix, reference-local view matrix and canonical
 origin. Every actual selected geometry matrix, transformed frozen vertex,
 imported animation seek receipt and current palette remains checked. The Game
 reference-frame ID is only a lookup key: missing exact accepted publication,
-wrong output kind, stale matrices or missing indexed/motion counters fails.
+wrong output kind, stale matrices or missing raster or motion counters fails.
 It never invents a Game preview or a Scene-style native pose stamp.
 
 This is native Game fixture evidence. It does not certify managed Play Mode,

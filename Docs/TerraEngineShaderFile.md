@@ -2,6 +2,40 @@
 
 TSPF stores a single shader stage (source metadata, reflection, and compiled bytecode) in one blob so pipelines can be built without re-reading SPIR-V/DXIL at runtime. All fields are little-endian.
 
+## Creating shader stages and collections
+
+Build and install the editor with `cmake --preset RelWithDebInfo` and
+`cmake --build --preset RelWithDebInfo`. In the Project Browser, open
+**Add → Shaders** and choose **Task Shader**, **Mesh Shader**, or
+**Fragment Shader**. Each entry creates a single HLSL file seeded with
+the corresponding engine shader. The editor compiles it in the background on
+creation and on save. The import status and editor log show compile errors.
+Successful compiles write a TSPF containing SPIR-V under project `Build/Assets`.
+
+Choose **Add → Shaders → Shader Collection** to create a single
+`.teshadercollection` asset. Assign it to a material and use the collection's
+Inspector to link the stages you want to override. Each empty field inherits
+the corresponding engine stage. Custom stages must preserve the default
+stage's renderer interface.
+
+Select **MSAA** with VRS off to
+rasterize the same mesh shader collection at four samples. Keep the fragment
+template's `TERRAENGINE_CONVENTIONAL_RETURN` entry-point wrapper so the compiler
+can emit the object's picking ID alongside the custom color. The editor
+recompiles existing fragment assets to add that variant.
+
+The mesh temporal pass records final clip positions from matched draws. To
+include custom vertex motion, keep the template's `TE_WRITE_MESH_VERTEX`
+call and modify `outVertex.position` before it. Use stable vertex slots
+within each meshlet so consecutive frames can pair the same corners.
+
+From the repository root, run
+`pwsh -File Tests/Tools/ShaderAuthoring/TestInstalledShaderCollections.ps1`
+to verify parallel stage imports, default inheritance, and reload after a save.
+Run `pwsh -File Tests/Tools/ShaderAuthoring/TestInstalledMeshMsaaPicking.ps1`
+on a supported Vulkan GPU to verify native picking on built-in and displaced
+custom meshes with MSAA off and on. Add -IncludePostProcessModes to exercise FXAA, SMAA and TAA. Add -Compatibility to run the built-in mesh compatibility renderer.
+
 ## Design goals
 - Keep stage metadata, reflection, and compiled binary together for cache-friendly loading.
 - Use string-table offsets instead of raw pointers to remain relocatable in archives.
@@ -19,6 +53,7 @@ CompiledStageBinary       // single instance
 Bytecode blob             // size = header.compiledBinarySize
 String table              // size = header.stringTableSize
 Provenance extension      // optional TSPV envelope and backend-variant record
+Picking fragment          // optional TSPI envelope plus SPIR-V with the identity output
 ```
 
 ### Header (68 bytes)
@@ -88,6 +123,11 @@ record describes backend/variant identity, interface and bytecode hashes, and
 binary availability without changing the v1 header or reflection layout. Older
 files may end after the string table. Validate the trailer's bounds, magic, size
 and version before using it; it is not part of the bytecode or string-table range.
+Compatible custom fragments add a `TSPI` record after provenance. An 8-byte
+little-endian header stores the magic and byte count. The payload is SPIR-V
+for the same fragment entry point with its integer identity target enabled.
+For mesh stages, a `TSPM` record uses the same layout to store the mesh
+entry point with temporal position capture enabled.
 The emitted table order and final trailer write are implemented in
 [ShaderCompiler.cpp](../Editor/AssetCompilers/ShaderCompiler.cpp).
 

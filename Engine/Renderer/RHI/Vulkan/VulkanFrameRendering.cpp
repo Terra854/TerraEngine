@@ -240,18 +240,16 @@ bool VulkanContext::PrepareIndexedRasterCandidate(const TerraEngine::Renderer::R
 	using namespace TerraEngine::Renderer::GraphicsSettings;
 	std::lock_guard lock(impl->deviceStateMutex);
 	preparationPending = false;
-	GraphicsAAConfiguration raster;
+	const auto processing = BuildPostProcessGraphSettings(candidate);
 	if (!impl->initialized || impl->deviceLost || viewIndex >= publication.presentationInputs.size()
 		|| candidate.lifecycle.rendererSessionGeneration != impl->renderSessionGeneration
 		|| candidate.lifecycle.backendResourceGeneration != impl->backendResourceGeneration
-		|| ResolveGraphicsAAConfiguration(candidate.values, raster) != GraphicsRequestReason::None
-		|| raster.raster != GraphicsGeometryRasterMode::Indexed)
+		|| !processing.RequiresEffectGeometry())
 	{
 		reason = "The indexed candidate does not match a supported view lifetime.";
 		return false;
 	}
 	const auto& output = publication.presentationInputs[viewIndex].output;
-	const auto processing = BuildPostProcessGraphSettings(candidate);
 	if(processing.screenSpaceLighting)
 	{
 		const auto& presentation = publication.presentationInputs[viewIndex];
@@ -503,10 +501,10 @@ void VulkanContext::RenderFrame(
 			|| postProcessPlan.coverageAA || postProcessPlan.presentationEffects || postProcessPlan.temporalResolve
 			|| postProcessPlan.screenSpaceLighting || postProcessPlan.customStages || postProcessPlan.outputDithering);
 	using namespace TerraEngine::Renderer::GraphicsSettings;
+	const bool indexedRequested = processingEnabled && postProcessPlan.RequiresEffectGeometry();
 	GraphicsAAConfiguration rasterSettings;
-	const bool indexedRequested = currentProcessingOwner && viewRegistered
-		&& ResolveGraphicsAAConfiguration(presentation.graphicsSettings->values, rasterSettings) == GraphicsRequestReason::None
-		&& rasterSettings.raster == GraphicsGeometryRasterMode::Indexed;
+	if(processingEnabled && postProcessPlan.temporalResolve)
+		ResolveGraphicsAAConfiguration(presentation.graphicsSettings->values, rasterSettings);
 	const bool processingRuntimeOutput = processingEnabled && !impl->editorMode && !renderingDedicatedCaptureTarget;
 	const bool renderingOffscreenScene = impl->editorMode || renderingDedicatedCaptureTarget || processingEnabled;
 	if(!processingEnabled && !impl->postProcessTargets.empty())
@@ -849,13 +847,21 @@ void VulkanContext::RenderFrame(
 	// This ensures descriptor set updates don't invalidate the recording command buffer.
 	const TerraEngine::UUID defaultMeshCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
 	const TerraEngine::UUID defaultTaskCollectionId = ResourceManager::Instance().GetDefaultTaskShaderCollectionID();
+	// An empty authored collection follows the same render topology as a
+	// built-in default material. An unpublished collection also fails open.
+	const auto resolveSurfaceCollection = [&](const TerraEngine::UUID& id) {
+		if (id == TerraEngine::EMPTY_UUID || id == defaultMeshCollectionId) return defaultMeshCollectionId;
+		if (id == defaultTaskCollectionId) return id;
+		const auto owner = ResourceManager::Instance().AcquireShaderCollectionSnapshot(id);
+		return owner && !owner->inheritsAllDefaultStages ? id : defaultMeshCollectionId;
+	};
 	const bool defaultTaskPipelineAvailable = impl->taskShaderSupported
 		&& (ResourceManager::Instance().GetShaderCollection(defaultTaskCollectionId) != nullptr);
 
 	VkRenderPass currentPass = renderingOffscreenScene
 		? impl->offscreenRenderPass
 		: impl->renderPass;
-	const bool coverageAA = indexedRequested && postProcessPlan.coverageAA;
+	const bool coverageAA = processingEnabled && postProcessPlan.coverageAA;
 	if(coverageAA)
 	{
 		std::string reason;
@@ -870,9 +876,9 @@ void VulkanContext::RenderFrame(
 	std::optional<VulkanRasterPipelineConfiguration> indexedRaster;
 	if (indexedRequested && !screenLightingRequested)
 	{
-		// The explicit route requires one complete accepted view. On a later
+		// Effect-specific geometry requires one complete accepted view. On a later
 		// recook, an unfinished candidate leaves the previous image usable.
-		if (!coverageAA && (rasterSettings.sampleCount != 1u || !impl->RegisterIndexedSingleSamplePass(cameraRasterPass))) return;
+		if (!coverageAA && !impl->RegisterIndexedSingleSamplePass(cameraRasterPass)) return;
 		indexedRaster.emplace();
 		std::string reason;
 		bool preparationPending = false;
@@ -994,6 +1000,7 @@ void VulkanContext::RenderFrame(
 	const auto* coverage = coverageAA && postProcessTargets ? postProcessTargets->passes->coverage.get() : nullptr;
 	if(coverageAA && !coverage) return; // Require a complete, certified coverage owner.
 	const auto temporalView = postProcessTargets ? postProcessTargets->passes->temporalView : nullptr;
+	const bool meshTemporal = temporalView && temporalView->meshMotion;
 	const auto screenRaster = postProcessTargets ? postProcessTargets->passes->screenRaster : nullptr;
 	if(screenLightingRequested)
 	{
@@ -1027,12 +1034,12 @@ void VulkanContext::RenderFrame(
 	if(postProcessPlan.temporalResolve || postProcessPlan.motionBlur)
 	{
 		std::string reason;
-		if(!temporalView || !indexedRaster || !presentation.graphicsView || !presentation.graphicsView->lifetimeGeneration
-			|| !impl->PrepareIndexedTemporalVariants(*publication, publicationIndex, cameraRasterPass,
-				*indexedRaster, *postProcessTargets->passes, reason))
+		if(!temporalView || !presentation.graphicsView || !presentation.graphicsView->lifetimeGeneration
+			|| (!meshTemporal && (!indexedRaster || !impl->PrepareIndexedTemporalVariants(*publication,
+				publicationIndex, cameraRasterPass, *indexedRaster, *postProcessTargets->passes, reason))))
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Temporal raster preparation failed: "
-				<< (reason.empty() ? "native temporal target, indexed route or live view is missing" : reason));
+				<< (reason.empty() ? "native temporal target or matching live view is missing" : reason));
 			return;
 		}
 	}
@@ -1087,17 +1094,25 @@ void VulkanContext::RenderFrame(
 	std::unordered_map<DrawResourcePreparationKey, FramePipelinePreparation, DrawResourcePreparationKeyHash> preparedFramePipelines;
 	preparedFramePipelines.reserve(std::min<std::size_t>(drawResourceUpperBound, 16U));
 	auto& drawResources = ResourceManager::Instance();
+	// Camera coverage changes the mesh pipeline sample state. Shadow passes
+	// keep their own single-sample pipeline even when the camera uses MSAA.
+	const auto meshRasterForPass = [&](VkRenderPass pass) {
+		VulkanRasterPipelineConfiguration raster;
+		if(coverageAA && pass == cameraRasterPass) raster.samples = VK_SAMPLE_COUNT_4_BIT;
+		return raster;
+	};
 	const auto EnsureCurrentFramePipeline = [&](const DrawResourcePreparationKey& selection, FramePipelinePreparation& prepared) {
 		// Only a complete pipeline for the current shader publication can cover
 		// another mesh in this view. Failed preparation stays eligible for retry.
 		const auto generation = drawResources.GetRendererResourcePublicationGeneration();
 		if (prepared.ensuredGeneration == generation) return true;
+		const auto raster = meshRasterForPass(selection.renderPass);
 		impl->EnsurePipeline(selection.collectionId, selection.renderPass, selection.materialFlags,
-			selection.conventionalVisibilityIdentity);
+			selection.conventionalVisibilityIdentity, raster);
 		const auto pass = impl->pipelineCache.find(selection.renderPass);
 		if (pass == impl->pipelineCache.end()) return false;
 		const auto exactKey = impl->BuildPipelineKey(selection.collectionId, selection.materialFlags,
-			selection.conventionalVisibilityIdentity);
+			selection.conventionalVisibilityIdentity, raster);
 		if (!exactKey) return false;
 		const auto exact = pass->second.find(*exactKey);
 		if (exact == pass->second.end() || !exact->second.pipeline || !exact->second.layout) return false;
@@ -1116,9 +1131,10 @@ void VulkanContext::RenderFrame(
 		if (cachedPass == impl->pipelineCache.end()) return;
 		VulkanPipeline* selected = nullptr;
 		std::uint64_t selectedGeneration = 0;
+		const auto samples = meshRasterForPass(pass).samples;
 		for (auto& [key, pipeline] : cachedPass->second) {
 			if (key.shaderCollectionId == collection && key.materialFlags == flags && key.usesConventionalVisibilityIdentity == identity
-				&& pipeline.rasterRoute == VulkanRasterRoute::MeshTasks && pipeline.rasterSamples == VK_SAMPLE_COUNT_1_BIT
+				&& pipeline.rasterRoute == VulkanRasterRoute::MeshTasks && pipeline.rasterSamples == samples
 				&& pipeline.pipeline != VK_NULL_HANDLE && pipeline.layout != VK_NULL_HANDLE
 				&& (!selected || key.collectionGeneration > selectedGeneration)) {
 				selected = &pipeline; selectedGeneration = key.collectionGeneration;
@@ -1195,11 +1211,7 @@ void VulkanContext::RenderFrame(
 			return;
 		}
 
-		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
-
-		if (collectionId == TerraEngine::EMPTY_UUID) {
-			collectionId = defaultMeshCollectionId;
-		}
+		TerraEngine::UUID collectionId = resolveSurfaceCollection(material->header.shaderCollectionId);
 
 		if (collectionId == defaultMeshCollectionId
 			&& defaultTaskPipelineAvailable
@@ -1314,7 +1326,7 @@ void VulkanContext::RenderFrame(
 					pageRequest.ownerMeshletCount = command.virtualMeshletCount == 0U ? available : std::min(command.virtualMeshletCount, available);
 					pageRequest.selectedLod = command.selectedVirtualLod;
 					pageRequest.deformationUnsupported = command.animationBinding.HasCpuDeformation() || command.HasCompleteGpuAnimation();
-					const auto collection = material->second->header.shaderCollectionId;
+					const auto collection = resolveSurfaceCollection(material->second->header.shaderCollectionId);
 					pageRequest.materialUnsupported = collection != TerraEngine::EMPTY_UUID
 						&& collection != defaultMeshCollectionId && collection != defaultTaskCollectionId;
 					(void)impl->EnsureShadowAuthoredPagePayload(pageRequest);
@@ -1333,7 +1345,7 @@ void VulkanContext::RenderFrame(
 		for (const auto& key : preparedDrawResourceKeys) {
 			const auto uploaded = impl->materialSourceOwners.find(key.materialId);
 			if (uploaded == impl->materialSourceOwners.end() || !uploaded->second) continue;
-			auto collection = uploaded->second->header.shaderCollectionId;
+			auto collection = resolveSurfaceCollection(uploaded->second->header.shaderCollectionId);
 			if (collection == TerraEngine::EMPTY_UUID) collection = defaultMeshCollectionId;
 			PrepareFramePipeline(collection, key.renderPass, uploaded->second->header.flags);
 			if (collection == defaultMeshCollectionId || collection == defaultTaskCollectionId) {
@@ -1841,7 +1853,9 @@ void VulkanContext::RenderFrame(
 		// records successfully. The graphics path checks this separate flag before
 		// omitting any hardware packet, preserving fail-open coverage.
 		const auto& visibilityPlan = impl->latestVirtualGeometryVisibilityPlan;
-		if(visibilityPlan.ready) {
+		// Compute visibility has one sample per pixel. Keep the mesh-task
+		// geometry in the coverage pass so all four samples get real edges.
+		if(visibilityPlan.ready && !coverageAA && !meshTemporal) {
 			bool recordedEveryVisibilityStage = true;
 			const std::array<std::pair<TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage,
 				TerraEngine::Renderer::VirtualGeometryBackendStage>, 4> visibilityStages{{
@@ -2899,8 +2913,6 @@ void VulkanContext::RenderFrame(
 		PushConstants push{};
 		std::uint32_t materialFlags = 0u;
 		uint32_t indirectBufferIndex = 0;
-		VkBuffer indexedBuffer = VK_NULL_HANDLE;
-		std::uint32_t firstIndex = 0, indexCount = 0;
 		std::uint64_t indexedAllocationGeneration = 0;
 		bool shadowGrouped = false;
 		std::uint32_t shadowMemberIndex = 0, shadowGroupIndex = 0;
@@ -2916,10 +2928,17 @@ void VulkanContext::RenderFrame(
 	{
 		const MotionRasterPipeline* pipeline = nullptr;
 		std::array<VkDescriptorSet, 2> surfaceSets{};
-		VkBuffer indices = VK_NULL_HANDLE;
-		std::uint32_t firstIndex = 0u, count = 0u, row = 0u;
+		std::uint32_t firstMeshlet = 0u, count = 0u, row = 0u;
+		std::uint32_t meshGroups = 0u;
+		PushConstants meshPush{};
+		std::span<const VkPushConstantRange> meshPushRanges;
 	};
+	// Compatibility mesh shaders dispatch eight 16-triangle groups per
+	// meshlet. Chunk both color and replay well within Vulkan's X limit.
+	static constexpr std::uint32_t kCompatibilityGroupsPerMeshlet = 8u;
+	static constexpr std::uint32_t kCompatibilityMeshletsPerDispatch = 128u;
 	std::vector<TemporalDraw> motionDraws;
+	std::vector<MeshMotionDrawInput> meshMotionInputs;
 	std::shared_ptr<PostProcessMotionMeshOwners> motionMeshes;
 	if(temporalView)
 	{
@@ -2980,7 +2999,7 @@ void VulkanContext::RenderFrame(
 	groupedRepresentatives.reserve(presentation.groupedSubmissions.size());
 	bool groupedInstanceStreamReady = false;
 	bool groupedInstanceAllocationReplaced = false;
-	if(!indexedRaster && presentation.renderOptimization.valid != 0u
+	if(!indexedRaster && !meshTemporal && presentation.renderOptimization.valid != 0u
 		&& !presentation.groupedSubmissions.empty()
 		&& !presentation.groupedInstanceRecords.empty()) {
 		bool complete = true;
@@ -3161,7 +3180,7 @@ void VulkanContext::RenderFrame(
 	pendingStats.optimization.instanceStreamCapacityBytes = static_cast<std::uint32_t>(
 		std::min<VkDeviceSize>(impl->groupedInstanceCapacities[currentFrame],
 			std::numeric_limits<std::uint32_t>::max()));
-	if(!indexedRaster && !groupedInstanceStreamReady && !presentation.groupedSubmissions.empty()) {
+	if(!indexedRaster && !meshTemporal && !groupedInstanceStreamReady && !presentation.groupedSubmissions.empty()) {
 		pendingStats.optimization.fallbackAllocationFailureCount = 1u;
 	}
 	std::uint32_t recordedGroupedInstanceCount = 0u;
@@ -3827,7 +3846,7 @@ void VulkanContext::RenderFrame(
 		const VkRenderPass currentPass = cameraRasterPass;
 		uint32_t materialFlags = material->header.flags;
 
-		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
+		TerraEngine::UUID collectionId = resolveSurfaceCollection(material->header.shaderCollectionId);
 
 		if (indexedRaster || collectionId == TerraEngine::EMPTY_UUID) {
 			collectionId = defaultMeshCollectionId;
@@ -3891,7 +3910,7 @@ void VulkanContext::RenderFrame(
 			&& !conservativeDeformableVisibility;
 		const auto& executorPlan = impl->latestVirtualGeometryExecutorPlan;
 		const bool deviceAuthoredCommand =
-			!indexedRaster && executorPlan.resourcesReady
+			!indexedRaster && !meshTemporal && executorPlan.resourcesReady
 			&& executorPlan.descriptorReady
 			&& executorPlan.pipelinesReady
 			&& executorPlan.generatedSubmissionExecutionAvailable
@@ -4093,15 +4112,13 @@ void VulkanContext::RenderFrame(
 		{
 			const auto mesh = impl->meshCache.find(command.meshId);
 			if (mesh == impl->meshCache.end() || !mesh->second.indexedTopology
-				|| !mesh->second.indexedCornerBuffer.buffer || !mesh->second.indexedAllocationGeneration) return;
+				|| !mesh->second.indexedAllocationGeneration) return;
 			const auto& indexed = mesh->second;
 			const auto range = TerraEngine::Renderer::Vulkan::ResolveIndexedCornerRange(
 				*indexed.indexedTopology, ownerMeshletOffset, ownerMeshletCount);
 			if (!range) return;
-			draw.indexedBuffer = indexed.indexedCornerBuffer.buffer;
 			draw.indexedAllocationGeneration = indexed.indexedAllocationGeneration;
-			draw.firstIndex = range->firstIndex;
-			draw.indexCount = range->indexCount;
+			draw.push.virtualMeshletCount = ownerMeshletCount;
 			draw.rasterRoute = TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed;
 			if(temporalView)
 			{
@@ -4145,8 +4162,8 @@ void VulkanContext::RenderFrame(
 				}
 				else
 					row.shader.deformationState.y = 0u;
-				motionDraws.push_back({pipeline, draw.descriptorSets, draw.indexedBuffer,
-					draw.firstIndex, draw.indexCount, commandIndex});
+				motionDraws.push_back({pipeline, draw.descriptorSets, ownerMeshletOffset,
+					ownerMeshletCount, commandIndex});
 			}
 		}
 		// Generated packet commands encode one selected packet's dispatch count.
@@ -4172,6 +4189,24 @@ void VulkanContext::RenderFrame(
 		uint32_t taskGroupCount = staticPreparation->hasTaskStage
 			? ((selectedMeshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
 			: selectedMeshletCount;
+		if(meshTemporal && !pageLocalGeometry && !groupedSubmission && taskGroupCount
+			&& material->header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Opaque)) {
+			const auto* surface = ResolvePipeline(staticPreparation->selectedCollectionId, cameraRasterPass, materialFlags);
+			const auto mesh = impl->meshCache.find(command.meshId);
+			std::string reason;
+			if(surface && mesh != impl->meshCache.end() && mesh->second.sourceOwner) {
+				if(const auto* pipeline = PrepareMeshTemporalMotionVariant(*temporalView, *surface, reason)) {
+					// Keep the exact immutable raster inputs. The replay shader
+					// captures custom clip positions ahead of temporal resolve.
+					const auto row = static_cast<std::uint32_t>(meshMotionInputs.size());
+					meshMotionInputs.push_back({{command.objectId, command.meshId, command.materialId,
+						command.objectLifetimeGeneration, mesh->second.cpuPublicationGeneration, surface->collectionGeneration, ownerMeshletOffset, selectedMeshletCount},
+						ownerMeshletOffset, selectedMeshletCount});
+					motionDraws.push_back({pipeline, draw.descriptorSets, 0u, 0u, row,
+						taskGroupCount, draw.push, surface->pushConstants});
+				}
+			}
+		}
 		if(groupedSubmission != nullptr) {
 			taskGroupCount *= groupedSubmission->group.instanceCount;
 			for(uint32_t instance = 0u;
@@ -4328,7 +4363,7 @@ void VulkanContext::RenderFrame(
 			}
 
 			uint32_t materialFlags = material->header.flags;
-			TerraEngine::UUID collectionId = material->header.shaderCollectionId;
+			TerraEngine::UUID collectionId = resolveSurfaceCollection(material->header.shaderCollectionId);
 
 			if (collectionId == TerraEngine::EMPTY_UUID) {
 				collectionId = defaultMeshCollectionId;
@@ -6185,13 +6220,7 @@ void VulkanContext::RenderFrame(
 				}
 				HashBytes(signature, &draw.push, sizeof(draw.push));
 				HashCombine(signature, draw.indirectBufferIndex);
-				if (draw.indexedBuffer)
-				{
-					HashCombine(signature, std::hash<VkBuffer>{}(draw.indexedBuffer));
-					HashCombine(signature, draw.indexedAllocationGeneration);
-					HashCombine(signature, draw.firstIndex);
-					HashCombine(signature, draw.indexCount);
-				}
+				HashCombine(signature, draw.indexedAllocationGeneration);
 				HashCombine(signature, draw.useGeneratedVirtualGeometryIndirect ? 1u : 0u);
 				HashCombine(signature, draw.generatedVirtualGeometryIndirectIndex);
 				HashCombine(signature, static_cast<std::uint32_t>(draw.rasterRoute));
@@ -6244,7 +6273,6 @@ void VulkanContext::RenderFrame(
 			scissor.extent = renderExtent;
 			vkCmdSetScissor(secondary, 0u, 1u, &scissor);
 			VkPipeline boundPipeline = VK_NULL_HANDLE;
-			VkBuffer boundIndexBuffer = VK_NULL_HANDLE;
 			VkPipelineLayout boundDescriptorLayout = VK_NULL_HANDLE;
 			std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
 			bool descriptorsBound = false;
@@ -6281,23 +6309,24 @@ void VulkanContext::RenderFrame(
 					boundDescriptorSets = draw.descriptorSets;
 					descriptorsBound = true;
 				}
-				PushDefaultMeshConstants(
-					secondary,
-					draw.pipelineLayout,
-					draw.pushConstantRanges.data(),
-					draw.pushConstantRangeCount,
-					draw.push);
-				if (draw.indexedBuffer)
+				if (draw.indexedAllocationGeneration)
 				{
-					if (boundIndexBuffer != draw.indexedBuffer)
+					for (std::uint32_t first = 0; first < draw.push.virtualMeshletCount;)
 					{
-						vkCmdBindIndexBuffer(secondary, draw.indexedBuffer, 0, VK_INDEX_TYPE_UINT32);
-						boundIndexBuffer = draw.indexedBuffer;
+						auto range = draw.push;
+						range.virtualMeshletOffset += first;
+						range.virtualMeshletCount = std::min(kCompatibilityMeshletsPerDispatch,
+							draw.push.virtualMeshletCount - first);
+						PushDefaultMeshConstants(secondary, draw.pipelineLayout,
+							draw.pushConstantRanges.data(), draw.pushConstantRangeCount, range);
+						vkCmdDrawMeshTasksEXT(secondary, range.virtualMeshletCount * kCompatibilityGroupsPerMeshlet, 1u, 1u);
+						first += range.virtualMeshletCount;
 					}
-					vkCmdDrawIndexed(secondary, draw.indexCount, 1u, draw.firstIndex, 0, 0u);
 					recordedIndexedDrawCount.fetch_add(1u, std::memory_order_relaxed);
 					continue;
 				}
+				PushDefaultMeshConstants(secondary, draw.pipelineLayout,
+					draw.pushConstantRanges.data(), draw.pushConstantRangeCount, draw.push);
 
 				const VkBuffer commandBuffer = draw.useGeneratedVirtualGeometryIndirect
 					? impl->latestVirtualGeometryExecutorResources.generatedSubmissionBuffer
@@ -6572,14 +6601,28 @@ void VulkanContext::RenderFrame(
 	{
 		// The ordinary indexed draw and this equal-depth pass use the same
 		// sealed ranges, model matrices, palettes and actual raster jitter.
-		if(motionDraws.size() != motionPreparation.draws.size()) return;
+		if(!meshTemporal && motionDraws.size() != motionPreparation.draws.size()) return;
 		std::string reason;
-		submittedMotion = PreparePostProcessMotionBuffers(impl->physicalDevice, impl->device,
-			impl->allocator, temporalView->motionLayout, std::move(motionPreparation), reason);
+		if(meshTemporal) {
+			submittedMotion = PrepareMeshMotionBuffers(impl->physicalDevice, impl->device, impl->allocator,
+				temporalView->motionLayout, std::move(motionPreparation), meshMotionInputs,
+				temporalFrame->previousMeshMotion, reason);
+		} else {
+			submittedMotion = PreparePostProcessMotionBuffers(impl->physicalDevice, impl->device,
+				impl->allocator, temporalView->motionLayout, std::move(motionPreparation), reason);
+		}
 		if(!submittedMotion)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Temporal motion buffers were not prepared: " << reason);
 			return;
+		}
+		if(meshTemporal) {
+			const auto& positions = submittedMotion->meshMotion->positions;
+			vkCmdFillBuffer(cmd, positions.buffer, 0u, positions.size, 0u);
+			const VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT};
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+				0u, 1u, &barrier, 0u, nullptr, 0u, nullptr);
 		}
 		BeginMotionRasterPass(cmd, *temporalView->motion);
 		const VkViewport viewport{0.0f, 0.0f, static_cast<float>(activeRenderExtent.width),
@@ -6591,12 +6634,36 @@ void VulkanContext::RenderFrame(
 		{
 			const std::array sets{motion.surfaceSets[0], motion.surfaceSets[1], submittedMotion->descriptorSet};
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion.pipeline->pipeline);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion.pipeline->layout, 0u,
-				static_cast<std::uint32_t>(sets.size()), sets.data(), 0u, nullptr);
-			vkCmdBindIndexBuffer(cmd, motion.indices, 0u, VK_INDEX_TYPE_UINT32);
-			vkCmdDrawIndexed(cmd, motion.count, 1u, motion.firstIndex, 0, motion.row);
+			if(meshTemporal) {
+				const auto offset = motion.row * submittedMotion->dynamicRowStride;
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion.pipeline->layout, 0u,
+					static_cast<std::uint32_t>(sets.size()), sets.data(), 1u, &offset);
+				for(const auto& range : motion.meshPushRanges)
+					vkCmdPushConstants(cmd, motion.pipeline->layout, range.stageFlags, range.offset, range.size,
+						reinterpret_cast<const std::uint8_t*>(&motion.meshPush) + range.offset);
+				vkCmdDrawMeshTasksEXT(cmd, motion.meshGroups, 1u, 1u);
+			} else {
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion.pipeline->layout, 0u,
+					static_cast<std::uint32_t>(sets.size()), sets.data(), 0u, nullptr);
+				for (std::uint32_t first = 0; first < motion.count;)
+				{
+					const auto count = std::min(kCompatibilityMeshletsPerDispatch, motion.count - first);
+					const std::array push{motion.firstMeshlet + first, count, motion.row};
+					vkCmdPushConstants(cmd, motion.pipeline->layout, VK_SHADER_STAGE_MESH_BIT_EXT,
+						0u, sizeof(push), push.data());
+					vkCmdDrawMeshTasksEXT(cmd, count * kCompatibilityGroupsPerMeshlet, 1u, 1u);
+					first += count;
+				}
+			}
 		}
 		vkCmdEndRenderPass(cmd);
+		if(meshTemporal) {
+			// The next accepted view reads these positions on the same graphics queue.
+			const VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+				VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT};
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+				0u, 1u, &barrier, 0u, nullptr, 0u, nullptr);
+		}
 	}
 	if(coverage)
 	{
@@ -6937,7 +7004,7 @@ void VulkanContext::RenderFrame(
 		// Suppressed/resized/stale requests never become managed camera views.
 		impl->recordedGraphicsViews.push_back({publicationIndex, nativeOutputExtent.width, nativeOutputExtent.height,
 			recordedIndexedDrawCount.load(std::memory_order_relaxed),
-			indexedRaster ? static_cast<std::uint32_t>(indexedRaster->samples) : 1u,
+			coverageAA ? 4u : 1u,
 			static_cast<std::uint32_t>(motionDraws.size()), temporalFrame ? publication->frameId : 0u,
 			temporalFrame && temporalFrame->previous ? temporalFrame->previous->frameId : 0u,
 			activeRenderExtent.width, activeRenderExtent.height,

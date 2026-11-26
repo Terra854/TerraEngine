@@ -257,7 +257,7 @@ namespace TerraEngine::Editor::Automation
 				for (const std::uint32_t id : {64U, 65U, 67U, 72U, 91U})
 				{
 					const nlohmann::json value = id == 65U ? nlohmann::json{{"type", "number"}}
-						: nlohmann::json{{"type", "integer"}, {"minimum", 0}, {"maximum", id == 64U ? 3 : (id == 91U ? 1 : 2)}};
+						: nlohmann::json{{"type", "integer"}, {"minimum", 0}, {"maximum", id == 64U ? 5 : (id == 91U ? 1 : 2)}};
 					variants.push_back({{"type", "object"}, {"additionalProperties", false}, {"required", {"id", "value"}},
 						{"properties", {{"id", {{"const", id}}}, {"value", value}}}});
 				}

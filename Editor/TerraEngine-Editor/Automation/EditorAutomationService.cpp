@@ -170,8 +170,7 @@ namespace TerraEngine::Editor::Automation
 			{
 				// Keep this projection restricted to the typed Scene View controls.
 				if (setting.id != SceneGraphics::GraphicsSettingId::AntiAliasingMode && setting.id != SceneGraphics::GraphicsSettingId::FixedExposureCompensation
-					&& setting.id != SceneGraphics::GraphicsSettingId::ExposureMode && setting.id != SceneGraphics::GraphicsSettingId::ToneMappingMode
-					&& setting.id != SceneGraphics::GraphicsSettingId::GeometryRasterMode) continue;
+					&& setting.id != SceneGraphics::GraphicsSettingId::ExposureMode && setting.id != SceneGraphics::GraphicsSettingId::ToneMappingMode) continue;
 				std::visit([&](const auto& value) {
 					using Value = std::decay_t<decltype(value)>;
 					if constexpr (std::is_same_v<Value, std::uint32_t> || std::is_same_v<Value, float>)
@@ -198,7 +197,7 @@ namespace TerraEngine::Editor::Automation
 			if (!args.contains("lifecycle") || !args["lifecycle"].is_object() || args["lifecycle"].size() != 4
 				|| !args.contains("view") || !args["view"].is_object() || args["view"].size() != 4
 				|| !args.contains("baseRevision") || !ParseSceneGraphicsWide(args["baseRevision"], revision)
-				|| !args.contains("values") || !args["values"].is_array() || args["values"].empty() || args["values"].size() > 5) return false;
+				|| !args.contains("values") || !args["values"].is_array() || args["values"].empty() || args["values"].size() > 4) return false;
 			const auto& stamp = args["lifecycle"];
 			const auto read = [](const nlohmann::json& object, const char* key, std::uint64_t& output) {
 				return object.contains(key) && ParseSceneGraphicsWide(object[key], output);
@@ -230,7 +229,7 @@ namespace TerraEngine::Editor::Automation
 				else
 				{
 					if (typed != SceneGraphics::GraphicsSettingId::AntiAliasingMode && typed != SceneGraphics::GraphicsSettingId::ExposureMode
-						&& typed != SceneGraphics::GraphicsSettingId::ToneMappingMode && typed != SceneGraphics::GraphicsSettingId::GeometryRasterMode) return false;
+						&& typed != SceneGraphics::GraphicsSettingId::ToneMappingMode) return false;
 					std::uint32_t value = 0;
 					if (!ParseSceneGraphicsUnsigned(item["value"], value)) return false;
 					candidate.push_back({typed, value});

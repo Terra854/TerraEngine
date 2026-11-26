@@ -398,11 +398,9 @@ namespace TerraEngine::Renderer {
 		GraphicsSettings::GraphicsAAConfiguration raster;
 		const bool validAA = GraphicsSettings::ResolveGraphicsAAConfiguration(snapshot.values, raster) == GraphicsSettings::GraphicsRequestReason::None;
 		settings.coverageAA = validAA
-			&& raster.raster == GraphicsSettings::GraphicsGeometryRasterMode::Indexed
 			&& raster.antiAliasing == GraphicsSettings::GraphicsAntiAliasingMode::MSAA
 			&& settings.sampleCount == raster.sampleCount;
 		settings.temporalResolve = validAA
-			&& raster.raster == GraphicsSettings::GraphicsGeometryRasterMode::Indexed
 			&& (raster.antiAliasing == GraphicsSettings::GraphicsAntiAliasingMode::TAA
 				|| raster.upscaling == GraphicsSettings::GraphicsUpscalingMode::Temporal)
 			&& settings.sampleCount == 1u;

@@ -72,7 +72,6 @@ namespace
 			SetSceneValue(merged, id, value ? *value : std::move(fallback));
 		};
 		setLocal(GraphicsSettingId::AntiAliasingMode, std::uint32_t{0});
-		setLocal(GraphicsSettingId::GeometryRasterMode, std::uint32_t{0});
 		setLocal(GraphicsSettingId::UpscalingMode, std::uint32_t{0});
 		setLocal(GraphicsSettingId::InternalResolutionScale, 1.0f);
 		setLocal(GraphicsSettingId::UpscalingSharpness, 0.0f);

@@ -2218,6 +2218,27 @@ file(REMOVE
 	\"${ENGINE_INSTALL_DESTINATION}/Engine/TerraEnginePhysicsOptimizationBenchmark${TERRAENGINE_EXECUTABLE_SUFFIX}\"
 )")
 
+# Ship the mesh shader templates with the include layout used by the renderer.
+# The indexed vertex shader is compiled separately for the built-in path.
+set(shader_source_template "${ENGINE_INSTALL_DESTINATION}/Editor/Project/Templates/ShaderSources")
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Default/"
+	DESTINATION "${shader_source_template}/Default"
+	FILES_MATCHING PATTERN "*.hlsl" PATTERN "*.hlsli"
+	PATTERN "DefaultIndexed.mesh.hlsl" EXCLUDE)
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Geometry/TerraGeometryContract.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Geometry/TerraWorldReferenceFrame.hlsli"
+	DESTINATION "${shader_source_template}/Geometry")
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedDeformedGeometry.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedVirtualGeometryAbi.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/VirtualGeometryPackedVertex.hlsli"
+	DESTINATION "${shader_source_template}/VirtualGeometry")
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/PostProcess/MeshTemporalPositionHistory.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/PostProcess/MotionVectors.hlsli"
+	DESTINATION "${shader_source_template}/PostProcess")
+
 # Public geometry/deformation includes are installed beside compiled shaders so
 # authored surface shaders and offline validation use the same versioned ABI as
 # the runtime. These are source contracts, not embedded shader strings.
@@ -2400,7 +2421,9 @@ file(REMOVE
 	\"\${postprocess_out_dir}/VRSGenerate.comp.tspf\"
 	\"\${postprocess_out_dir}/GTAO.comp.spv\"
 	\"\${postprocess_out_dir}/GTAOBlur.comp.spv\"
+	\"\${postprocess_out_dir}/PostProcessFullscreen.mesh.spv\"
 	\"\${postprocess_out_dir}/PostProcessFullscreen.vert.spv\"
+	\"\${out_dir}/DefaultIndexed.vert.tspf\"
 	\"\${postprocess_out_dir}/PostProcessExposure.frag.spv\"
 	\"\${postprocess_out_dir}/ExposureHistogram.comp.spv\"
 	\"\${postprocess_out_dir}/ExposureResolve.comp.spv\"
@@ -2422,6 +2445,7 @@ file(REMOVE
 	\"\${postprocess_out_dir}/VolumetricFog.frag.spv\"
 	\"\${postprocess_out_dir}/OutputDither.frag.spv\"
 	\"\${postprocess_out_dir}/IndexedMotionTotal.vert.spv\"
+	\"\${postprocess_out_dir}/MeshTemporalMotion.frag.spv\"
 	\"\${postprocess_out_dir}/IndexedMotionTotal.frag.spv\"
 	\"\${postprocess_out_dir}/IndexedMotionCamera.vert.spv\"
 	\"\${postprocess_out_dir}/IndexedMotionCamera.frag.spv\"
@@ -2497,13 +2521,14 @@ file(REMOVE
 	\"\${animation_out_dir}/AnimationRagdoll.comp.spv\"
 	\"\${animation_out_dir}/MotionMatchScore.comp.spv\"
 	\"\${animation_out_dir}/MotionMatchTopK.comp.spv\"
+	\"\${ui_out_dir}/UI_Overlay.mesh.spv\"
 	\"\${ui_out_dir}/UI_Static.vert.spv\"
-	\"\${ui_out_dir}/UI_Static.frag.spv\"
 	\"\${ui_out_dir}/UI_Instanced.vert.spv\"
-	\"\${ui_out_dir}/UI_Instanced.frag.spv\"
 	\"\${ui_out_dir}/UI_SDF_Text.vert.spv\"
-	\"\${ui_out_dir}/UI_SDF_Text.frag.spv\"
 	\"\${ui_out_dir}/UI_Textured.vert.spv\"
+	\"\${ui_out_dir}/UI_Static.frag.spv\"
+	\"\${ui_out_dir}/UI_Instanced.frag.spv\"
+	\"\${ui_out_dir}/UI_SDF_Text.frag.spv\"
 	\"\${ui_out_dir}/UI_Textured.frag.spv\"
 	\"\${sky_out_dir}/SkyBackground.task.tspf\"
 	\"\${sky_out_dir}/SkyBackground.mesh.tspf\"
@@ -2531,11 +2556,11 @@ endif()
 
 # The indexed geometry variant reuses the Default material fragment shader.
 execute_process(
-	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/DefaultIndexed.vert.hlsl\" -o \"\${out_dir}/DefaultIndexed.vert.tspf\" -s vs -e main --dxc \"\${DXC_PATH}\"
-	RESULT_VARIABLE compile_indexed_vs
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/DefaultIndexed.mesh.hlsl\" -o \"\${out_dir}/DefaultIndexed.mesh.tspf\" -s ms -e main --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_indexed_mesh
 )
-if(NOT compile_indexed_vs EQUAL 0)
-	message(FATAL_ERROR \"Failed to compile the Default indexed vertex shader during install\")
+if(NOT compile_indexed_mesh EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile the Default compatibility mesh shader during install\")
 endif()
 
 execute_process(
@@ -2681,11 +2706,11 @@ endif()
 
 # Install the shared fullscreen primitive and linear exposure stage together.
 execute_process(
-    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${postprocess_out_dir}/PostProcessFullscreen.vert.spv\" -spirv \"\${postprocess_src_dir}/PostProcessFullscreen.vert.hlsl\"
+    COMMAND \"\${DXC_PATH}\" -T ms_6_5 -E main -Fo \"\${postprocess_out_dir}/PostProcessFullscreen.mesh.spv\" -spirv -fspv-target-env=vulkan1.3 \"\${postprocess_src_dir}/PostProcessFullscreen.mesh.hlsl\"
     RESULT_VARIABLE compile_postprocess_fullscreen
 )
 if(NOT compile_postprocess_fullscreen EQUAL 0)
-    message(FATAL_ERROR \"Failed to compile PostProcessFullscreen.vert.hlsl during install\")
+    message(FATAL_ERROR \"Failed to compile PostProcessFullscreen.mesh.hlsl during install\")
 endif()
 
 execute_process(
@@ -2717,9 +2742,10 @@ foreach(color_shader IN ITEMS
 	\"LensPresentation|LensPresentation|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
 	\"VolumetricFog|VolumetricFog|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
 	\"OutputDither|OutputDither|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
-	\"IndexedMotion|IndexedMotionTotal|vert|vs_6_0|main|INDEXED_MOTION_CAMERA_ONLY=0\"
+	\"IndexedMotion|IndexedMotionTotal|mesh|ms_6_5|main|INDEXED_MOTION_CAMERA_ONLY=0\"
+	\"MeshTemporalMotion|MeshTemporalMotion|frag|ps_6_0|main|TERRAENGINE_SHADER_DEFAULT=1\"
 	\"IndexedMotion|IndexedMotionTotal|frag|ps_6_0|main|INDEXED_MOTION_CAMERA_ONLY=0\"
-	\"IndexedMotion|IndexedMotionCamera|vert|vs_6_0|main|INDEXED_MOTION_CAMERA_ONLY=1\"
+	\"IndexedMotion|IndexedMotionCamera|mesh|ms_6_5|main|INDEXED_MOTION_CAMERA_ONLY=1\"
 	\"IndexedMotion|IndexedMotionCamera|frag|ps_6_0|main|INDEXED_MOTION_CAMERA_ONLY=1\"
 	\"LensDirt|LensDirt|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
 	\"LensFlare|LensFlare|frag|ps_6_0|PSMain|TERRAENGINE_SHADER_DEFAULT=1\"
@@ -2898,12 +2924,12 @@ foreach(animated_virtual_shader_name IN ITEMS AnimatedClusterBounds AnimatedRefi
 endforeach()
 
 execute_process(
-    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Static.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Static.hlsl\"
-    RESULT_VARIABLE compile_ui_static_vs
+    COMMAND \"\${DXC_PATH}\" -T ms_6_5 -E main -Fo \"\${ui_out_dir}/UI_Overlay.mesh.spv\" -spirv -fspv-target-env=vulkan1.3 \"\${UI_SHADER_SRC_DIR}/UI_Overlay.mesh.hlsl\"
+    RESULT_VARIABLE compile_ui_overlay_ms
 )
 # Configure-time guard: select platform or option behavior before generating build files.
-if(NOT compile_ui_static_vs EQUAL 0)
-    message(FATAL_ERROR \"Failed to compile UI_Static.hlsl vertex shader during install\")
+if(NOT compile_ui_overlay_ms EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_Overlay.mesh.hlsl during install\")
 endif()
 
 execute_process(
@@ -2916,30 +2942,12 @@ if(NOT compile_ui_static_ps EQUAL 0)
 endif()
 
 execute_process(
-    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Instanced.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Instanced.hlsl\"
-    RESULT_VARIABLE compile_ui_instanced_vs
-)
-# Configure-time guard: select platform or option behavior before generating build files.
-if(NOT compile_ui_instanced_vs EQUAL 0)
-    message(FATAL_ERROR \"Failed to compile UI_Instanced.hlsl vertex shader during install\")
-endif()
-
-execute_process(
     COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_Instanced.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Instanced.hlsl\"
     RESULT_VARIABLE compile_ui_instanced_ps
 )
 # Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_instanced_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_Instanced.hlsl fragment shader during install\")
-endif()
-
-execute_process(
-    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_SDF_Text.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_SDF_Text.hlsl\"
-    RESULT_VARIABLE compile_ui_text_vs
-)
-# Configure-time guard: select platform or option behavior before generating build files.
-if(NOT compile_ui_text_vs EQUAL 0)
-    message(FATAL_ERROR \"Failed to compile UI_SDF_Text.hlsl vertex shader during install\")
 endif()
 
 execute_process(
@@ -3021,6 +3029,7 @@ set(retired_shader_candidates
 	\"PostProcess/VRSGenerate.comp.tspf\"
 	\"PostProcess/GTAO.comp.spv\"
 	\"PostProcess/GTAOBlur.comp.spv\"
+	\"PostProcess/PostProcessFullscreen.mesh.spv\"
 	\"PostProcess/PostProcessFullscreen.vert.spv\"
 	\"PostProcess/PostProcessExposure.frag.spv\"
 	\"PostProcess/ExposureHistogram.comp.spv\"
@@ -3044,6 +3053,7 @@ set(retired_shader_candidates
 	\"PostProcess/VolumetricFog.frag.spv\"
 	\"PostProcess/OutputDither.frag.spv\"
 	\"PostProcess/IndexedMotionTotal.vert.spv\"
+	\"PostProcess/MeshTemporalMotion.frag.spv\"
 	\"PostProcess/IndexedMotionTotal.frag.spv\"
 	\"PostProcess/IndexedMotionCamera.vert.spv\"
 	\"PostProcess/IndexedMotionCamera.frag.spv\"

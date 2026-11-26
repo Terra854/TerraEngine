@@ -329,7 +329,7 @@ namespace TerraEngine::Tests
 			const auto directory = ColorEvidenceDirectory();
 			VulkanReviewFixture fixture(name, VulkanReviewFixture::NativeDeviceOptions());
 			const auto shaderRoot = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/PostProcess";
-			const auto vertex = VulkanReviewFixture::CompileShader(shaderRoot / "PostProcessFullscreen.vert.hlsl", "vs_6_0", "VSMain", directory / "fullscreen.spv", {}, true);
+			const auto vertex = VulkanReviewFixture::CompileShader(shaderRoot / "../Tests/PostProcessFullscreenFixture.vert.hlsl", "vs_6_0", "VSMain", directory / "fullscreen.spv", {}, true);
 			const auto exposure = VulkanReviewFixture::CompileShader(shaderRoot / "PostProcessExposure.frag.hlsl", "ps_6_0", "PSMain", directory / "exposure.spv", {}, true);
 			const auto source = fixture.CreateImage(kColorExtent, kColorExtent, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT);
 			std::array<Pixel, kColorExtent * kColorExtent> input; input.fill({4.0f, 2.0f, 0.5f, 0.75f});
@@ -355,7 +355,7 @@ namespace TerraEngine::Tests
 			const auto directory = ColorEvidenceDirectory();
 			VulkanReviewFixture fixture(name, VulkanReviewFixture::NativeDeviceOptions());
 			const auto root = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/PostProcess";
-			const auto vertex = VulkanReviewFixture::CompileShader(root / "PostProcessFullscreen.vert.hlsl", "vs_6_0", "VSMain", directory / "fullscreen.spv", {}, true);
+			const auto vertex = VulkanReviewFixture::CompileShader(root / "../Tests/PostProcessFullscreenFixture.vert.hlsl", "vs_6_0", "VSMain", directory / "fullscreen.spv", {}, true);
 			const auto tone = VulkanReviewFixture::CompileShader(root / "ToneMap.frag.hlsl", "ps_6_0", "PSMain", directory / "tone.spv", {}, true);
 			const auto source = ConstantColor(fixture, {4,4,4,0.4f});
 			// These independently evaluated reference points distinguish linear
@@ -409,7 +409,7 @@ namespace TerraEngine::Tests
 			const auto directory = ColorEvidenceDirectory();
 			VulkanReviewFixture fixture(name, VulkanReviewFixture::NativeDeviceOptions());
 			const auto root = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/PostProcess";
-			const auto vertex = VulkanReviewFixture::CompileShader(root / "PostProcessFullscreen.vert.hlsl", "vs_6_0", "VSMain", directory / "fullscreen.spv", {}, true);
+			const auto vertex = VulkanReviewFixture::CompileShader(root / "../Tests/PostProcessFullscreenFixture.vert.hlsl", "vs_6_0", "VSMain", directory / "fullscreen.spv", {}, true);
 			const auto tone = VulkanReviewFixture::CompileShader(root / "ToneMap.frag.hlsl", "ps_6_0", "PSMain", directory / "tone.spv", {}, true);
 			const auto source = ConstantColor(fixture, {4.0f,0.5f,0.75f,0.4f});
 			ColorToneConstants constants;
@@ -476,7 +476,7 @@ namespace TerraEngine::Tests
 			const auto directory = ColorEvidenceDirectory();
 			VulkanReviewFixture fixture(name,VulkanReviewFixture::NativeDeviceOptions());
 			const auto root = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/PostProcess";
-			const auto vertex = VulkanReviewFixture::CompileShader(root / "PostProcessFullscreen.vert.hlsl","vs_6_0","VSMain",directory / "fullscreen.spv",{},true);
+			const auto vertex = VulkanReviewFixture::CompileShader(root / "../Tests/PostProcessFullscreenFixture.vert.hlsl","vs_6_0","VSMain",directory / "fullscreen.spv",{},true);
 			const auto composite = VulkanReviewFixture::CompileShader(root / "BloomComposite.frag.hlsl","ps_6_0","PSMain",directory / "bloom.spv",{},true);
 			const auto source = ConstantColor(fixture,{4,2,1,0.75f});
 			const auto bloom = ConstantColor(fixture,{2,1,0.5f,0});

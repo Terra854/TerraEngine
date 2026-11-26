@@ -19,16 +19,15 @@ namespace TerraEngine::Tests
 		{
 			GraphicsCatalogCapabilities capabilities;
 			capabilities.spatialAAModeMask = 15u;
-			capabilities.indexedRasterSupported = capabilities.msaa4Supported = capabilities.taaSupported = true;
+			capabilities.msaa4Supported = capabilities.taaSupported = true;
 			capabilities.temporalUpscalingSupported = capabilities.temporalSharpeningSupported = true;
 			return capabilities;
 		}
 
-		std::vector<GraphicsSettingValue> Tuple(std::uint32_t aa, std::uint32_t upscale, float scale,
-			std::uint32_t raster = 1u)
+		std::vector<GraphicsSettingValue> Tuple(std::uint32_t aa, std::uint32_t upscale, float scale)
 		{
 			return {{GraphicsSettingId::AntiAliasingMode, aa}, {GraphicsSettingId::UpscalingMode, upscale},
-				{GraphicsSettingId::InternalResolutionScale, scale}, {GraphicsSettingId::GeometryRasterMode, raster}};
+				{GraphicsSettingId::InternalResolutionScale, scale}};
 		}
 
 		bool Option(std::span<const GraphicsSettingDescriptor> catalog, GraphicsSettingId id, GraphicsValue value)
@@ -86,25 +85,23 @@ namespace TerraEngine::Tests
 		registry.Add("Renderer.PostProcess.Temporal.Contract.DefaultCapabilitiesDoNotAdvertiseImplementations", [](TestContext& test) {
 			TemporalFixture fixture(GraphicsCatalogCapabilities{});
 			test.Expect(Option(fixture.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{0})
-				&& Option(fixture.catalog, GraphicsSettingId::GeometryRasterMode, std::uint32_t{0})
 				&& Option(fixture.catalog, GraphicsSettingId::UpscalingMode, std::uint32_t{0})
 				&& Option(fixture.catalog, GraphicsSettingId::InternalResolutionScale, 1.0f), "Legacy inactive defaults must remain usable.");
 			test.Expect(!Option(fixture.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{4})
 				&& !Option(fixture.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{5})
-				&& !Option(fixture.catalog, GraphicsSettingId::GeometryRasterMode, std::uint32_t{1})
 				&& !Option(fixture.catalog, GraphicsSettingId::UpscalingMode, std::uint32_t{1})
 				&& !Option(fixture.catalog, GraphicsSettingId::InternalResolutionScale, 0.5f)
 				&& !FindGraphicsSetting(fixture.catalog, GraphicsSettingId::UpscalingSharpness)->available,
-				"Device-independent defaults cannot advertise unimplemented coverage, temporal or indexed paths.");
+				"Device-independent defaults cannot advertise unimplemented coverage or temporal modes.");
 		});
 
-		registry.Add("Renderer.PostProcess.Temporal.Contract.IndependentCapabilitiesRequireIndexedQualification", [](TestContext& test) {
-			auto capabilities = QualifiedCapabilities(); capabilities.indexedRasterSupported = false;
-			TemporalFixture missingRaster(capabilities);
-			test.Expect(!Option(missingRaster.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{4})
-				&& !Option(missingRaster.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{5})
-				&& !Option(missingRaster.catalog, GraphicsSettingId::UpscalingMode, std::uint32_t{1}), "Shader flags alone cannot qualify an absent indexed renderer.");
-			capabilities.indexedRasterSupported = true; capabilities.taaSupported = false;
+		registry.Add("Renderer.PostProcess.Temporal.Contract.TaaAvailabilityIsIndependent", [](TestContext& test) {
+			auto capabilities = QualifiedCapabilities(); false;
+			TemporalFixture mesh(capabilities);
+			test.Expect(Option(mesh.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{4})
+				&& Option(mesh.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{5})
+				&& Option(mesh.catalog, GraphicsSettingId::UpscalingMode, std::uint32_t{1}), "Native AA and upscaling must remain available on the mesh path.");
+			true; capabilities.taaSupported = false;
 			TemporalFixture supported(capabilities);
 			test.Expect(Option(supported.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{4})
 				&& !Option(supported.catalog, GraphicsSettingId::AntiAliasingMode, std::uint32_t{5})
@@ -122,28 +119,29 @@ namespace TerraEngine::Tests
 			for(std::uint32_t mode = 0; mode <= 3u; ++mode)
 			{
 				GraphicsAAConfiguration configuration;
-				test.Expect(ResolveGraphicsAAConfiguration(Tuple(mode, 0u, 1.0f, 0u), configuration) == GraphicsRequestReason::None
+				test.Expect(ResolveGraphicsAAConfiguration(Tuple(mode, 0u, 1.0f), configuration) == GraphicsRequestReason::None
 					&& configuration.sampleCount == 1u, "Existing automatic spatial/default behavior must remain unchanged.");
 			}
 		});
 
 		registry.Add("Renderer.PostProcess.Temporal.Contract.IncompatibleCombinationsAreUnsupported", [](TestContext& test) {
 			for(const auto& fields : {Tuple(4u, 1u, 0.5f), Tuple(5u, 1u, 0.5f), Tuple(1u, 1u, 0.5f),
-				Tuple(4u, 0u, 1.0f, 0u), Tuple(0u, 0u, 0.5f), Tuple(0u, 1u, 1.0f)})
+				Tuple(0u, 0u, 0.5f), Tuple(0u, 1u, 1.0f)})
 			{
 				GraphicsAAConfiguration configuration;
 				test.Expect(ResolveGraphicsAAConfiguration(fields, configuration) == GraphicsRequestReason::Unsupported, "Known incompatible tuples must report Unsupported.");
 			}
 			auto fields = Tuple(0u, 0u, 1.0f); fields.push_back({GraphicsSettingId::VariableRateShading, true});
 			GraphicsAAConfiguration configuration;
-			test.Expect(ResolveGraphicsAAConfiguration(fields, configuration) == GraphicsRequestReason::Unsupported, "Initial indexed reference path must reject VRS rather than silently disable it.");
+			test.Expect(ResolveGraphicsAAConfiguration(fields, configuration) == GraphicsRequestReason::None, "AA Off must allow VRS.");
+			fields = Tuple(4u, 0u, 1.0f); fields.push_back({GraphicsSettingId::VariableRateShading, true});
+			test.Expect(ResolveGraphicsAAConfiguration(fields, configuration) == GraphicsRequestReason::Unsupported, "Mesh MSAA must reject VRS while the coverage pass requires it off.");
 		});
 
 		registry.Add("Renderer.PostProcess.Temporal.Contract.UnknownAndNonfiniteValuesAreInvalid", [](TestContext& test) {
 			TemporalFixture fixture;
 			for(const auto field : {GraphicsSettingValue{GraphicsSettingId::AntiAliasingMode, std::uint32_t{6}},
 				GraphicsSettingValue{GraphicsSettingId::UpscalingMode, std::uint32_t{2}},
-				GraphicsSettingValue{GraphicsSettingId::GeometryRasterMode, true},
 				GraphicsSettingValue{GraphicsSettingId::UpscalingSharpness, std::numeric_limits<float>::quiet_NaN()}})
 			{
 				const auto* descriptor = FindGraphicsSetting(fixture.catalog, field.id);
@@ -188,15 +186,16 @@ namespace TerraEngine::Tests
 				&& fixture.controller.Snapshot()->internalHeight == 180u, "A verified upscaling seed must publish distinct native internal extents.");
 		});
 
-		registry.Add("Renderer.PostProcess.Temporal.Contract.IndexedOffNeedsTrustedNativePreparation", [](TestContext& test) {
+		registry.Add("Renderer.PostProcess.Temporal.Contract.RetiredRasterSettingIsRejected", [](TestContext& test) {
 			TemporalFixture fixture;
+			const auto retired = static_cast<GraphicsSettingId>(91u);
 			const auto before = fixture.controller.Snapshot();
-			fixture.controller.Enqueue(fixture.Request(Tuple(0u, 0u, 1.0f)));
-			auto candidate = fixture.controller.Prepare(fixture.context); test.Expect(candidate.has_value(), "Supported indexed Off must prepare.");
-			candidate->snapshot.postProcessResourceGeneration = 4u;
-			const auto rejected = fixture.controller.Publish(std::move(*candidate), fixture.context);
-			test.Expect(rejected.reason == GraphicsRequestReason::PreparationFailed && fixture.controller.Snapshot() == before,
-				"Same-raster Off reference cannot claim an indexed backend from editable candidate metadata.");
+			test.Expect(!FindGraphicsSetting(fixture.catalog, retired), "The removed raster selector must be absent from discovery.");
+			const auto queued = fixture.controller.Enqueue(fixture.Request({{retired, std::uint32_t{1}}}));
+			test.Expect(!fixture.controller.Prepare(fixture.context), "The retired selector cannot prepare a graphics change.");
+			const auto rejected = fixture.controller.GetReceipt(queued.requestId);
+			test.Expect(rejected && rejected->reason == GraphicsRequestReason::InvalidSetting && fixture.controller.Snapshot() == before,
+				"Writing the retired ID must fail without publishing a new snapshot.");
 		});
 
 		registry.Add("Renderer.PostProcess.Temporal.Contract.CameraOwnsIndependentSampleCount", [](TestContext& test) {

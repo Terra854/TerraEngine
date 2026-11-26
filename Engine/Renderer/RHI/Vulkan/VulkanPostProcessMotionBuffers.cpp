@@ -81,11 +81,12 @@ namespace TerraEngine::Renderer::Vulkan
 			rows.emplace(pose.data.get(),index); return index;
 		}
 		void Upload(VmaAllocator allocator,PostProcessMotionUploadBuffer& output,
-			const void* data,std::size_t bytes,VkDeviceSize maxStorage)
+			const void* data,std::size_t bytes,VkDeviceSize maxStorage,
+			VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
 		{
 			Require(data && bytes && bytes<=maxStorage,"Motion storage upload is empty or exceeds maxStorageBufferRange.");
 			VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-			buffer.size=bytes; buffer.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+			buffer.size=bytes; buffer.usage=usage; buffer.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
 			VmaAllocationCreateInfo allocation{};
 			allocation.usage=VMA_MEMORY_USAGE_AUTO;
 			allocation.requiredFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
@@ -111,7 +112,11 @@ namespace TerraEngine::Renderer::Vulkan
 		for(auto& buffer:buffers) if(buffer.buffer && allocator)
 			vmaDestroyBuffer(allocator,buffer.buffer,buffer.allocation);
 	}
-	std::shared_ptr<PostProcessMotionBufferLayout> CreatePostProcessMotionBufferLayout(VkDevice device,std::string& reason) noexcept
+	MeshMotionPositionOwner::~MeshMotionPositionOwner()
+	{
+		if(positions.buffer && allocator) vmaDestroyBuffer(allocator, positions.buffer, positions.allocation);
+	}
+	std::shared_ptr<PostProcessMotionBufferLayout> CreatePostProcessMotionBufferLayout(VkDevice device,std::string& reason, bool mesh) noexcept
 	{
 		try
 		{
@@ -119,15 +124,95 @@ namespace TerraEngine::Renderer::Vulkan
 			auto owner=std::make_shared<PostProcessMotionBufferLayout>(); owner->device=device;
 			std::array<VkDescriptorSetLayoutBinding,6> bindings{};
 			for(std::uint32_t i=0;i<bindings.size();++i)
-				bindings[i]={i,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT,nullptr};
+				bindings[i]={i,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_MESH_BIT_EXT,nullptr};
 			bindings[0].stageFlags|=VK_SHADER_STAGE_FRAGMENT_BIT;
+			if(mesh) {
+				bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+				bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+				for(std::uint32_t i = 1; i < 4; ++i) bindings[i].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
+			}
 			VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-			info.bindingCount=static_cast<std::uint32_t>(bindings.size()); info.pBindings=bindings.data();
+			info.bindingCount=mesh ? 4u : static_cast<std::uint32_t>(bindings.size()); info.pBindings=bindings.data();
 			Require(vkCreateDescriptorSetLayout(device,&info,nullptr,&owner->layout)==VK_SUCCESS,"Motion descriptor layout allocation failed.");
 			reason.clear(); return owner;
 		}
 		catch(const std::exception& error) { try { reason=error.what(); } catch(...) {} return {}; }
 		catch(...) { try { reason="Motion descriptor layout preparation failed."; } catch(...) {} return {}; }
+	}
+	std::shared_ptr<PostProcessMotionBuffers> PrepareMeshMotionBuffers(
+		VkPhysicalDevice physicalDevice, VkDevice device, VmaAllocator allocator,
+		std::shared_ptr<PostProcessMotionBufferLayout> layout, PreparedPostProcessMotion prepared,
+		std::span<const MeshMotionDrawInput> draws,
+		std::shared_ptr<const MeshMotionPositionOwner> previous, std::string& reason)
+	{
+		try {
+			VkPhysicalDeviceProperties properties{};
+			vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+			const auto limit = properties.limits.maxStorageBufferRange;
+			const auto alignment = std::max<VkDeviceSize>(16u, properties.limits.minUniformBufferOffsetAlignment);
+			Require(draws.size() <= limit / alignment, "Mesh motion draw table exceeds native limits.");
+			std::vector<std::uint8_t> uniformRows(std::max<std::size_t>(1, draws.size()) * alignment);
+			auto owner = std::make_shared<PostProcessMotionBuffers>();
+			owner->device = device; owner->allocator = allocator; owner->layout = std::move(layout);
+			owner->prepared = std::move(prepared);
+			owner->meshMotion = std::make_shared<MeshMotionPositionOwner>();
+			owner->meshMotion->allocator = allocator;
+			owner->previousMeshMotion = std::move(previous);
+			owner->dynamicRowStride = static_cast<std::uint32_t>(alignment);
+			constexpr std::uint32_t cornersPerMeshlet = 64u;
+			std::uint64_t cornerCount = 0u;
+			for(std::size_t i = 0; i < draws.size(); ++i) {
+				const auto& draw = draws[i];
+				const auto current = static_cast<std::uint32_t>(cornerCount);
+				cornerCount += std::uint64_t(draw.meshletCount) * cornersPerMeshlet;
+				Require(cornerCount <= limit / sizeof(glm::vec4), "Mesh motion positions exceed native storage limits.");
+				owner->meshMotion->rows.try_emplace(draw.identity, current);
+				std::uint32_t prior = 0xffffffffu;
+				if(owner->previousMeshMotion) {
+					const auto found = owner->previousMeshMotion->rows.find(draw.identity);
+					if(found != owner->previousMeshMotion->rows.end()) prior = found->second;
+				}
+				const glm::uvec4 row(draw.firstMeshlet, draw.meshletCount, current, prior);
+				std::memcpy(uniformRows.data() + i * alignment, &row, sizeof(row));
+			}
+			Upload(allocator, owner->buffers[0], &owner->prepared.shader, sizeof(owner->prepared.shader), limit);
+			Upload(allocator, owner->buffers[1], uniformRows.data(), uniformRows.size(), limit, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+			const glm::vec4 invalid(0.0f);
+			if(!owner->previousMeshMotion)
+				Upload(allocator, owner->buffers[2], &invalid, sizeof(invalid), limit);
+			auto& position = owner->meshMotion->positions;
+			position.size = std::max<std::uint64_t>(cornerCount, 1u) * sizeof(glm::vec4);
+			VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+			info.size = position.size;
+			info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+			VmaAllocationCreateInfo allocation{};
+			allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+			Require(vmaCreateBuffer(allocator, &info, &allocation, &position.buffer, &position.allocation, nullptr) == VK_SUCCESS,
+				"Mesh motion position allocation failed.");
+			const std::array poolSizes{VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3},
+				VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1}};
+			VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+			pool.maxSets = 1u; pool.poolSizeCount = static_cast<std::uint32_t>(poolSizes.size()); pool.pPoolSizes = poolSizes.data();
+			Require(vkCreateDescriptorPool(device, &pool, nullptr, &owner->descriptorPool) == VK_SUCCESS, "Mesh motion descriptor pool failed.");
+			VkDescriptorSetAllocateInfo set{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+			set.descriptorPool = owner->descriptorPool; set.descriptorSetCount = 1u; set.pSetLayouts = &owner->layout->layout;
+			Require(vkAllocateDescriptorSets(device, &set, &owner->descriptorSet) == VK_SUCCESS, "Mesh motion descriptor allocation failed.");
+			const auto& old = owner->previousMeshMotion ? owner->previousMeshMotion->positions : owner->buffers[2];
+			const std::array contents{VkDescriptorBufferInfo{owner->buffers[0].buffer, 0u, owner->buffers[0].size},
+				VkDescriptorBufferInfo{owner->buffers[1].buffer, 0u, sizeof(glm::uvec4)},
+				VkDescriptorBufferInfo{position.buffer, 0u, position.size}, VkDescriptorBufferInfo{old.buffer, 0u, old.size}};
+			std::array<VkWriteDescriptorSet, 4> writes{};
+			for(std::uint32_t i = 0; i < writes.size(); ++i) {
+				auto& write = writes[i];
+				write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+				write.dstSet = owner->descriptorSet; write.dstBinding = i; write.descriptorCount = 1;
+				write.descriptorType = i == 1 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				write.pBufferInfo = &contents[i];
+			}
+			vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+			return owner;
+		}
+		catch(const std::exception& error) { reason = error.what(); return {}; }
 	}
 	std::shared_ptr<PostProcessMotionBuffers> PreparePostProcessMotionBuffers(
 		VkPhysicalDevice physicalDevice,VkDevice device,VmaAllocator allocator,

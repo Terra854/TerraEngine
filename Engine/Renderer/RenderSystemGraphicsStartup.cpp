@@ -131,16 +131,6 @@ namespace
 			const auto tupleReason = ResolveGraphicsAAConfiguration(tupleValues, configuration);
 			if(tupleReason != GraphicsRequestReason::None)
 			{ if(failureReason) *failureReason = tupleReason; detail = "Startup image/raster tuple does not match the actual native renderer."; return StartupColorPreparation::Failed; }
-			if(configuration.raster == GraphicsGeometryRasterMode::Indexed)
-			{
-				// The live indexed preparer requires an actual sealed publication.
-				// Startup has none yet, and color's inactive success is not indexed
-				// qualification. Keep the full prior profile until a genuine native
-				// prepublication raster factory can certify this configuration.
-				if(failureReason) *failureReason = GraphicsRequestReason::Unsupported;
-				detail = "Indexed startup graphics require native prepublication raster qualification, which is not available.";
-				return StartupColorPreparation::Failed;
-			}
 			const bool rasterActive = configuration.antiAliasing != GraphicsAntiAliasingMode::Off
 				|| configuration.upscaling != GraphicsUpscalingMode::Off;
 			PostProcessEffectSettings effects;
@@ -295,7 +285,7 @@ void RenderSystem::PrepareGraphicsStartupAtProtectedBoundary()
 		provisional.spatialAAModeMask = 0xFu;
 		// Provisional flags validate wire syntax only before a device exists.
 		// Actual discovery and exact native preparation govern all promotion.
-		provisional.indexedRasterSupported = provisional.msaa4Supported = provisional.taaSupported = true;
+		provisional.msaa4Supported = provisional.taaSupported = true;
 		provisional.temporalUpscalingSupported = provisional.temporalSharpeningSupported = true;
 		// Reserve the registered camera effect bits for serialized value checks.
 		provisional.postProcessEffectMask = (static_cast<std::uint32_t>(PostProcessEffectCapability::OutputDithering) << 1u) - 1u;

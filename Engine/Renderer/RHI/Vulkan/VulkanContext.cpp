@@ -819,13 +819,12 @@ TerraEngine::Renderer::GraphicsSettings::GraphicsCatalogCapabilities VulkanConte
 			try
 			{
 				auto& resources = ResourceManager::Instance();
-				const auto bytes = resources.ReadFileBytes(resources.ResolveEngineAssetPath("Shaders/DefaultIndexed.vert.tspf"));
+				const auto bytes = resources.ReadFileBytes(resources.ResolveEngineAssetPath("Shaders/DefaultIndexed.mesh.tspf"));
 				impl->indexedRasterShaderInstalled = bytes.size() >= 4u && std::memcmp(bytes.data(), "TSPF", 4u) == 0;
 			}
 			catch (const std::exception&) { }
 			impl->indexedRasterShaderGeneration = impl->backendResourceGeneration;
 		}
-		result.indexedRasterSupported = impl->indexedRasterShaderInstalled;
 	}
 	VkPhysicalDeviceProperties properties{};
 	vkGetPhysicalDeviceProperties(impl->physicalDevice, &properties);
@@ -849,9 +848,9 @@ TerraEngine::Renderer::GraphicsSettings::GraphicsCatalogCapabilities VulkanConte
 		&& properties.limits.maxComputeWorkGroupSize[0] >= 16u && properties.limits.maxComputeWorkGroupSize[1] >= 16u
 		&& TerraEngine::Renderer::Vulkan::QualifiesPostProcessFormat(color, {1, 1}, usage);
 	result.spatialAAModeMask = ReadSpatialAAModeMask({1u, 1u});
-	result.msaa4Supported = result.indexedRasterSupported && result.postProcessColorSupported
+	result.msaa4Supported = impl->meshShaderSupported && result.postProcessColorSupported
 		&& impl->SupportsIndexedMsaa4(format);
-	if(result.indexedRasterSupported && result.postProcessColorSupported)
+	if(impl->meshShaderSupported && !impl->UsesVrsAttachment() && result.postProcessColorSupported)
 	{
 		if(impl->temporalShaderGeneration != impl->backendResourceGeneration)
 		{
@@ -867,15 +866,14 @@ TerraEngine::Renderer::GraphicsSettings::GraphicsCatalogCapabilities VulkanConte
 					return signature == 0x07230203u;
 				};
 				const bool wide = format == VK_FORMAT_R32G32B32A32_SFLOAT;
-				impl->temporalShadersReady = available("IndexedMotionTotal.vert.spv") && available("IndexedMotionTotal.frag.spv")
+				impl->temporalShadersReady = available("MeshTemporalMotion.frag.spv")
 					&& available(wide ? "TemporalResolve32.comp.spv" : "TemporalResolve16.comp.spv")
 					&& available(wide ? "TemporalSharpen32.comp.spv" : "TemporalSharpen16.comp.spv");
 			}
 			catch(const std::exception&) {}
 			impl->temporalShaderGeneration = impl->backendResourceGeneration;
 		}
-		// Only the actual single-sample indexed variant is currently admitted.
-		// Candidate preparation still proves every exact surface and pipeline.
+		// The temporal target owns a single-sample resolved depth image.
 		const auto depth = impl->FindDepthFormat();
 		result.taaSupported = impl->temporalShadersReady && (depth == VK_FORMAT_D32_SFLOAT || depth == VK_FORMAT_D16_UNORM);
 		result.temporalUpscalingSupported = result.taaSupported;
@@ -918,15 +916,15 @@ TerraEngine::Renderer::GraphicsSettings::GraphicsCatalogCapabilities VulkanConte
 						? "Shaders/PostProcess/DepthOfField32.comp.spv" : "Shaders/PostProcess/DepthOfField16.comp.spv"));
 				qualify(Effect::LensDirt, available("Shaders/PostProcess/LensDirt.frag.spv"));
 				qualify(Effect::LensFlare, available("Shaders/PostProcess/LensFlare.frag.spv"));
-				qualify(Effect::MotionBlur, result.taaSupported
-					&& available("Shaders/PostProcess/IndexedMotionCamera.vert.spv")
+				qualify(Effect::MotionBlur, impl->indexedRasterShaderInstalled && result.taaSupported
+					&& available("Shaders/PostProcess/IndexedMotionCamera.mesh.spv")
 					&& available("Shaders/PostProcess/IndexedMotionCamera.frag.spv")
 					&& available("Shaders/PostProcess/MotionBlurInputs.comp.spv")
 					&& available(format == VK_FORMAT_R32G32B32A32_SFLOAT
 						? "Shaders/PostProcess/MotionBlur32.comp.spv" : "Shaders/PostProcess/MotionBlur16.comp.spv"));
 				VkPhysicalDeviceProperties properties{};
 				vkGetPhysicalDeviceProperties(impl->physicalDevice, &properties);
-				const bool screenMrt = result.indexedRasterSupported && properties.limits.maxColorAttachments >= 7u
+				const bool screenMrt = impl->indexedRasterShaderInstalled && properties.limits.maxColorAttachments >= 7u
 					&& properties.limits.maxFragmentOutputAttachments >= 7u
 					&& (depth == VK_FORMAT_D32_SFLOAT || depth == VK_FORMAT_D16_UNORM)
 					&& available("Shaders/DefaultScreenSpace.frag.spv");
@@ -985,7 +983,7 @@ std::uint32_t VulkanContext::ReadSpatialAAModeMask(glm::uvec2 extent) const
 				std::memcpy(&magic, bytes.data(), sizeof(magic));
 				return magic == 0x07230203u;
 			};
-			if(hasModule("PostProcessFullscreen.vert.spv") && hasModule("PostProcessExposure.frag.spv"))
+			if(hasModule("PostProcessFullscreen.mesh.spv") && hasModule("PostProcessExposure.frag.spv"))
 			{
 				if(hasModule("FXAA.frag.spv")) impl->spatialAAInstalledModes |= bit(GraphicsAntiAliasingMode::FXAA);
 				if(hasModule("SMAAEdges.frag.spv") && hasModule("SMAAWeights.frag.spv") && hasModule("SMAAResolve.frag.spv"))

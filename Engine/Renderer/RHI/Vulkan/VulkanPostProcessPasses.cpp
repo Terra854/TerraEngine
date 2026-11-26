@@ -77,7 +77,7 @@ namespace TerraEngine::Renderer::Vulkan
 			const char* fullscreenFragment = "Shaders/PostProcess/PostProcessExposure.frag.spv")
 		{
 			const VkShaderModule vertex = LoadModule(device, grid
-				? "Shaders/Editor/SceneViewGrid.vert.spv" : "Shaders/PostProcess/PostProcessFullscreen.vert.spv");
+				? "Shaders/Editor/SceneViewGrid.vert.spv" : "Shaders/PostProcess/PostProcessFullscreen.mesh.spv");
 			const VkShaderModule fragment = LoadModule(device, grid
 				? "Shaders/Editor/SceneViewGrid.frag.spv" : fullscreenFragment);
 			if(!vertex || !fragment)
@@ -88,9 +88,11 @@ namespace TerraEngine::Renderer::Vulkan
 			}
 			std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
 			stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-			stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			// The editor grid still has its own vertex shader. Runtime image
+			// passes use one workgroup of the shared fullscreen mesh shader.
+			stages[0].stage = grid ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_MESH_BIT_EXT;
 			stages[0].module = vertex;
-			stages[0].pName = "VSMain";
+			stages[0].pName = grid ? "VSMain" : "main";
 			stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
 			stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			stages[1].module = fragment;
@@ -136,8 +138,8 @@ namespace TerraEngine::Renderer::Vulkan
 			VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 			info.stageCount = static_cast<std::uint32_t>(stages.size());
 			info.pStages = stages.data();
-			info.pVertexInputState = &vertexInput;
-			info.pInputAssemblyState = &assembly;
+			info.pVertexInputState = grid ? &vertexInput : nullptr;
+			info.pInputAssemblyState = grid ? &assembly : nullptr;
 			info.pViewportState = &viewport;
 			info.pRasterizationState = &raster;
 			info.pMultisampleState = &samples;
@@ -278,7 +280,7 @@ namespace TerraEngine::Renderer::Vulkan
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, resources.fullscreenLayout, 0, 1, &source, 0, nullptr);
 			vkCmdPushConstants(command, resources.fullscreenLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(exposure), &exposure);
-			vkCmdDraw(command, 3, 1, 0, 0);
+			vkCmdDrawMeshTasksEXT(command, 1, 1, 1);
 		}
 
 		struct AtmosphereConstants
@@ -381,7 +383,7 @@ namespace TerraEngine::Renderer::Vulkan
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.pipeline);
 			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.layout, 0, 1, &pass.set, 0, nullptr);
 			vkCmdPushConstants(command, pass.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants);
-			vkCmdDraw(command, 3, 1, 0, 0);
+			vkCmdDrawMeshTasksEXT(command, 1, 1, 1);
 			vkCmdEndRenderPass(command);
 			output.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			Transition(command, output.image, output.layout, output.layout, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
@@ -493,7 +495,7 @@ namespace TerraEngine::Renderer::Vulkan
 		const bool scaled = aa.upscaling == GraphicsSettings::GraphicsUpscalingMode::Temporal;
 		if(scaled && (!resources.passes.cameraRasterPass || resources.passes.usesVrs
 			|| presentation.output.diagnosticsView != RenderViewType::Game))
-		{ reason = "Scaled indexed reconstruction requires a qualified Game camera without VRS."; return false; }
+		{ reason = "Temporal upscaling requires a qualified Game camera with VRS off."; return false; }
 		// An inherited Game root describes its own main output dimensions, not
 		// every Scene or dedicated camera surface that inherits its values.
 		const bool boundView = settings.target.view && presentation.graphicsView
@@ -526,7 +528,7 @@ namespace TerraEngine::Renderer::Vulkan
 		if(plan.screenSpaceLighting)
 		{
 			if(!presentation.graphicsView || !configuration.viewLifetimeGeneration || resources.passes.usesVrs
-				|| aa.raster != GraphicsSettings::GraphicsGeometryRasterMode::Indexed || !resources.sourceTargetGeneration)
+				|| !resources.sourceTargetGeneration)
 			{ reason = "Screen-space lighting requires a registered indexed native view with VRS off."; return false; }
 			configuration.screenSpaceOwner = {settings.lifecycle, *presentation.graphicsView, resources.sourceTargetGeneration};
 		}
@@ -536,12 +538,12 @@ namespace TerraEngine::Renderer::Vulkan
 			// A reconstructed view and its jittered geometry depth no longer line
 			// up pixel for pixel. Qualify that combination with an aligned input.
 			|| (configuration.effects.atmosphere.Active() && plan.temporalResolve)
-			|| (configuration.effects.motionBlur.Active() && (aa.raster != GraphicsSettings::GraphicsGeometryRasterMode::Indexed
-				|| resources.passes.usesVrs || !configuration.viewLifetimeGeneration))
+			|| (configuration.effects.motionBlur.Active() && (resources.passes.usesVrs || !configuration.viewLifetimeGeneration))
 			|| (configuration.effects.depthOfField.Active() && !configuration.viewLifetimeGeneration))
 		{ reason = "This camera effect requires a compatible live native view."; return false; }
 		configuration.needsPresentationEffects = plan.presentationEffects;
 		configuration.needsTemporal = plan.temporalResolve;
+		configuration.meshTemporal = plan.temporalResolve && !plan.RequiresEffectGeometry();
 		configuration.needsScaledCamera = scaled;
 		// Coverage has already been resolved by rasterization when these stages
 		// run. Only one of the named post-AA algorithms may request a shader.
@@ -744,7 +746,7 @@ namespace TerraEngine::Renderer::Vulkan
 			// Custom descriptors borrow an independent native image owner, not a
 			// pointer back to this bundle. Every possible source stays retained.
 			if(!targets.RetainCustomImageSet(reason) || targets.processingImageCount < 2u) return false;
-			const auto path = ResourceManager::Instance().ResolveEngineAssetPath("Shaders/PostProcess/PostProcessFullscreen.vert.spv");
+			const auto path = ResourceManager::Instance().ResolveEngineAssetPath("Shaders/PostProcess/PostProcessFullscreen.mesh.spv");
 			const auto bytes = ResourceManager::Instance().ReadFileBytes(path);
 			if(bytes.empty() || bytes.size() % sizeof(std::uint32_t)) return false;
 			fullscreen.resize(bytes.size() / sizeof(std::uint32_t));
@@ -835,7 +837,7 @@ namespace TerraEngine::Renderer::Vulkan
 				depth = resources->scaledCamera->depth;
 			}
 			resources->temporalView = PrepareTemporalViewResources(configuration.physicalDevice, targets,
-				*source, depth, targets.processing[index], effects.motionBlur.Active(), reason);
+				*source, depth, targets.processing[index], effects.motionBlur.Active(), reason, configuration.meshTemporal);
 			if(!resources->temporalView) return false;
 			resources->temporalView->resolveOutput = index;
 			resources->temporalFrameState = resources->temporalView->frameState;

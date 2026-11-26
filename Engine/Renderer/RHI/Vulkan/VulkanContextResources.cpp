@@ -1437,7 +1437,6 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 			vmaDestroyBuffer(allocator, it->second.meshMorphDeltaBuffer.buffer, it->second.meshMorphDeltaBuffer.allocation);
 		}
 		vmaDestroyBuffer(allocator, it->second.meshDecodeInfoBuffer.buffer, it->second.meshDecodeInfoBuffer.allocation);
-		DestroyBufferImmediate(it->second.indexedCornerBuffer);
 		it->second.indexedTopology.reset();
 		it->second.indexedAllocationGeneration = 0;
 		vmaDestroyBuffer(allocator, it->second.indexBuffer.buffer, it->second.indexBuffer.allocation);
@@ -1858,16 +1857,15 @@ bool VulkanContext::Impl::EnsureIndexedCornerMesh(TerraEngine::UUID meshId,
 {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	const auto reject = [&reason](const char* text) { reason = text; return false; };
-	if (!prepared || !prepared->sourceOwner || prepared->indices.empty()
+	if (!prepared || !prepared->sourceOwner || prepared->firstIndexByMeshlet.size() < 2u
 		|| prepared->cpuPublicationGeneration == 0
-		|| prepared->sourceOwner->publicationGeneration != prepared->cpuPublicationGeneration
-		|| prepared->indices.size() > std::numeric_limits<std::uint32_t>::max())
-		return reject("Indexed upload lacks an exact owned, validated CPU preparation.");
+		|| prepared->sourceOwner->publicationGeneration != prepared->cpuPublicationGeneration)
+		return reject("Compatibility mesh lacks an exact owned, validated CPU preparation.");
 	const auto owner = prepared->sourceOwner;
 	if (ResourceManager::Instance().AcquireMeshSnapshot(meshId) != owner)
 		return reject("Indexed preparation belongs to a retired CPU mesh publication.");
 	if (deviceLost || !initialized || nextIndexedAllocationGeneration == 0)
-		return reject("Indexed upload renderer lifetime is unavailable.");
+		return reject("Compatibility mesh renderer lifetime is unavailable.");
 	try { EnsureMesh(meshId); }
 	catch (const std::exception& error) { reason = std::string("Indexed base mesh preparation failed: ") + error.what(); return false; }
 	auto found = meshCache.find(meshId);
@@ -1876,63 +1874,21 @@ bool VulkanContext::Impl::EnsureIndexedCornerMesh(TerraEngine::UUID meshId,
 		|| found->second.allocationGeneration == 0)
 		return reject("Indexed packed-buffer owner does not match its CPU preparation.");
 	auto& mesh = found->second;
-	if (mesh.indexedCornerBuffer.buffer != VK_NULL_HANDLE)
+	if (mesh.indexedTopology)
 	{
-		if (mesh.indexedTopology && mesh.indexedTopology->sourceOwner == owner
+		if (mesh.indexedTopology->sourceOwner == owner
 			&& mesh.indexedTopology->cpuPublicationGeneration == prepared->cpuPublicationGeneration
 			&& mesh.indexedAllocationGeneration != 0) { reason.clear(); return true; }
-		return reject("Indexed bytes already belong to a different publication.");
+		return reject("Compatibility topology already belongs to a different publication.");
 	}
-	const auto bytes = static_cast<VkDeviceSize>(prepared->indices.size()) * sizeof(std::uint32_t);
-	VulkanBuffer staging{}, candidate{};
-	bool mayBePending = false;
-	try
-	{
-		// Reserve retention capacity before any copy can be accepted. In an
-		// ambiguous submit/fence failure both endpoints survive until proven idle.
-		ambiguousUploadBuffers.reserve(ambiguousUploadBuffers.size() + 2U);
-		staging = CreateBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Indexed Corner Staging");
-		candidate = CreateBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-			VMA_MEMORY_USAGE_GPU_ONLY, "Indexed Corner UINT32 Raster Indices");
-		if (!WriteMappedBuffer(allocator, staging, prepared->indices.data(), bytes))
-		{
-			DestroyBufferImmediate(staging); DestroyBufferImmediate(candidate);
-			return reject("Indexed staging bytes could not be copied/flushed.");
-		}
-		TerraEngine::Renderer::Vulkan::UploadAcceptance acceptance(1U, true);
-		mayBePending = true;
-		const bool completed = CopyBuffer(staging.buffer, candidate.buffer, bytes,
-			VK_ACCESS_INDEX_READ_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
-		acceptance.RecordCopy(completed);
-		if (!acceptance.CanPublish(true, !deviceLost && initialized))
-		{
-			RetainAmbiguousUpload(staging); RetainAmbiguousUpload(candidate);
-			return reject("Indexed copy completion is unavailable; no new index owner was published.");
-		}
-		mayBePending = false;
-		DestroyBufferImmediate(staging);
-		// CPU recooks can publish while the native copy completes. Keep the old
-		// working cache untouched when that immutable source is no longer current.
-		if (ResourceManager::Instance().AcquireMeshSnapshot(meshId) != owner)
-		{
-			DestroyBufferImmediate(candidate);
-			return reject("Indexed source was retired during upload.");
-		}
-		mesh.indexedCornerBuffer = candidate; candidate = {};
-		mesh.indexedTopology = std::move(prepared);
-		mesh.indexedAllocationGeneration = nextIndexedAllocationGeneration++;
-		// Existing mesh allocationGeneration stays unchanged: packed geometry and
-		// descriptors did not move merely because optional raster indices appeared.
-		reason.clear();
-		return true;
-	}
-	catch (const std::exception& error)
-	{
-		if (mayBePending) { RetainAmbiguousUpload(staging); RetainAmbiguousUpload(candidate); }
-		else { DestroyBufferImmediate(staging); DestroyBufferImmediate(candidate); }
-		reason = std::string("Indexed preparation failed: ") + error.what();
-		return false;
-	}
+	// Mesh shader replay reads the existing packed geometry. Publish only the
+	// CPU range proof and pin the same immutable mesh owner through rendering.
+	if (ResourceManager::Instance().AcquireMeshSnapshot(meshId) != owner)
+		return reject("Compatibility topology was retired during preparation.");
+	mesh.indexedTopology = std::move(prepared);
+	mesh.indexedAllocationGeneration = nextIndexedAllocationGeneration++;
+	reason.clear();
+	return true;
 }
 
 VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline) {

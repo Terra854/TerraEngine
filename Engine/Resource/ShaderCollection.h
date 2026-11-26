@@ -46,5 +46,6 @@ struct ShaderCollection
 	bool reflectionComplete = false;
 	bool usesReservedBindings = false;
 	bool usesAnimationBindings = false;
+	bool inheritsAllDefaultStages = false;
 	std::string geometryContractDiagnostic;
 };

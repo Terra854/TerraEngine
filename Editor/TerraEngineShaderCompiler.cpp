@@ -139,7 +139,9 @@ namespace
 				if(!ReadCommandText(argv[++i], value)) return false;
 				if(value == "surface") args.shaderUse = ShaderUse::Surface;
 				else if(value == "post-process") args.shaderUse = ShaderUse::PostProcess;
-				else { std::cerr << "Unsupported --shader-use; expected surface or post-process.\n"; return false; }
+				else if(value == "source-set") args.shaderUse = ShaderUse::SourceSet;
+				else if(value == "compatible-surface") args.shaderUse = ShaderUse::CompatibleSurface;
+				else { std::cerr << "Unsupported --shader-use; expected surface, post-process, source-set, or compatible-surface.\n"; return false; }
 			}
 			else if(flag == "--dxc" && i + 1 < argc)
 			{
@@ -155,7 +157,7 @@ namespace
 
 		if(args.input.empty() || args.output.empty() || args.stage.empty())
 		{
-			std::cerr << "Usage: TerraEngineShaderCompiler -i <input.hlsl> -o <output.tspf> -s <vs|ps|cs|gs|hs|ds|ms|ts> [--shader-use surface|post-process]\n";
+			std::cerr << "Usage: TerraEngineShaderCompiler -i <input.hlsl> -o <output.tspf> -s <vs|ps|cs|gs|hs|ds|ms|ts> [--shader-use surface|post-process|source-set|compatible-surface]\n";
 			return false;
 		}
 
@@ -208,7 +210,8 @@ int main(int argc, char** argv)
 	if(CompileShader(args.input, args.output, args.stage, args.targetProfile, args.entryPoint, dxcPath, args.shaderUse))
 	{
 		EmitProgress(0.98f, "Shader Done", "Shader compile output is ready.");
-		std::cout << "Wrote TSPF: " << std::quoted(outputText) << "\n";
+		std::cout << (args.shaderUse == ShaderUse::SourceSet ? "Wrote SPIR-V: " : "Wrote TSPF: ")
+			<< std::quoted(outputText) << "\n";
 		return 0;
 	}
 	else

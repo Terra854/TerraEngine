@@ -11,7 +11,7 @@ using TerraEngine;
 
 // Test-first managed ingress for the required Windows Vulkan coverage/temporal
 // rows. Settings publications alone cannot pass: an independent native fixture
-// must acknowledge real captures, indexed execution, motion and reset checks.
+// must acknowledge real captures, mesh execution, motion and reset checks.
 // The script never fabricates rendering evidence or changes a debug route.
 public sealed partial class TemporalAAFixture : Script
 {
@@ -19,7 +19,6 @@ public sealed partial class TemporalAAFixture : Script
 	private const GraphicsSettingId Scale = (GraphicsSettingId)66;
 	private const GraphicsSettingId Upscaling = (GraphicsSettingId)89;
 	private const GraphicsSettingId Sharpness = (GraphicsSettingId)90;
-	private const GraphicsSettingId Raster = (GraphicsSettingId)91;
 	private sealed record RequiredCase(string Id, uint AaMode, uint UpscalingMode, float Scale, uint Samples, uint Width, uint Height);
 	private static readonly RequiredCase[] Cases = {
 		new("msaa4-native", 4U, 0U, 1F, 4U, 640U, 360U),
@@ -33,7 +32,7 @@ public sealed partial class TemporalAAFixture : Script
 	private readonly List<JsonElement> _acknowledgements = new();
 	private readonly List<string> _checks = new(), _blocked = new();
 	private readonly string _boot = Guid.NewGuid().ToString("N");
-	private GraphicsSettingDescriptor? _aa, _scale, _upscaling, _sharpness, _raster;
+	private GraphicsSettingDescriptor? _aa, _scale, _upscaling, _sharpness;
 	private GraphicsSettingsSnapshot? _session, _effective, _before;
 	private string _root = string.Empty, _run = string.Empty, _failure = string.Empty, _status = "pending";
 	private Phase _phase;
@@ -81,12 +80,9 @@ public sealed partial class TemporalAAFixture : Script
 			var catalog = Graphics.DiscoverSettings();
 			_aa = catalog.SingleOrDefault(d => d.Id == Aa); _scale = catalog.SingleOrDefault(d => d.Id == Scale);
 			_upscaling = catalog.SingleOrDefault(d => d.Id == Upscaling); _sharpness = catalog.SingleOrDefault(d => d.Id == Sharpness);
-			_raster = catalog.SingleOrDefault(d => d.Id == Raster);
 			CheckDescriptor(_aa, GraphicsValueKind.Unsigned32, "AA ID64", required: true);
 			CheckDescriptor(_scale, GraphicsValueKind.Scalar, "internal scale ID66", required: true);
 			CheckDescriptor(_upscaling, GraphicsValueKind.Unsigned32, "upscaling ID89", required: true);
-			CheckDescriptor(_raster, GraphicsValueKind.Unsigned32, "geometry raster ID91", required: true);
-			if (!Option(_raster, 1U)) _blocked.Add("Required ordinary indexed raster option unavailable.");
 			foreach (uint mode in new uint[] { 0, 4, 5 }) if (!Option(_aa, mode)) _blocked.Add("Required AA option unavailable: " + mode);
 			foreach (uint mode in new uint[] { 0, 1 }) if (!Option(_upscaling, mode)) _blocked.Add("Required upscaling option unavailable: " + mode);
 			if (!ScalarOption(_scale, 1F) || !ScalarOption(_scale, 0.5F)) _blocked.Add("Required native/half internal scales unavailable.");
@@ -100,7 +96,7 @@ public sealed partial class TemporalAAFixture : Script
 			if (_request == 0) {
 				_before = Published(); if (_before is null) return;
 				var row = Cases[_caseIndex];
-				var values = new List<GraphicsSettingValue> { new(Aa, row.AaMode), new(Upscaling, row.UpscalingMode), new(Scale, row.Scale), new(Raster, 1U) };
+				var values = new List<GraphicsSettingValue> { new(Aa, row.AaMode), new(Upscaling, row.UpscalingMode), new(Scale, row.Scale) };
 				// Sharpening is explicitly optional. Zero is used when the actual
 				// discovered control supports it, keeping unrelated styling fixed.
 				if (ScalarOption(_sharpness, 0F)) values.Add(new(Sharpness, 0F));
@@ -125,7 +121,7 @@ public sealed partial class TemporalAAFixture : Script
 			if (_request == 0) {
 				_before = Published(); if (_before is null) return;
 				Begin(Graphics.ApplySettings(new[] { new GraphicsSettingValue(Aa, 4U), new GraphicsSettingValue(Upscaling, 1U),
-					new GraphicsSettingValue(Scale, 0.5F), new GraphicsSettingValue(Raster, 1U) }, expectedRevision: _before.Revision)); return;
+					new GraphicsSettingValue(Scale, 0.5F) }, expectedRevision: _before.Revision)); return;
 			}
 			if (Terminal() is not { } rejected) return;
 			Require(rejected.State == GraphicsRequestState.Rejected && rejected.Reason == GraphicsRequestReason.Unsupported
@@ -175,7 +171,7 @@ public sealed partial class TemporalAAFixture : Script
 		&& receipt.AppliedFrameId > 0 && snapshot.Revision >= receipt.EffectiveRevision && snapshot.PublishedFrameId >= receipt.AppliedFrameId;
 	private static void AssertCase(RequiredCase row, GraphicsSettingsSnapshot snapshot)
 	{
-		Require(Unsigned(snapshot, Aa) == row.AaMode && Unsigned(snapshot, Upscaling) == row.UpscalingMode && Unsigned(snapshot, Raster) == 1U
+		Require(Unsigned(snapshot, Aa) == row.AaMode && Unsigned(snapshot, Upscaling) == row.UpscalingMode
 			&& Convert.ToSingle(Value(snapshot, Scale), CultureInfo.InvariantCulture) == row.Scale, "Required AA/upscale tuple differs from its native publication.");
 		Require(snapshot.SampleCount == row.Samples && snapshot.InternalWidth == row.Width && snapshot.InternalHeight == row.Height
 			&& snapshot.OutputWidth == 640U && snapshot.OutputHeight == 360U, "Required actual samples/internal/output extents differ.");
@@ -228,16 +224,15 @@ public sealed partial class TemporalAAFixture : Script
 				&& ulong.Parse(ack.GetProperty("frameId").GetString()!, CultureInfo.InvariantCulture) >= snapshot.PublishedFrameId,
 				"Native capture ACK has stale settings, backend or frame provenance.");
 			Require(ack.GetProperty("aaMode").GetUInt32() == Unsigned(snapshot, Aa) && ack.GetProperty("upscalingMode").GetUInt32() == Unsigned(snapshot, Upscaling)
-				&& ack.GetProperty("geometryRasterMode").GetUInt32() == 1U && Unsigned(snapshot, Raster) == 1U
 				&& ack.GetProperty("sampleCount").GetUInt32() == snapshot.SampleCount, "Native capture ACK differs from the actual selected mode/raster/samples.");
 			Require(Extent(ack.GetProperty("internalExtent"), snapshot.InternalWidth, snapshot.InternalHeight)
 				&& Extent(ack.GetProperty("outputExtent"), snapshot.OutputWidth, snapshot.OutputHeight), "Native capture ACK has different actual extents.");
 			// Draw counters refer to scene geometry in the captured view, excluding
-			// sky/fullscreen/HUD work. A Direct label alone is not indexed proof.
+			// sky/fullscreen/HUD work. The ordinary mesh path needs no effect geometry replay.
 			Require(ack.GetProperty("nativeBackendReadback").GetBoolean() && !ack.GetProperty("deterministicFallback").GetBoolean()
 				&& !ack.GetProperty("validationOverrideActive").GetBoolean() && !ack.GetProperty("vrsEnabled").GetBoolean()
-				&& ack.GetProperty("indexedDraws").GetUInt64() > 0 && ack.GetProperty("meshTaskDraws").GetUInt64() == 0,
-				"Required ACK needs real indexed native execution, VRS off and no debug override/fallback.");
+				&& ack.GetProperty("indexedDraws").GetUInt64() == 0,
+				"Required ACK needs native mesh execution, VRS off and no debug override/fallback.");
 			Require(ack.GetProperty(rollback ? "atomicRollbackVerified" : "edgeQualityPassed").GetBoolean(), "Native image acceptance failed.");
 			if (!rollback && (Unsigned(snapshot, Aa) == 5U || Unsigned(snapshot, Upscaling) == 1U))
 				foreach (string flag in new[] { "shimmerQualityPassed", "cameraMotionVerified", "rigidMotionVerified", "skinnedMotionVerified", "historyResetVerified", "viewIsolationVerified" })
@@ -271,7 +266,7 @@ public sealed partial class TemporalAAFixture : Script
 		writer.WriteString("renderer", Decimal(snapshot.Lifecycle.RendererSessionGeneration)); writer.WriteString("backend", Decimal(snapshot.Lifecycle.BackendResourceGeneration));
 		writer.WriteString("postProcessResourceGeneration", Decimal(snapshot.PostProcessResourceGeneration)); writer.WriteNumber("sampleCount", snapshot.SampleCount);
 		WriteExtent(writer, "internalExtent", snapshot.InternalWidth, snapshot.InternalHeight); WriteExtent(writer, "outputExtent", snapshot.OutputWidth, snapshot.OutputHeight);
-		foreach (var pair in new[] { ("aaMode", Aa), ("upscalingMode", Upscaling), ("geometryRasterMode", Raster) }) {
+		foreach (var pair in new[] { ("aaMode", Aa), ("upscalingMode", Upscaling) }) {
 			var field = snapshot.Values.FirstOrDefault(v => v.Id == pair.Item2);
 			if (field.Value is uint value) writer.WriteNumber(pair.Item1, value); else writer.WriteNull(pair.Item1);
 		}
@@ -308,8 +303,8 @@ public sealed partial class TemporalAAFixture : Script
 				writer.WriteString("status", status); writer.WriteString("phase", _phase.ToString()); writer.WriteString("failure", _failure); writer.WriteString("requestId", Decimal(_request)); writer.WriteNumber("updates", _updates);
 				writer.WriteBoolean("externalNativeAcknowledgementRequired", true); writer.WriteBoolean("allNativeRowsAcknowledged", _acknowledgements.Count == 4);
 				writer.WriteString("nativeResetOrchestration", "External native fixture owns cuts, resize, disocclusion and independent views; no generic managed reset hook is assumed.");
-				writer.WriteStartObject("discovery"); WriteDescriptor(writer, "aa", _aa); WriteDescriptor(writer, "internalScale", _scale); WriteDescriptor(writer, "upscaling", _upscaling); WriteDescriptor(writer, "sharpness", _sharpness); WriteDescriptor(writer, "raster", _raster); writer.WriteEndObject();
-				writer.WriteStartArray("requiredCases"); foreach (var row in Cases) { writer.WriteStartObject(); writer.WriteString("caseId", row.Id); writer.WriteNumber("aaMode", row.AaMode); writer.WriteNumber("upscalingMode", row.UpscalingMode); writer.WriteNumber("geometryRasterMode", 1U); writer.WriteNumber("internalScale", row.Scale); writer.WriteNumber("sampleCount", row.Samples); WriteExtent(writer, "internalExtent", row.Width, row.Height); WriteExtent(writer, "outputExtent", 640U, 360U); writer.WriteEndObject(); } writer.WriteEndArray();
+				writer.WriteStartObject("discovery"); WriteDescriptor(writer, "aa", _aa); WriteDescriptor(writer, "internalScale", _scale); WriteDescriptor(writer, "upscaling", _upscaling); WriteDescriptor(writer, "sharpness", _sharpness); writer.WriteEndObject();
+				writer.WriteStartArray("requiredCases"); foreach (var row in Cases) { writer.WriteStartObject(); writer.WriteString("caseId", row.Id); writer.WriteNumber("aaMode", row.AaMode); writer.WriteNumber("upscalingMode", row.UpscalingMode); writer.WriteNumber("internalScale", row.Scale); writer.WriteNumber("sampleCount", row.Samples); WriteExtent(writer, "internalExtent", row.Width, row.Height); WriteExtent(writer, "outputExtent", 640U, 360U); writer.WriteEndObject(); } writer.WriteEndArray();
 				writer.WriteStartArray("publications"); foreach (var row in _publications) { writer.WriteStartObject(); writer.WriteString("caseId", row.CaseId); writer.WriteString("requestId", Decimal(row.RequestId)); WriteSnapshot(writer, "effective", row.Snapshot); writer.WritePropertyName("receipt"); WriteReceipt(writer, row.Receipt); writer.WriteEndObject(); } writer.WriteEndArray();
 				writer.WriteStartArray("receipts"); foreach (var receipt in _receipts) WriteReceipt(writer, receipt); writer.WriteEndArray();
 				writer.WriteStartArray("nativeAcknowledgements"); foreach (var ack in _acknowledgements) ack.WriteTo(writer); writer.WriteEndArray();

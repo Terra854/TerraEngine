@@ -11,10 +11,13 @@
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "ModelPackagePrivatePaths.h"
+#include "../Assets/ShaderSourceTemplates.h"
 #include "AssetImportResult.h"
 #include "ModelPackageImporter.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/ThreadPool/ThreadPool.h"
+#include "Engine/Utilities/PlatformUtils.h"
+#include "Engine/Utilities/AtomicFileWrite.h"
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
 #include <algorithm>
@@ -24,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <vector>
 #include "../../../Engine/File Formats/TerraEngineMaterialFile.h"
@@ -41,12 +45,13 @@ const char* kDefaultUIMarkup = R"(<UIRoot>
 
 std::filesystem::path MakeUniqueAssetPath(const std::filesystem::path& directory, const std::string& baseName, const std::string& extension)
 {
-	std::filesystem::path candidatePath = directory / (baseName + extension);
+	// ImGui names are UTF-8 even when the native filesystem uses wide paths.
+	std::filesystem::path candidatePath = directory / std::filesystem::u8path(baseName + extension);
 	int duplicateIndex = 1;
 
 	while (std::filesystem::exists(candidatePath))
 	{
-		candidatePath = directory / (baseName + " (" + std::to_string(duplicateIndex++) + ")" + extension);
+		candidatePath = directory / std::filesystem::u8path(baseName + " (" + std::to_string(duplicateIndex++) + ")" + extension);
 	}
 
 	return candidatePath;
@@ -555,6 +560,15 @@ void ProjectBrowserWindow::OnGui() {
 			if (ImGui::MenuItem("Material (.tmat)")) {
 				OpenCreateAssetModal("Create Material", "New Material", ".tmat");
 			}
+			if (ImGui::BeginMenu("Shaders")) {
+				if (ImGui::MenuItem("Shader Collection"))
+					OpenCreateAssetModal("Create Shader Collection", "New Shader Collection", TerraEngine::Resource::kShaderCollectionExtension);
+				for (const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) {
+					if (ImGui::MenuItem(slot.label)) OpenCreateAssetModal(std::string("Create ") + slot.label,
+						std::string("New ") + slot.label, std::string(".surface") + slot.sourceSuffix);
+				}
+				ImGui::EndMenu();
+			}
 			if (ImGui::MenuItem("Prefab (.teprefab)")) {
 				OpenCreateAssetModal("Create Prefab", "New Prefab", ".teprefab");
 			}
@@ -771,6 +785,8 @@ void ProjectBrowserWindow::DrawCreateAssetModal()
 		const bool terrainCreationRunning = m_TerrainCreationFuture.valid();
 		if(terrainCreationRunning) ImGui::BeginDisabled();
 		ImGui::InputText("Name", m_NewAssetName.data(), m_NewAssetName.size());
+		if (m_CreateAssetExtension == TerraEngine::Resource::kShaderCollectionExtension)
+			ImGui::TextUnformatted("Empty slots inherit the corresponding engine shaders.");
 		if (m_CreateAssetExtension == ".teterrain") {
 			ImGui::InputScalar("Width (samples)", ImGuiDataType_U32, &m_TerrainWidthSamples);
 			ImGui::InputScalar("Depth (samples)", ImGuiDataType_U32, &m_TerrainDepthSamples);
@@ -834,6 +850,34 @@ void ProjectBrowserWindow::CreateNamedAsset()
 		}
 		m_Owner->SetSelectedAsset(std::filesystem::absolute(created.sourcePath));
 		m_CreateAnimationAssetKind.reset();
+		ImGui::CloseCurrentPopup();
+		return;
+	}
+
+	const auto* shaderSlot = TerraEngine::Editor::Assets::FindCompatibleShaderSlot(std::filesystem::u8path(m_CreateAssetExtension));
+	if (shaderSlot || m_CreateAssetExtension == TerraEngine::Resource::kShaderCollectionExtension) {
+		// A shader name is a single filename within the active project folder.
+		if (assetName.find_first_of("\\/:*?\"<>|") != std::string::npos || assetName == "." || assetName == "..") {
+			m_CreateAssetError = "Enter a name without path separators or reserved characters.";
+			return;
+		}
+		std::string bytes;
+		if (shaderSlot) {
+			const auto source = TerraEngine::PlatformUtils::GetExecutableDirectory() / "Project" / "Templates"
+				/ "ShaderSources" / "Default" / shaderSlot->defaultSource;
+			std::ifstream input(source, std::ios::binary);
+			bytes.assign(std::istreambuf_iterator<char>(input), {});
+			if (bytes.empty() || input.bad()) { m_CreateAssetError = "Reinstall the editor to restore the shader templates."; return; }
+		} else {
+			nlohmann::json slots = nlohmann::json::object();
+			for (const auto& slot : TerraEngine::Resource::kShaderCollectionSlots) slots[slot.key] = "";
+			bytes = slots.dump(2);
+		}
+		const auto created = MakeUniqueAssetPath(m_CurrentDirectory, assetName, m_CreateAssetExtension);
+		const auto saved = TerraEngine::Utilities::AtomicFileWriteTransaction(created).Commit(bytes);
+		if (!saved.committed) { m_CreateAssetError = saved.reason; return; }
+		AssetDatabase::Instance().ImportAssetWithProgress(created);
+		m_Owner->SetSelectedAsset(created);
 		ImGui::CloseCurrentPopup();
 		return;
 	}
@@ -1086,7 +1130,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					// a GUID that no renderable mesh resource owns.
 					if (importer == "MeshImporter") payloadType = "ASSET_MESH";
 					else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
-					else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
+					else if (importer == "ShaderImporter" || importer == TerraEngine::Editor::Assets::kShaderCollectionImporter) payloadType = "ASSET_SHADER";
 					else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";
 					else if (importer == "ScriptImporter") payloadType = "ASSET_SCRIPT";
 					else if (importer == "UIImporter") payloadType = "ASSET_TUIML";
@@ -1138,7 +1182,9 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 						} else {
 							m_Owner->RequestOpenScene(entry.path());
 						}
-					} else if (entry.path().extension() == ".cs") {
+					} else if (entry.path().extension() == ".cs"
+						|| TerraEngine::Editor::Assets::FindCompatibleShaderSlot(entry.path())) {
+						// Reuse the project's configured external editor for shader sources.
 						ScriptCompilationSubsystem::Instance().OpenScript(std::filesystem::absolute(entry.path()));
 					} else if (entry.path().extension() == ".tuiml") {
 						OpenMarkupAssetInBuilder(m_Owner, entry.path());

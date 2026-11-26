@@ -1,9 +1,5 @@
-// Actual opaque indexed motion raster, using the same retained TEMF owner
-// streams and morph-before-skin arithmetic as DefaultIndexed.vert.hlsl.
-// Native requirements: vertexOffset0, instanceCount1, firstInstance=private draw
-// row; exact source viewport/projection, current depth LOAD/read-only/EQUAL and
-// matching source cull/front-face state. Alpha-mask/transparent/page/grouped/GPU
-// authority routes are unqualified until separately implemented and tested.
+// Compatibility motion raster using the same meshlet triangle ranges and
+// depth-equal contract as the compatibility color mesh shader.
 #pragma pack_matrix(column_major)
 #include "IndexedMotionPrivate.hlsli"
 #include "IndexedMotionGeometry.hlsli"
@@ -19,7 +15,7 @@ IndexedMotionVertexOutput MotionRejectVertex()
 #endif
 	return output;
 }
-IndexedMotionVertexOutput main(uint cornerToken : SV_VertexID, uint drawIndex : SV_InstanceID)
+IndexedMotionVertexOutput PullMotionCorner(uint cornerToken, uint drawIndex)
 {
 	IndexedMotionVertexOutput rejected = MotionRejectVertex();
 	uint viewCount, viewStride, drawCount, drawStride;
@@ -55,4 +51,41 @@ IndexedMotionVertexOutput main(uint cornerToken : SV_VertexID, uint drawIndex : 
 	}
 #endif
 	return output;
+}
+
+
+// A draw explicitly selects its private motion row and current meshlet range.
+// Both motion variants consume the same 16-triangle group partition as color.
+struct CompatibilityMotionDraw
+{
+	uint firstMeshlet;
+	uint meshletCount;
+	uint motionRow;
+};
+[[vk::push_constant]] ConstantBuffer<CompatibilityMotionDraw> compatibilityDraw;
+
+[outputtopology("triangle")]
+[numthreads(16, 1, 1)]
+void main(uint lane : SV_GroupIndex, uint3 group : SV_GroupID,
+	out vertices IndexedMotionVertexOutput vertices[48], out indices uint3 triangles[16])
+{
+	uint physicalCount, stride;
+	motionMeshlets.GetDimensions(physicalCount, stride);
+	const uint meshlet = compatibilityDraw.firstMeshlet + group.x / 8u;
+	const uint first = (group.x % 8u) * 16u;
+	uint count = 0u;
+	if(meshlet >= compatibilityDraw.firstMeshlet && meshlet < physicalCount && stride == 16u
+		&& meshlet - compatibilityDraw.firstMeshlet < compatibilityDraw.meshletCount)
+	{
+		const uint trianglesInMeshlet = min(motionMeshlets[meshlet].primitiveIndexCount / 3u, 124u);
+		if(first < trianglesInMeshlet) count = min(16u, trianglesInMeshlet - first);
+	}
+	SetMeshOutputCounts(count * 3u, count);
+	if(lane >= count) return;
+	const uint base = (meshlet * 124u + first + lane) * 3u;
+	const uint outputBase = lane * 3u;
+	[unroll]
+	for(uint corner = 0u; corner < 3u; ++corner)
+		vertices[outputBase + corner] = PullMotionCorner(base + corner, compatibilityDraw.motionRow);
+	triangles[lane] = uint3(outputBase, outputBase + 1u, outputBase + 2u);
 }

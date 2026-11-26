@@ -620,36 +620,25 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 		return shaderModule;
 	};
 
-	VkVertexInputBindingDescription bindingDescription{};
-	bindingDescription.binding = 0;
-	bindingDescription.stride = sizeof(float) * 8;
-	bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-	VkVertexInputAttributeDescription attributeDescriptions[3]{};
-	attributeDescriptions[0].binding = 0;
-	attributeDescriptions[0].location = 0;
-	attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
-	attributeDescriptions[0].offset = 0;
-	attributeDescriptions[1].binding = 0;
-	attributeDescriptions[1].location = 1;
-	attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
-	attributeDescriptions[1].offset = sizeof(float) * 2;
-	attributeDescriptions[2].binding = 0;
-	attributeDescriptions[2].location = 2;
-	attributeDescriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	attributeDescriptions[2].offset = sizeof(float) * 4;
-
-	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInputInfo.vertexBindingDescriptionCount = 1;
-	vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-	vertexInputInfo.vertexAttributeDescriptionCount = 3;
-	vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
-
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
+	// Quads and glyphs retain their current CPU triangle streams. A private
+	// storage descriptor supplies the stream to the mesh shader on set 1.
+	if (uiMeshInputLayout == VK_NULL_HANDLE) {
+		const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_MESH_BIT_EXT};
+		VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+		info.bindingCount = 1;
+		info.pBindings = &binding;
+		if (vkCreateDescriptorSetLayout(device, &info, nullptr, &uiMeshInputLayout) != VK_SUCCESS) return;
+	}
+	if (uiMeshInputPool == VK_NULL_HANDLE) {
+		// Each frame/snapshot can upload two streams, one for quads and one for glyphs.
+		constexpr std::uint32_t streamCount = 2u * MAX_FRAMES_IN_FLIGHT * MAX_RENDER_SNAPSHOTS_PER_FRAME;
+		const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, streamCount};
+		VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+		info.maxSets = streamCount;
+		info.poolSizeCount = 1;
+		info.pPoolSizes = &size;
+		if (vkCreateDescriptorPool(device, &info, nullptr, &uiMeshInputPool) != VK_SUCCESS) return;
+	}
 
 	VkPipelineViewportStateCreateInfo viewportState{};
 	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -712,16 +701,17 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 		? blendAttachments.data() : &colorBlendAttachment;
 
 	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
-	pushConstantRange.size = sizeof(glm::vec2) + (sizeof(uint32_t) * 2);
+	pushConstantRange.size = sizeof(glm::vec2) + (sizeof(uint32_t) * 4);
 
 
 	if (staticUiPipelineLayout == VK_NULL_HANDLE) {
+		const std::array layouts{globalDescriptorSetLayout, uiMeshInputLayout};
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		pipelineLayoutInfo.setLayoutCount = 1;
-		pipelineLayoutInfo.pSetLayouts = &globalDescriptorSetLayout;
+		pipelineLayoutInfo.setLayoutCount = static_cast<std::uint32_t>(layouts.size());
+		pipelineLayoutInfo.pSetLayouts = layouts.data();
 		pipelineLayoutInfo.pushConstantRangeCount = 1;
 		pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -733,7 +723,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 
 
 	if (staticUiPipeline == VK_NULL_HANDLE && staticUiPipelineLayout != VK_NULL_HANDLE) {
-		VkShaderModule staticVert = loadShader("Shaders/UI/UI_Static.vert.spv");
+		VkShaderModule staticVert = loadShader("Shaders/UI/UI_Overlay.mesh.spv");
 		VkShaderModule staticFrag = loadShader("Shaders/UI/UI_Static.frag.spv");
 
 		if (!staticVert || !staticFrag) {
@@ -744,9 +734,9 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 		} else {
 			VkPipelineShaderStageCreateInfo shaderStages[2]{};
 			shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			shaderStages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
 			shaderStages[0].module = staticVert;
-			shaderStages[0].pName = "VSMain";
+			shaderStages[0].pName = "main";
 			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			shaderStages[1].module = staticFrag;
@@ -756,8 +746,6 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 			pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 			pipelineInfo.stageCount = 2;
 			pipelineInfo.pStages = shaderStages;
-			pipelineInfo.pVertexInputState = &vertexInputInfo;
-			pipelineInfo.pInputAssemblyState = &inputAssembly;
 			pipelineInfo.pViewportState = &viewportState;
 			pipelineInfo.pRasterizationState = &rasterizer;
 			pipelineInfo.pMultisampleState = &multisampling;
@@ -819,14 +807,15 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 
 	if (sdfTextPipelineLayout == VK_NULL_HANDLE && uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
 		VkPushConstantRange textPushConstantRange{};
-		textPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		textPushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
 		textPushConstantRange.offset = 0;
-		textPushConstantRange.size = sizeof(glm::vec2);
+		textPushConstantRange.size = pushConstantRange.size;
 
+		const std::array layouts{uiFontDescriptorSetLayout, uiMeshInputLayout};
 		VkPipelineLayoutCreateInfo textLayoutInfo{};
 		textLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		textLayoutInfo.setLayoutCount = 1;
-		textLayoutInfo.pSetLayouts = &uiFontDescriptorSetLayout;
+		textLayoutInfo.setLayoutCount = static_cast<std::uint32_t>(layouts.size());
+		textLayoutInfo.pSetLayouts = layouts.data();
 		textLayoutInfo.pushConstantRangeCount = 1;
 		textLayoutInfo.pPushConstantRanges = &textPushConstantRange;
 
@@ -838,7 +827,7 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 
 
 	if (sdfTextPipeline == VK_NULL_HANDLE && sdfTextPipelineLayout != VK_NULL_HANDLE) {
-		VkShaderModule textVert = loadShader("Shaders/UI/UI_SDF_Text.vert.spv");
+		VkShaderModule textVert = loadShader("Shaders/UI/UI_Overlay.mesh.spv");
 		VkShaderModule textFrag = loadShader("Shaders/UI/UI_SDF_Text.frag.spv");
 
 		if (!textVert || !textFrag) {
@@ -849,9 +838,9 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 		} else {
 			VkPipelineShaderStageCreateInfo shaderStages[2]{};
 			shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			shaderStages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
 			shaderStages[0].module = textVert;
-			shaderStages[0].pName = "VSMain";
+			shaderStages[0].pName = "main";
 			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			shaderStages[1].module = textFrag;
@@ -861,8 +850,6 @@ void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass, TerraEngine
 			pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 			pipelineInfo.stageCount = 2;
 			pipelineInfo.pStages = shaderStages;
-			pipelineInfo.pVertexInputState = &vertexInputInfo;
-			pipelineInfo.pInputAssemblyState = &inputAssembly;
 			pipelineInfo.pViewportState = &viewportState;
 			pipelineInfo.pRasterizationState = &rasterizer;
 			pipelineInfo.pMultisampleState = &multisampling;
@@ -890,6 +877,8 @@ struct UIStaticPushConstants
 	glm::vec2 viewportSize;
 	uint32_t textureIndex;
 	uint32_t useTexture;
+	uint32_t firstVertex;
+	uint32_t vertexCount;
 };
 
 
@@ -913,8 +902,51 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	// allocated below only when this view has quad or text vertices to upload.
 	if(uiStaticVertexBuffers.size() <= uploadSlot) uiStaticVertexBuffers.resize(uploadSlot + 1u);
 	if(uiSdfVertexBuffers.size() <= uploadSlot) uiSdfVertexBuffers.resize(uploadSlot + 1u);
-	VulkanBuffer& uiStaticVertexBuffer = uiStaticVertexBuffers[uploadSlot];
-	VulkanBuffer& uiSdfVertexBuffer = uiSdfVertexBuffers[uploadSlot];
+	auto uploadTriangles = [&](UIMeshUpload& slot, const std::vector<float>& vertices, const char* label) {
+		const VkDeviceSize bytes = vertices.size() * sizeof(float);
+		if (!bytes || !uiMeshInputLayout) return false;
+		if (!slot.buffer.buffer || slot.buffer.size < bytes) {
+			if (slot.buffer.buffer) RetireBuffer(slot.buffer);
+			slot.buffer = CreateBuffer(bytes * 2u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, label);
+			if (!slot.buffer.buffer) return false;
+		}
+		if (!slot.descriptor) {
+			VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+			allocation.descriptorPool = uiMeshInputPool;
+			allocation.descriptorSetCount = 1;
+			allocation.pSetLayouts = &uiMeshInputLayout;
+			if (vkAllocateDescriptorSets(device, &allocation, &slot.descriptor) != VK_SUCCESS) return false;
+		}
+		void* data = nullptr;
+		if (vmaMapMemory(allocator, slot.buffer.allocation, &data) != VK_SUCCESS) return false;
+		std::memcpy(data, vertices.data(), bytes);
+		const auto flushed = vmaFlushAllocation(allocator, slot.buffer.allocation, 0, bytes);
+		vmaUnmapMemory(allocator, slot.buffer.allocation);
+		if (flushed != VK_SUCCESS) return false;
+		const VkDescriptorBufferInfo contents{slot.buffer.buffer, 0u, bytes};
+		VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		write.dstSet = slot.descriptor;
+		write.dstBinding = 0;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		write.pBufferInfo = &contents;
+		vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+		return true;
+	};
+	const auto drawTriangles = [cmd](VkPipelineLayout layout, VkShaderStageFlags stages,
+		UIStaticPushConstants push, std::uint32_t first, std::uint32_t count) {
+		// Split very large UI streams into bounded groups in painter order.
+		constexpr std::uint32_t cornersPerGroup = 48u;
+		constexpr std::uint32_t maxCorners = cornersPerGroup * 1024u;
+		while (count) {
+			push.firstVertex = first;
+			push.vertexCount = std::min(count, maxCorners);
+			vkCmdPushConstants(cmd, layout, stages, 0, sizeof(push), &push);
+			vkCmdDrawMeshTasksEXT(cmd, (push.vertexCount + cornersPerGroup - 1u) / cornersPerGroup, 1, 1);
+			first += push.vertexCount;
+			count -= push.vertexCount;
+		}
+	};
 
 	auto appendQuadVertices = [](std::vector<float>& vertices, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, const glm::vec2& uvMin, const glm::vec2& uvMax) {
 		const float x = position.x;
@@ -979,30 +1011,12 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		}
 
 
-		if (!quadVertices.empty()) {
-			const VkDeviceSize bufferSize = quadVertices.size() * sizeof(float);
-			if (uiStaticVertexBuffer.buffer == VK_NULL_HANDLE || uiStaticVertexBuffer.size < bufferSize) {
-
-				if (uiStaticVertexBuffer.buffer != VK_NULL_HANDLE) {
-					RetireBuffer(uiStaticVertexBuffer);
-				}
-				uiStaticVertexBuffer = CreateBuffer(bufferSize * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "UIStaticVertexBuffer");
-			}
-
-			void* data = nullptr;
-			vmaMapMemory(allocator, uiStaticVertexBuffer.allocation, &data);
-			memcpy(data, quadVertices.data(), bufferSize);
-			// CPU_TO_GPU allocations are not guaranteed to be host-coherent on
-			// every driver. Flush the exact UI vertex range before Vulkan reads it.
-			vmaFlushAllocation(allocator, uiStaticVertexBuffer.allocation, 0, bufferSize);
-			vmaUnmapMemory(allocator, uiStaticVertexBuffer.allocation);
-
+		auto& slot = uiStaticVertexBuffers[uploadSlot];
+		if (uploadTriangles(slot, quadVertices, "UIStaticTriangleStream")) {
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, staticUiPipeline);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, staticUiPipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
-
-			VkBuffer vertexBuffers[] = { uiStaticVertexBuffer.buffer };
-			VkDeviceSize offsets[] = { 0 };
-			vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+			const std::array sets{globalDescriptorSets[currentFrame], slot.descriptor};
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, staticUiPipelineLayout, 0,
+				static_cast<std::uint32_t>(sets.size()), sets.data(), 0, nullptr);
 
 			// Draw non-textured quads
 
@@ -1011,8 +1025,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 				push.viewportSize = batch.viewportSize;
 				push.textureIndex = 0;
 				push.useTexture = 0;
-				vkCmdPushConstants(cmd, staticUiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UIStaticPushConstants), &push);
-				vkCmdDraw(cmd, staticVertexCount, 1, 0, 0);
+				drawTriangles(staticUiPipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, push, 0, staticVertexCount);
 			}
 
 			// Draw each textured image run
@@ -1031,8 +1044,8 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 						push.textureIndex = textureIndexMap[textureId];
 						push.useTexture = 1;
 					}
-				}				vkCmdPushConstants(cmd, staticUiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UIStaticPushConstants), &push);
-				vkCmdDraw(cmd, 6, 1, draw.firstVertex, 0);
+				}
+				drawTriangles(staticUiPipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, push, draw.firstVertex, 6);
 			}
 		}
 	}
@@ -1229,32 +1242,13 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		return;
 	}
 
-	const VkDeviceSize textBufferSize = textVertices.size() * sizeof(float);
-
-	if (uiSdfVertexBuffer.buffer == VK_NULL_HANDLE || uiSdfVertexBuffer.size < textBufferSize) {
-
-		if (uiSdfVertexBuffer.buffer != VK_NULL_HANDLE) {
-			RetireBuffer(uiSdfVertexBuffer);
-		}
-		uiSdfVertexBuffer = CreateBuffer(textBufferSize * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "UISdfVertexBuffer");
-	}
-
-	void* textData = nullptr;
-	vmaMapMemory(allocator, uiSdfVertexBuffer.allocation, &textData);
-	memcpy(textData, textVertices.data(), textBufferSize);
-	// SDF text vertices are written by the CPU and consumed by the GPU in the
-	// same submitted command buffer, so make the mapped writes explicitly visible.
-	vmaFlushAllocation(allocator, uiSdfVertexBuffer.allocation, 0, textBufferSize);
-	vmaUnmapMemory(allocator, uiSdfVertexBuffer.allocation);
-
+	auto& slot = uiSdfVertexBuffers[uploadSlot];
+	if (!uploadTriangles(slot, textVertices, "UISdfTriangleStream")) return;
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfTextPipeline);
-
-	glm::vec2 viewportSize = batch.viewportSize;
-	vkCmdPushConstants(cmd, sdfTextPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::vec2), &viewportSize);
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfTextPipelineLayout, 0, 1, &uiFontDescriptorSet, 0, nullptr);
-
-	VkBuffer textVertexBuffers[] = { uiSdfVertexBuffer.buffer };
-	VkDeviceSize textOffsets[] = { 0 };
-	vkCmdBindVertexBuffers(cmd, 0, 1, textVertexBuffers, textOffsets);
-	vkCmdDraw(cmd, static_cast<uint32_t>(textVertices.size() / 8), 1, 0, 0);
+	const std::array sets{uiFontDescriptorSet, slot.descriptor};
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfTextPipelineLayout, 0,
+		static_cast<std::uint32_t>(sets.size()), sets.data(), 0, nullptr);
+	UIStaticPushConstants push{};
+	push.viewportSize = batch.viewportSize;
+	drawTriangles(sdfTextPipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT, push, 0, static_cast<std::uint32_t>(textVertices.size() / 8));
 }

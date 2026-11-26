@@ -1,7 +1,7 @@
 // Native spatial-AA and independent temporal reconstruction from an imported scene.
 // See MovingEdgesCaptureHost.md for preparation, build, and collection commands.
-// Indexed lanes require actual command-side draw proof; exploratory mesh-task
-// captures cannot be relabeled as indexed or as temporal image qualification.
+// Mesh captures verify current command-side draw and temporal evidence. The
+// archived indexed image suite remains separate from mesh qualification.
 #include <Windows.h>
 #include <bcrypt.h>
 #include "Animation/AnimationSystem.h"
@@ -133,7 +133,7 @@ namespace
 	{
 		std::filesystem::path install,project,scene,fixture,output;
 		std::string mode,temporalSequence,temporalRole;
-		bool indexed=false,depthOfFieldNative=false,temporalUpscale=false,gameView=false;
+		bool depthOfFieldNative=false,temporalUpscale=false,gameView=false;
 		std::uint32_t aa=0u;
 		std::uint32_t samples=1u;
 		glm::uvec2 extent{640u,360u};
@@ -150,22 +150,19 @@ namespace
 	{
 		if(result.mode=="Reference4x") result.extent={2560u,1440u};
 		else if(result.mode=="OffNative") {}
-		else if(result.mode=="OffHalf") { result.extent={320u,180u}; Check(result.indexed,"OffHalf capture requires --route indexed."); }
+		else if(result.mode=="OffHalf") { result.extent={320u,180u}; }
 		else if(result.mode=="FXAA") result.aa=1u;
 		else if(result.mode=="SMAA") result.aa=2u;
 		else if(result.mode=="CMAA2") result.aa=3u;
-		else if(result.mode=="MSAA") { result.aa=4u; result.samples=4u; Check(result.indexed,"Independent MSAA capture requires --route indexed."); }
-		else if(result.mode=="TAA") { result.aa=5u; Check(result.indexed,"Independent TAA capture requires --route indexed."); }
-		else if(result.mode=="TemporalUpscale") { result.temporalUpscale=true; Check(result.indexed,"TemporalUpscale capture requires --route indexed."); }
+		else if(result.mode=="MSAA") { result.aa=4u; result.samples=4u; }
+		else if(result.mode=="TAA") { result.aa=5u; }
+		else if(result.mode=="TemporalUpscale") { result.temporalUpscale=true; }
 		else throw std::runtime_error("Supported runs are Reference4x, OffNative, OffHalf, FXAA, SMAA, CMAA2, MSAA, TAA, or TemporalUpscale.");
 	}
-	std::vector<GraphicsSettingValue> SceneRequestValues(std::uint32_t mode,bool indexed,bool upscale=false)
+	std::vector<GraphicsSettingValue> SceneRequestValues(std::uint32_t mode,bool upscale=false)
 	{
-		// The Scene owner is independent from Game, including explicit Off.
-		// Keep raster and AA in one atomic Scene request so selecting Off cannot
-		// silently restore the default automatic geometry route.
+		// Submit AA and reconstruction together so both attachments agree.
 		std::vector<GraphicsSettingValue> values{{GraphicsSettingId::AntiAliasingMode,mode}};
-		if(indexed) values.push_back({GraphicsSettingId::GeometryRasterMode,std::uint32_t{1}});
 		// Temporal reconstruction is a distinct native mode: standalone AA Off,
 		// Scene temporal upscaling on, and actual half-size raster attachments.
 		if(upscale) { values.push_back({GraphicsSettingId::UpscalingMode,std::uint32_t{1}}); values.push_back({GraphicsSettingId::InternalResolutionScale,0.5f}); }
@@ -188,7 +185,6 @@ namespace
 			else if(name=="--view") { Check(value=="scene" || value=="game","View must be scene or game."); result.gameView=value=="game"; }
 			else if(name=="--temporal-sequence") result.temporalSequence=value;
 			else if(name=="--temporal-role") result.temporalRole=value;
-			else if(name=="--route") { Check(value=="indexed" || value=="exploratory","Route must be indexed or exploratory."); result.indexed=value=="indexed"; }
 			else throw std::runtime_error("Unknown host option.");
 		}
 		Check(!result.install.empty() && !result.project.empty() && !result.scene.empty() && !result.fixture.empty() && !result.output.empty(),"Missing host input.");
@@ -197,11 +193,11 @@ namespace
 		// Collect Off and the oversampled reference through the same Game output
 		// as the upscaler so score differences reflect reconstruction alone.
 		const bool gameMode = result.temporalUpscale || result.mode=="OffHalf" || result.mode=="OffNative" || result.mode=="Reference4x";
-		Check(!result.gameView || (gameMode && result.indexed && !result.depthOfFieldNative),"Independent native Game lane requires indexed TemporalUpscale or its Off references.");
-		Check(!result.depthOfFieldNative || (result.mode=="OffNative" && result.indexed && result.temporalSequence.empty()),"Native depth-of-field requires indexed OffNative and no temporal sequence.");
+		Check(!result.gameView || (gameMode && !result.depthOfFieldNative),"Independent native Game lane requires TemporalUpscale or its Off references.");
+		Check(!result.depthOfFieldNative || (result.mode=="OffNative" && result.temporalSequence.empty()),"Native depth-of-field requires OffNative and no temporal sequence.");
 		Check(result.temporalSequence.empty()==result.temporalRole.empty(),"Temporal sequence and role must be supplied together.");
-		if(!result.temporalSequence.empty()) Check(Temporal(result) && result.indexed && (result.temporalSequence=="cut" || result.temporalSequence=="resize")
-			&& (result.temporalRole=="reset" || result.temporalRole=="fresh"),"Separate temporal lanes require indexed TAA/TemporalUpscale, cut/resize and reset/fresh.");
+		if(!result.temporalSequence.empty()) Check(Temporal(result) && (result.temporalSequence=="cut" || result.temporalSequence=="resize")
+			&& (result.temporalRole=="reset" || result.temporalRole=="fresh"),"Separate temporal lanes require TAA/TemporalUpscale, cut/resize and reset/fresh.");
 		Check(!std::filesystem::exists(result.output),"Output directory must be fresh.");
 		Check(result.scene.is_relative(),"Scene must be project-relative.");
 		for(const auto& part:result.scene) Check(part!="..","Scene escapes project.");
@@ -421,7 +417,6 @@ namespace
 		case GraphicsSettingId::IndirectStrength: return "indirectStrength";
 		case GraphicsSettingId::VirtualGeometryMaxLodDrop: return "virtualGeometry.maxLodDrop";
 		case GraphicsSettingId::VirtualGeometryLodErrorScale: return "virtualGeometry.lodErrorScale";
-		case GraphicsSettingId::GeometryRasterMode: return "geometry.rasterMode";
 		default: return "unknown fixture control";
 		}
 	}
@@ -487,8 +482,8 @@ namespace
 			{"nativeViewId",std::to_string(view.graphicsView->outputId)},
 			{"nativeViewGeneration",std::to_string(view.graphicsView->lifetimeGeneration)},
 			{"referenceOrigin",{view.referenceFrame.canonicalOrigin.offsetMetres.x,view.referenceFrame.canonicalOrigin.offsetMetres.y,view.referenceFrame.canonicalOrigin.offsetMetres.z}},
-			{"actualGeometryRoute",options.indexed ? "indexed-raster" : "ordinary-direct-mesh-task"},
-			{"frozenIndexedRouteSatisfied",options.indexed},{"cameraChecks",cameraCheck},{"geometry",Json::array()}};
+			{"actualGeometryRoute","ordinary-direct-mesh-task"},
+			{"frozenIndexedRouteSatisfied",false},{"cameraChecks",cameraCheck},{"geometry",Json::array()}};
 		if(options.gameView)
 		{
 			Check(inputs.gameCamera && view.graphicsCamera && *view.graphicsCamera==GameCameraIdentity(*inputs.gameCamera),
@@ -507,23 +502,20 @@ namespace
 				{"upscalingMode",Value(settings,GraphicsSettingId::UpscalingMode,0)},
 				{"internalExtent",{plan.internalSize.x,plan.internalSize.y}},{"outputExtent",{plan.outputSize.x,plan.outputSize.y}}};
 		}
-		if(options.indexed)
 		{
-			Check(Value(settings,GraphicsSettingId::GeometryRasterMode,0)==1.0f,"Accepted effective ID91 is not Indexed.");
-			const auto* native=dynamic_cast<VulkanContext*>(renderer.GetContext()); Check(native,"Indexed native proof requires Vulkan.");
+			const auto* native=dynamic_cast<VulkanContext*>(renderer.GetContext()); Check(native,"Native mesh proof requires Vulkan.");
 			const auto recorded=native->ReadRecordedGraphicsViews(publication.frameId);
 			const auto actual=std::find_if(recorded.begin(),recorded.end(),[&](const auto& item) { return item.publicationIndex==*index; });
-			Check(actual!=recorded.end() && actual->width==options.extent.x && actual->height==options.extent.y && actual->indexedDrawCount==4u
+			Check(actual!=recorded.end() && actual->width==options.extent.x && actual->height==options.extent.y && actual->indexedDrawCount==0u
 				&& actual->internalWidth==InternalExtent(options).x && actual->internalHeight==InternalExtent(options).y,
-				"Actual accepted native Scene did not record exactly four indexed geometry draws at its frozen extent.");
+				"Actual accepted native Scene did not record ordinary mesh geometry at its frozen extent.");
 			// The snapshot describes effective intent; this independent native
 			// observation comes from the pipeline/pass variant actually recorded.
-			Check(actual->rasterSampleCount==options.samples,"Recorded native raster sample count differs from effective frozen capture configuration.");
+			Check(actual->rasterSampleCount==options.samples,"Recorded native raster sample count differs from effective capture configuration.");
 			proof["nativeIndexedDrawCount"]=actual->indexedDrawCount;
 			proof["nativeRasterSampleCount"]=actual->rasterSampleCount;
 			proof["nativeInternalExtent"]={actual->internalWidth,actual->internalHeight};
 			proof["nativeOutputExtent"]={actual->width,actual->height};
-			proof["effectiveGeometryRasterMode"]=Value(settings,GraphicsSettingId::GeometryRasterMode,0);
 			if(Temporal(options))
 			{
 				// These are facts from the exact recorded native command, not motion
@@ -661,7 +653,7 @@ namespace
 			&& stats.outputKind==view.output.kind && stats.outputId==view.output.outputId;
 		proof["completedStatsMatchCapturedFrame"]=exactStats;
 		proof["observedStatsFrameId"]=std::to_string(stats.publicationFrameId);
-		if(exactStats || !options.indexed)
+		if(exactStats)
 		{
 			Check(stats.drawCalls>0u && stats.triangleCount>=8u,"Completed native view has no actual geometry draw/triangle evidence.");
 			proof["actualDrawCalls"]=stats.drawCalls; proof["actualTriangles"]=stats.triangleCount;
@@ -788,24 +780,16 @@ int main(int count,char** arguments)
 	{
 		if(count==3 && (std::string_view(arguments[1])=="--describe-capture-mode" || std::string_view(arguments[1])=="--describe-game-capture-mode"))
 		{
-			Options options;options.mode=arguments[2];options.indexed=true;options.gameView=std::string_view(arguments[1])=="--describe-game-capture-mode";SelectMode(options);
+			Options options;options.mode=arguments[2];options.gameView=std::string_view(arguments[1])=="--describe-game-capture-mode";SelectMode(options);
 			Check(!options.gameView || options.temporalUpscale,"Independent native Game description requires TemporalUpscale.");
 			Json result{{"mode",options.mode},{"engineInitialized",false},{"gpuExecuted",false},
 				{"internalExtent",{InternalExtent(options).x,InternalExtent(options).y}},{"outputExtent",{options.extent.x,options.extent.y}},
 				{"sampleCount",options.samples},{"standaloneAAMode",options.aa},{"temporalUpscale",options.temporalUpscale},
 				{"projectionWorldSpan",{640,360}},{"values",Json::array()}};
 			if(options.gameView) { result["scope"]="Game"; result["nativePoseSequenceSupported"]=false; result["nativePoseJoin"]="ExactAcceptedFrameProjectionViewAndCanonicalOrigin"; }
-			for(const auto& patch:SceneRequestValues(options.aa,true,options.temporalUpscale))
+			for(const auto& patch:SceneRequestValues(options.aa,options.temporalUpscale))
 				result["values"].push_back({{"id",static_cast<std::uint32_t>(patch.id)},{"variant",patch.value.index()},{"value",ValueEvidence(patch.value)}});
 			std::cout<<result.dump(2)<<'\n';return 0;
-		}
-		if(count==3 && std::string_view(arguments[1])=="--describe-indexed-request")
-		{
-			const std::string_view value=arguments[2]; Check(value.size()==1u && value[0]>='0' && value[0]<='5',"Description needs AA mode0..5.");
-			Json result{{"scope","Scene"},{"engineInitialized",false},{"gpuExecuted",false},{"values",Json::array()}};
-			for(const auto& patch:SceneRequestValues(static_cast<std::uint32_t>(value[0]-'0'),true))
-				result["values"].push_back({{"id",static_cast<std::uint32_t>(patch.id)},{"variant",patch.value.index()},{"value",ValueEvidence(patch.value)}});
-			std::cout<<result.dump(2)<<'\n'; return 0;
 		}
 		if(count==3 && std::string_view(arguments[1])=="--assemble-spatial")
 		{
@@ -844,9 +828,9 @@ int main(int count,char** arguments)
 		}
 		evidence["mode"]=options.mode; evidence["fixtureSha256"]=kFixtureHash; evidence["controlsSha256"]=fixture.at("controlsSha256");
 		evidence["effective"]={{"mode",options.temporalUpscale ? "TemporalUpscale" : options.aa==0u ? "Off" : options.mode},{"sampleCount",options.samples},{"internalExtent",{InternalExtent(options).x,InternalExtent(options).y}},{"outputExtent",{options.extent.x,options.extent.y}}};
-		evidence["actualRoute"]=options.indexed ? "indexed-raster" : "ordinary-direct-mesh-task";
+		evidence["actualRoute"]="ordinary-direct-mesh-task";
 		evidence["qualificationBlockers"]=Json::array();
-		if(!options.indexed) evidence["qualificationBlockers"].push_back("Frozen controls require indexed-raster; exploratory lane uses ordinary native mesh-task draws.");
+		evidence["qualificationBlockers"].push_back("Frozen controls require indexed-raster; exploratory lane uses ordinary native mesh-task draws.");
 		evidence["qualificationBlockers"].push_back(Temporal(options)
 			? "Continuous temporal command/capture joins do not certify motion pixels, disocclusion, reset correctness or temporal image-quality metrics."
 			: "Current spatial capture does not certify temporal previous-state continuity.");
@@ -862,7 +846,7 @@ int main(int count,char** arguments)
 		Json commonSource{{"fixtureSha256",kFixtureHash},{"sceneSha256",evidence["scene"]["sha256"]},{"cookedPayloads",Json::object()},
 			{"projectionWorldSpan",{640,360}},{"nearFar",{0.1f,16.0f}},{"fixedExposureEV",0},{"toneMode","Legacy"},
 			{"grade",false},{"bloom",false},{"sampleCount",options.samples},{"internalResolutionScale",options.temporalUpscale ? 0.5f : 1.0f},{"meshLodScale",64.0f},
-			{"rasterRoute",options.indexed ? "indexed-raster" : "ordinary-direct-mesh-task"}};
+			{"rasterRoute","ordinary-direct-mesh-task"}};
 		for(const auto& asset:evidence["cookedAssets"]) commonSource["cookedPayloads"][asset.at("guid").get<std::string>()]=asset.at("sha256");
 		if(options.gameView) commonSource["nativeOutputLane"]="Game";
 		const auto sourceText=commonSource.dump(); evidence["commonSourceProfile"]=commonSource;
@@ -893,9 +877,9 @@ int main(int count,char** arguments)
 		auto* context=dynamic_cast<VulkanContext*>(renderer.GetContext()); Check(context,"Native Vulkan context is unavailable."); context->EnableEditorMode();
 		const auto adapter=context->GetLatestRendererRecoverySnapshot(); evidence["adapter"]={{"name",adapter.hardwareName},{"driver",adapter.driverVersion},{"api",adapter.apiVersion}};
 		const auto capability=context->ReadGraphicsCatalogCapabilities(false);
-		Check(options.temporalUpscale ? capability.indexedRasterSupported && capability.temporalUpscalingSupported
-			: options.aa==4u ? capability.indexedRasterSupported && capability.msaa4Supported
-			: Temporal(options) ? capability.indexedRasterSupported && capability.taaSupported
+		Check(options.temporalUpscale ? capability.temporalUpscalingSupported
+			: options.aa==4u ? capability.msaa4Supported
+			: Temporal(options) ? capability.taaSupported
 			: (capability.spatialAAModeMask&(1u<<options.aa))!=0u,"Requested AA/reconstruction mode is not natively available.");
 		std::uint64_t sequence=0u,lastAcceptedSceneFrame=0u;
 		std::set<std::uint64_t> acceptedSceneFrames;
@@ -1063,7 +1047,7 @@ int main(int count,char** arguments)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
 		Check(settingsReady,"Color controls never reached an actual effective publication.");
-		const auto patch=SceneRequestValues(options.aa,options.indexed,options.temporalUpscale);
+		const auto patch=SceneRequestValues(options.aa,options.temporalUpscale);
 		GraphicsRequestReceipt aaReceipt;
 		if(options.gameView)
 		{
@@ -1357,10 +1341,8 @@ int main(int count,char** arguments)
 			Check(!evidence["temporalContinuousEvidence"]["measuredPhasesWithAcceptedPredecessor"].empty(),
 				"No measured continuous temporal phase reused an earlier exact accepted frame.");
 		if(separate) Check(evidence["frames"].size()==4u,"Separate reset sequence is incomplete.");
-		evidence["status"]=separate ? "CapturedNativeTemporalResetSequence" : Temporal(options) ? "CapturedNativeIndexedTemporalContinuousRun"
-			: options.indexed ? "CapturedNativeIndexedSpatialRun" : "CapturedExploratoryOnly";
-		evidence["evidenceKind"]=options.indexed ? "NativeBackendReadback" : "NativeExploratoryDirectMeshReadback";
-		evidence["controlsVerified"]=options.indexed; evidence["frozenIndexedRouteSatisfied"]=options.indexed;
+		evidence["status"]=separate ? "CapturedNativeTemporalResetSequence" : Temporal(options) ? "CapturedNativeMeshTemporalContinuousRun"
+			: "CapturedExploratoryOnly";
 		evidence["scorerManifestEmitted"]=false;
 		WriteJson(output/"collection.json",evidence);
 		std::cout<<(Temporal(options) ? "Collected native temporal continuous command/capture joins; temporal pixel/reset/disocclusion qualification remains separate.\n"

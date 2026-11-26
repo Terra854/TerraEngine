@@ -265,10 +265,13 @@ namespace {
 
 
 	std::vector<std::filesystem::path> FindShaderIncludeRoots(
-		const std::filesystem::path& input)
+		const std::filesystem::path& input, const std::filesystem::path& dxcPath)
 	{
 		std::vector<std::filesystem::path> roots;
 		roots.push_back(input.parent_path());
+		// Loose template copies resolve shared includes from the installed editor.
+		const auto templates = dxcPath.parent_path() / "Project/Templates/ShaderSources/Default";
+		if(std::filesystem::is_directory(templates)) roots.push_back(templates);
 		std::filesystem::path cursor = std::filesystem::absolute(input).parent_path();
 		for(std::size_t depth = 0u; !cursor.empty() && depth < 16u; ++depth)
 		{
@@ -315,9 +318,9 @@ namespace {
 	// RunDxc supplies the public include root in addition to the authored
 	// shader's directory. DXC performs transitive dependency resolution and
 	// fails compilation when any include is missing.
-	bool RunDxc(const std::filesystem::path& input, const std::filesystem::path& dxcPath, const std::filesystem::path& tempSpv, const std::string& target, const std::string& entryPoint) {
+	bool RunDxc(const std::filesystem::path& input, const std::filesystem::path& dxcPath, const std::filesystem::path& tempSpv, const std::string& target, const std::string& entryPoint, std::string_view variantDefine = {}) {
 		const std::vector<std::filesystem::path> includeRoots =
-			FindShaderIncludeRoots(input);
+			FindShaderIncludeRoots(input, dxcPath);
 #if defined(_WIN32)
 		auto ToWide = [](const std::filesystem::path& p) -> std::wstring {
 			return p.wstring();
@@ -330,6 +333,10 @@ namespace {
 		wideArgs.push_back(ToWide(dxcPath));
 		wideArgs.push_back(L"-spirv");
 		wideArgs.push_back(L"-fspv-target-env=vulkan1.3");
+		if(!variantDefine.empty()) {
+			wideArgs.push_back(L"-D");
+			wideArgs.emplace_back(variantDefine.begin(), variantDefine.end());
+		}
 		wideArgs.push_back(L"-T");
 		wideArgs.push_back(ToWideStr(target));
 		wideArgs.push_back(L"-E");
@@ -365,6 +372,7 @@ namespace {
 			<< " -T " << target
 			<< " -E " << entryPoint
 			<< " -Fo " << Quote(tempSpv);
+		if(!variantDefine.empty()) cmd << " -D " << variantDefine;
 		for(const std::filesystem::path& includeRoot : includeRoots)
 		{
 			cmd << " -I " << Quote(includeRoot);
@@ -915,12 +923,13 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 		return false;
 	}
 
-	if ((use != ShaderUse::Surface && use != ShaderUse::PostProcess)
+	if ((use != ShaderUse::Surface && use != ShaderUse::PostProcess && use != ShaderUse::SourceSet && use != ShaderUse::CompatibleSurface)
 		|| (use == ShaderUse::PostProcess && *stageOpt != ShaderStage::Fragment)) {
 		std::cerr << "Post-process use requires the fragment stage.\n"; return false;
 	}
 
-	const std::filesystem::path tempSpv = std::filesystem::path(output).replace_extension(".spv");
+	auto tempSpv = std::filesystem::path(output).replace_extension(".spv");
+	if (tempSpv == output) tempSpv += ".dxc.tmp";
 	const std::string target = targetProfile.empty() ? DefaultProfileForStage(stage) : targetProfile;
 
 
@@ -975,12 +984,81 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 		CleanupTempSpv();
 		return false;
 	}
-	if(use == ShaderUse::PostProcess
-		? !ValidatePostProcessContract(input, *stageOpt, bytecode, entryPoint, reflected)
-		: !ValidateAuthoredGeometryContract(input, *stageOpt, reflected))
+	// Source sets emit checked SPIR-V for authoring feedback. Only the normal
+	// shader modes can publish a runtime package after their ABI checks pass.
+	if (use == ShaderUse::SourceSet) {
+		CleanupTempSpv();
+		std::ofstream compiledSource(output, std::ios::binary);
+		compiledSource.write(reinterpret_cast<const char*>(bytecode.data()), spvSize);
+		compiledSource.close();
+		return static_cast<bool>(compiledSource);
+	}
+	if((use == ShaderUse::PostProcess && !ValidatePostProcessContract(input, *stageOpt, bytecode, entryPoint, reflected))
+		|| (use == ShaderUse::Surface && !ValidateAuthoredGeometryContract(input, *stageOpt, reflected)))
 	{
 		CleanupTempSpv();
 		return false;
+	}
+
+	// Package both outputs from the same source revision so hot reload and
+	// exports cannot pair a new material with stale picking bytecode.
+	const auto readVariant = [&](std::string_view define, std::vector<std::uint8_t>& bytes) {
+		CleanupTempSpv();
+		if(!RunDxc(input, dxcPath, tempSpv, target, entryPoint, define)) {
+			CleanupTempSpv();
+			return false;
+		}
+		bool read = false;
+		{
+			std::ifstream variant(tempSpv, std::ios::binary | std::ios::ate);
+			const auto size = variant.tellg();
+			if(size > 0 && size <= std::numeric_limits<std::uint32_t>::max()) {
+				bytes.resize(static_cast<std::size_t>(size));
+				variant.seekg(0);
+				read = static_cast<bool>(variant.read(reinterpret_cast<char*>(bytes.data()), size));
+			}
+		}
+		CleanupTempSpv();
+		return read;
+	};
+	std::vector<std::uint8_t> identityBytecode, meshMotionBytecode;
+	if(use == ShaderUse::CompatibleSurface && *stageOpt == ShaderStage::Fragment) {
+		ReflectionResult identity;
+		// Both variants use the original fragment's pipeline layout. The
+		// picking define can add an output but cannot change its resources.
+		const auto sameBinding = [](const auto& a, const auto& b) {
+			return a.set == b.set && a.binding.binding == b.binding.binding
+				&& a.binding.type == b.binding.type && a.binding.arrayCount == b.binding.arrayCount;
+		};
+		const auto samePush = [](const auto& a, const auto& b) {
+			return a.offsetBytes == b.offsetBytes && a.sizeBytes == b.sizeBytes && a.visibility == b.visibility;
+		};
+		const auto hasOutput = [&](std::uint32_t location, IoComponentType type) {
+			return std::ranges::any_of(identity.outputs, [&](const auto& output) {
+				return output.location == location && output.componentCount == 4u && output.componentType == type;
+			});
+		};
+		if(!readVariant("TERRAENGINE_VULKAN_CONVENTIONAL_VISIBILITY_IDENTITY=1", identityBytecode)
+			|| !reflector.Reflect(identityBytecode, ShaderStage::Fragment, identity)
+			|| identity.outputs.size() != 2u
+			|| !hasOutput(0u, IoComponentType::Float) || !hasOutput(1u, IoComponentType::UInt)
+			|| !std::ranges::equal(reflected.descriptorBindings, identity.descriptorBindings, sameBinding)
+			|| !std::ranges::equal(reflected.pushConstants, identity.pushConstants, samePush)) {
+			std::cerr << "Surface fragment must keep the template's color and picking outputs and use the same bindings in both variants.\n";
+			return false;
+		}
+	}
+	if(*stageOpt == ShaderStage::Mesh && (use == ShaderUse::CompatibleSurface
+		|| (use == ShaderUse::Surface && input.filename() == "Default.mesh.hlsl"))) {
+		// Keep motion bytecode in the same publication as the color mesh so
+		// an authored deformation edit cannot race the geometry it describes.
+		ReflectionResult motion;
+		if(!readVariant("TERRAENGINE_MESH_TEMPORAL_MOTION=1", meshMotionBytecode)
+			|| !reflector.Reflect(meshMotionBytecode, ShaderStage::Mesh, motion)
+			|| std::ranges::none_of(motion.descriptorBindings, [](const auto& binding) { return binding.set == 2u; })) {
+			std::cerr << "Surface mesh must keep the template's motion position capture.\n";
+			return false;
+		}
 	}
 
 	std::vector<StageIOAttribute> stageInputs;
@@ -1175,6 +1253,15 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	// unchanged, while newer loaders validate the tagged backend record.
 	out.write(reinterpret_cast<const char*>(&provenanceHeader), sizeof(provenanceHeader));
 	out.write(reinterpret_cast<const char*>(&provenance), sizeof(provenance));
+	// Each stage has at most one renderer variant, tagged and sized separately.
+	const auto& variant = identityBytecode.empty() ? meshMotionBytecode : identityBytecode;
+	if(!variant.empty()) {
+		const ShaderProvenanceExtensionHeader extension{
+			identityBytecode.empty() ? kShaderMeshMotionExtensionMagicValue : kShaderIdentityExtensionMagicValue,
+			static_cast<std::uint32_t>(variant.size())};
+		out.write(reinterpret_cast<const char*>(&extension), sizeof(extension));
+		out.write(reinterpret_cast<const char*>(variant.data()), variant.size());
+	}
 
 	CleanupTempSpv();
 	return static_cast<bool>(out);

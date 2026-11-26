@@ -345,9 +345,7 @@ std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> RenderSyste
 					for(const auto& [index, proposed] : views)
 					{
 						const auto settings = TerraEngine::Renderer::BuildPostProcessGraphSettings(proposed);
-						GraphicsAAConfiguration raster;
-						if (ResolveGraphicsAAConfiguration(proposed.values, raster) == GraphicsRequestReason::None
-							&& raster.raster == GraphicsGeometryRasterMode::Indexed)
+						if (settings.RequiresEffectGeometry())
 						{
 							const bool ready = vulkan->PrepareIndexedRasterCandidate(*sealedPublication, index,
 									proposed, reason, waitingForGeometry);
@@ -399,14 +397,12 @@ std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> RenderSyste
 			if(scene != recorded.end())
 			{
 				const auto plan = TerraEngine::Renderer::BuildPostProcessGraphSettings(pendingScene->snapshot);
-				GraphicsAAConfiguration raster;
-				const bool indexed = ResolveGraphicsAAConfiguration(pendingScene->snapshot.values, raster) == GraphicsRequestReason::None
-					&& raster.raster == GraphicsGeometryRasterMode::Indexed;
+				const bool effectGeometry = plan.RequiresEffectGeometry();
 				const bool compatible = !plan.spatialAA
 					|| (vulkan->ReadSpatialAAModeMask({scene->width, scene->height}) & (1u << plan.antiAliasingMode)) != 0u;
 				std::string failure;
 				bool waitingForGeometry = false;
-				const bool geometryReady = !indexed || (compatible && vulkan->PrepareIndexedRasterCandidate(
+				const bool geometryReady = !effectGeometry || (compatible && vulkan->PrepareIndexedRasterCandidate(
 					*sealedPublication, scene->publicationIndex, pendingScene->snapshot, failure, waitingForGeometry));
 				const bool prepared = compatible && geometryReady && vulkan->PreparePostProcessCandidate(
 					sealedPublication->presentationInputs[scene->publicationIndex], pendingScene->snapshot, failure);
@@ -415,7 +411,7 @@ std::shared_ptr<const TerraEngine::Renderer::RenderFramePublication> RenderSyste
 					if(!failure.empty()) TERRAENGINE_LOG(LogLevel::Warning, failure);
 					if(!prepared) vulkan->DiscardPostProcessCandidates();
 					CompleteSceneViewGraphicsSettingsResourcePreparation(pendingScene->requestId, pendingScene->lifecycle,
-						prepared, prepared && (indexed || plan.hdrCamera || plan.toneAndGrade || plan.spatialAA
+						prepared, prepared && (effectGeometry || plan.hdrCamera || plan.toneAndGrade || plan.spatialAA
 							|| plan.coverageAA || plan.presentationEffects || plan.temporalResolve || plan.outputDithering),
 						compatible ? GraphicsRequestReason::PreparationFailed : GraphicsRequestReason::Unsupported);
 				}

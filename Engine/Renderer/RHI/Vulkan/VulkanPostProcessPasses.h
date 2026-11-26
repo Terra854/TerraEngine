@@ -75,6 +75,7 @@ namespace TerraEngine::Renderer::Vulkan
 		bool needsGrid = false;
 		bool needsPresentationEffects = false;
 		bool needsTemporal = false;
+		bool meshTemporal = false;
 		bool needsScaledCamera = false;
 		bool ditherCameraOutput = false;
 		GraphicsSettings::PostProcessEffectSettings effects;

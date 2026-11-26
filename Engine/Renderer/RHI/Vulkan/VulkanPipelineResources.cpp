@@ -74,7 +74,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 
 			if (pc.offsetBytes == 0
 				&& pc.sizeBytes >= sizeof(PushConstants)
-				&& (vkStages & (VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_VERTEX_BIT))) {
+				&& (vkStages & (VK_SHADER_STAGE_MESH_BIT_EXT))) {
 				supportsDefaultPushConstants = true;
 			}
 		}
@@ -406,14 +406,14 @@ std::optional<VulkanRasterPipelineConfiguration> VulkanContext::Impl::PrepareDef
 	if (!source || !source->reflectionComplete || source->collectionGeneration == 0
 		|| source->geometryAbiVersion != 1 || source->usesAnimationBindings || source->usesReservedBindings)
 	{ reason = "The exact engine Default surface collection is unavailable."; return std::nullopt; }
-	const auto vertexId = resources.LoadShader(resources.ResolveEngineAssetPath("Shaders/DefaultIndexed.vert.tspf"));
-	const auto vertex = resources.AcquireShaderSnapshot(vertexId);
-	if (!vertex || vertex->publicationGeneration == 0 || vertex->bytecode.empty()
-		|| static_cast<ShaderStage>(vertex->reflection.source.stage) != ShaderStage::Vertex)
-	{ reason = "The installed reflected DefaultIndexed vertex stage is unavailable."; return std::nullopt; }
+	const auto meshId = resources.LoadShader(resources.ResolveEngineAssetPath("Shaders/DefaultIndexed.mesh.tspf"));
+	const auto mesh = resources.AcquireShaderSnapshot(meshId);
+	if (!mesh || mesh->publicationGeneration == 0 || mesh->bytecode.empty()
+		|| static_cast<ShaderStage>(mesh->reflection.source.stage) != ShaderStage::Mesh)
+	{ reason = "The installed reflected DefaultIndexed mesh stage is unavailable."; return std::nullopt; }
 	auto collection = std::make_shared<ShaderCollection>(*source);
 	collection->stages.clear();
-	collection->stages.push_back({ShaderStage::Vertex, vertexId, vertex, vertex->publicationGeneration});
+	collection->stages.push_back({ShaderStage::Mesh, meshId, mesh, mesh->publicationGeneration});
 	for (const auto& stage : source->stages)
 		if (stage.stage == ShaderStage::Fragment) collection->stages.push_back(stage);
 	if (collection->stages.size() != 2)
@@ -453,7 +453,8 @@ void VulkanContext::Impl::EnsurePipeline(
 	const auto screenRasterOwner = screenSpaceMrt ? raster.screenSpaceRaster.lock() : nullptr;
 	if(screenSpaceMrt && !screenRasterOwner) return;
 	if ((raster.samples != VK_SAMPLE_COUNT_1_BIT && raster.samples != VK_SAMPLE_COUNT_4_BIT)
-		|| (!indexed && raster.samples != VK_SAMPLE_COUNT_1_BIT)
+		// Four-sample mesh pipelines must use the qualified coverage pass.
+		|| (!indexed && raster.samples == VK_SAMPLE_COUNT_4_BIT && renderPass != indexedMsaaRenderPass)
 		|| (indexed && (raster.qualifiedPass != renderPass || !raster.preparedCollection
 			|| shaderCollectionId != ResourceManager::Instance().GetDefaultShaderCollectionID()))) return;
 	if (indexed)
@@ -556,14 +557,21 @@ void VulkanContext::Impl::EnsurePipeline(
 
 	const bool shadowPipeline = (renderPass == shadowRenderPass);
 	const bool conventionalVisibilityPass = screenSpaceMrt || UsesConventionalVisibilityAttachments(renderPass);
-	const bool defaultConventionalIdentityVariant = usesConventionalVisibilityIdentity
-		&& conventionalVisibilityPass
-		&& shaderCollectionId == ResourceManager::Instance().GetDefaultShaderCollectionID();
-	const bool defaultTaskConventionalIdentityVariant = usesConventionalVisibilityIdentity
-		&& conventionalVisibilityPass
-		&& shaderCollectionId == ResourceManager::Instance().GetDefaultTaskShaderCollectionID();
-	const bool useConventionalIdentityVariant = defaultConventionalIdentityVariant
-		|| defaultTaskConventionalIdentityVariant;
+	const auto fragment = [](const ShaderCollection& owner) -> const Shader* {
+		const auto binding = std::ranges::find(owner.stages, ShaderStage::Fragment, &ShaderCollection::StageBinding::stage);
+		return binding == owner.stages.end() ? nullptr : binding->shader.get();
+	};
+	const Shader* surfaceFragment = fragment(*collection);
+	const bool authoredIdentity = surfaceFragment && !surfaceFragment->identityBytecode.empty();
+	// Geometry-only overrides still share the installed fragment publication.
+	// Pair color and picking by the exact fragment owner, independent of the
+	// collection ID and whether its geometry stages are authored.
+	bool useConventionalIdentityVariant = false;
+	if(usesConventionalVisibilityIdentity && conventionalVisibilityPass && surfaceFragment) {
+		auto& resources = ResourceManager::Instance();
+		const auto stock = resources.AcquireShaderCollectionSnapshot(resources.GetDefaultShaderCollectionID());
+		useConventionalIdentityVariant = screenSpaceMrt || authoredIdentity || (stock && surfaceFragment == fragment(*stock));
+	}
 	if (usesConventionalVisibilityIdentity && !useConventionalIdentityVariant) {
 		// Authored surface shaders retain their target0-only ABI. The second
 		// attachment remains clear for those draws instead of loading an arbitrary
@@ -573,7 +581,6 @@ void VulkanContext::Impl::EnsurePipeline(
 	}
 	std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
 	bool hasFragmentStage = false;
-	bool hasVertexStage = false;
 	bool hasMeshStage = false;
 	bool hasTaskStage = false;
 	bool identityVariantLoadFailed = false;
@@ -591,6 +598,10 @@ void VulkanContext::Impl::EnsurePipeline(
 				// reread a file or substitute an unrelated ordinary identity shader.
 				createInfo.codeSize = raster.screenSpaceFragment->size() * sizeof(std::uint32_t);
 				createInfo.pCode = raster.screenSpaceFragment->data();
+			}
+			else if (replaceFragmentWithIdentity && authoredIdentity) {
+				createInfo.codeSize = shader->identityBytecode.size() * sizeof(std::uint32_t);
+				createInfo.pCode = shader->identityBytecode.data();
 			}
 			else if (replaceFragmentWithIdentity) {
 				// The artifact is intentionally raw Vulkan SPIR-V rather than a
@@ -636,11 +647,7 @@ void VulkanContext::Impl::EnsurePipeline(
 				stageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 				hasFragmentStage = true;
 			}
-			else if (stage.stage == ShaderStage::Vertex && indexed) {
-				stageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-				hasVertexStage = true;
-			}
-			else if (stage.stage == ShaderStage::Mesh && !indexed) {
+			else if (stage.stage == ShaderStage::Mesh) {
 
 				if (!meshShaderSupported) {
 					TERRAENGINE_LOG(LogLevel::Error, "Cannot build mesh pipeline because mesh shader support is unavailable on this device.");
@@ -687,7 +694,7 @@ void VulkanContext::Impl::EnsurePipeline(
 	}
 
 
-	if ((!indexed && !hasMeshStage) || (indexed && (!hasVertexStage || !hasFragmentStage || hasMeshStage || hasTaskStage || shaderStages.size() != 2U))) {
+	if (!hasMeshStage || (indexed && (!hasFragmentStage || hasTaskStage || shaderStages.size() != 2U))) {
 		TERRAENGINE_LOG(LogLevel::Error, "Graphics pipeline must include a mesh stage in this renderer.");
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
@@ -710,7 +717,7 @@ void VulkanContext::Impl::EnsurePipeline(
 	bool supportsDefaultPushConstants = false;
 
 	if (!BuildPipelineLayouts(*collection, setLayouts, bindingsPerSet, pushConstants, supportsDefaultPushConstants,
-		indexed ? VK_SHADER_STAGE_VERTEX_BIT : (VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT))) {
+		indexed ? VK_SHADER_STAGE_MESH_BIT_EXT : (VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT))) {
 
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
@@ -718,17 +725,6 @@ void VulkanContext::Impl::EnsurePipeline(
 		return;
 	}
 
-	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInputInfo.vertexBindingDescriptionCount = 0;
-	vertexInputInfo.pVertexBindingDescriptions = nullptr;
-	vertexInputInfo.vertexAttributeDescriptionCount = 0;
-	vertexInputInfo.pVertexAttributeDescriptions = nullptr;
-
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
 
 	VkViewport viewport{};
 	viewport.x = 0.0f;
@@ -883,8 +879,6 @@ void VulkanContext::Impl::EnsurePipeline(
 	pipelineInfo.pNext = indexed ? nullptr : &vrsState;
 	pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
 	pipelineInfo.pStages = shaderStages.data();
-	pipelineInfo.pVertexInputState = &vertexInputInfo;
-	pipelineInfo.pInputAssemblyState = &inputAssembly;
 	pipelineInfo.pViewportState = &viewportState;
 	pipelineInfo.pRasterizationState = &rasterizer;
 	pipelineInfo.pMultisampleState = &multisampling;
