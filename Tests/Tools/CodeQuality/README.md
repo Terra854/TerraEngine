@@ -15,20 +15,20 @@ checks the interpreter at configure time. Set
 toolchain interpreter explicitly; no Python packages are downloaded.
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --preset Testing -DBUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^Repository\.(SourceReviewAuditParser|StageOwnershipContracts)$' --no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Source lexer contracts failed.' }
 ```
 
-The maintained install is `out/build/RelWithDebInfo/Build`. Commands below use
+The maintained install is `out/build/Testing/Build`. Commands below use
 the installed utility and an explicit checkout path:
 
 ```powershell
-$audit = './out/build/RelWithDebInfo/Build/Tests/Tools/CodeQuality/TerraEngine-SourceReviewAudit.exe'
+$audit = './out/build/Testing/Build/Tests/Tools/CodeQuality/TerraEngine-SourceReviewAudit.exe'
 & $audit --self-test
 & $audit --inventory (Get-Location).Path
 # Compare immutable pre-comment and candidate copies of one file:
@@ -42,9 +42,9 @@ After a complete install, changes confined to this standalone utility can be
 compiled and installed without replacing unrelated runtime artifacts:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target TerraEngine-SourceReviewAudit --parallel 2
+cmake --build --preset Testing --target TerraEngine-SourceReviewAudit --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Audit compile failed.' }
-cmake --install out/build/RelWithDebInfo --config RelWithDebInfo --component SourceReview
+cmake --install out/build/Testing --config RelWithDebInfo --component SourceReview
 if ($LASTEXITCODE -ne 0) { throw 'Audit install failed.' }
 ```
 
@@ -115,9 +115,9 @@ headers of the preserved runtime revision. Extract that exact revision into a
 fresh directory with `git archive`, then configure its absolute source path:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON `
+cmake --preset Testing -DBUILD_TESTING=ON `
 	-DTERRAENGINE_FRAME_REPLAY_REFERENCE_SOURCE_ROOT=<absolute-reference-source>
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --build --preset Testing --target install --parallel 2
 ```
 
 The optional `TerraEngine-FrameStageReplayReference` target uses those Engine
@@ -258,7 +258,7 @@ nanoseconds, median and nearest-rank p95, production byte counts and consumption
 digests for every validated result.
 
 ```powershell
-$install = (Resolve-Path './out/build/RelWithDebInfo/Build').Path
+$install = (Resolve-Path './out/build/Testing/Build').Path
 $costTools = Join-Path $install 'Tests/Tools/CodeQuality'
 $costExe = Join-Path $costTools 'TerraEngine-SyntheticCaptureCost.exe'
 $costEngine = (Resolve-Path (Join-Path $costTools 'TerraEngine.dll')).Path

@@ -95,7 +95,7 @@ From a Visual Studio developer shell on Windows:
 ```powershell
 dotnet build Engine/Managed/TerraEngine.csproj -c Debug --no-restore
 $env:TERRAENGINE_TEST_FILTER="Scripting.RuntimeApi;Animation.Managed"
-.\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+.\out\build\Testing\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmake --build out\build\RelWithDebInfo --target install --config RelWithDebInfo
+cmake --build out\build\Testing --target install --config RelWithDebInfo
 ```

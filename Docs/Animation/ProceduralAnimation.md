@@ -112,12 +112,12 @@ history and records high-water, eviction, publication, and rejection counters.
 From a Visual Studio developer environment:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine-EngineTests
 $env:TERRAENGINE_TEST_FILTER = 'Animation.Procedural'
-& out/build/RelWithDebInfo/Tests/Engine/TerraEngine-EngineTests.exe
+& out/build/Testing/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 The focused suite covers reachable/unreachable and singular two-bone cases,

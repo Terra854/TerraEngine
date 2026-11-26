@@ -11,9 +11,11 @@
 #include "EditorAutomationJobService.h"
 #include "EditorAutomationLogStore.h"
 #include "EditorAutomationRegistry.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.h"
 #include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.h"
 #include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyDeviceRecreation.h"
+#endif
 #include "AnimationAutomationTransactions.h"
 #include "AnimationRuntimeOperations.h"
 #include "../Animation/AnimationPreviewController.h"
@@ -86,10 +88,12 @@ namespace TerraEngine::Editor::Automation
 		// protected editor frame owns transaction creation so network polling never
 		// determines how many scene changes become visible in a rendered frame.
 		void PumpRendererValidationMutationsAtProtectedFrame();
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		// Device recreation executes later than ingress; recheck the exact owned
 		// operation/project/step immediately before the editor admits that reset.
 		bool ValidateRendererEfficiencyDeviceRecreationOwner(const std::filesystem::path& root,
 			std::uint64_t generation, std::string_view operation, std::string_view step, std::string& error) const;
+#endif
 		// Completes terrain derived jobs only after their protected engine boundary
 		// has published or rejected the generation-checked candidate.
 		void PumpTerrainAutomationJobsAtProtectedFrame();
@@ -186,7 +190,9 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId);
 		// Action is bound at provider registration; JSON remains at the editor edge.
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		nlohmann::json HandleRendererEfficiency(int action, const nlohmann::json& arguments, const std::string& requestId);
+#endif
 		nlohmann::json HandleRendererVirtualGeometryCapabilityEvidence(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryValidationRouteSet(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryValidationRouteReset(const nlohmann::json& arguments, const std::string& requestId);
@@ -333,6 +339,7 @@ namespace TerraEngine::Editor::Automation
 		// Tool dispatch and the protected frame pump can be reached from different
 		// bridge phases. One mutex keeps lifecycle and exact evidence coherent.
 		std::mutex sparseTransformMutationMutex;
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		mutable std::mutex rendererEfficiencyMutex;
 		EditorRendererEfficiencyValidation rendererEfficiencyValidation;
 		// Importer-file jobs carry detached preparation; native publication/load
@@ -386,6 +393,7 @@ namespace TerraEngine::Editor::Automation
 		void ScheduleRendererEfficiencyShaderRestoreAtProtectedFrame();
 		void PumpRendererEfficiencyResourceMutationsAtProtectedFrame(RenderSystem& renderer);
 		bool RestoreRendererEfficiencySourcesAtProtectedFrame(std::string& error);
+#endif
 		SparseTransformMutationState sparseTransformMutation;
 		PrefabAuthoringService prefabAuthoringService;
 	};

@@ -12,7 +12,7 @@ It installs no software and restores the caller's environment after CMake exits.
 pwsh -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --version
 
 .EXAMPLE
-pwsh -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --build --preset RelWithDebInfo --target TerraEngine-EngineTests -j 4
+pwsh -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --build --preset Testing --target TerraEngine-EngineTests -j 4
 #>
 [CmdletBinding()]
 param(
@@ -127,7 +127,7 @@ function Add-EnvironmentPath {
 }
 
 if($CMakeArguments.Count -eq 0) {
-	throw 'Pass at least one CMake argument, such as --version or --build --preset RelWithDebInfo.'
+	throw 'Pass at least one CMake argument, such as --version or --build --preset Testing.'
 }
 
 $devCommand = Resolve-DevCommandPath -RequestedPath $DevCmdPath

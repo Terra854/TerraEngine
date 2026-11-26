@@ -8,11 +8,11 @@
 #
 # Example:
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-#     -InstallRoot out/build/RelWithDebInfo/Build -AllowLiveStress
+#     -InstallRoot out/build/Testing/Build -AllowLiveStress
 #
 # readiness readiness matrix (one disposable project, five clean editor launches):
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-#     -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/readiness `
+#     -InstallRoot out/build/Testing/Build -WorkRoot out/validation/readiness `
 #     -RunReadinessMatrix -AllowLiveStress
 # Individual -ReadinessMode cold|warm|stale|corrupt|forced-build runs retain
 # their own evidence summary below WorkRoot/evidence/. Warm and later modes

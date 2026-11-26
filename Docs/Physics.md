@@ -95,9 +95,9 @@ it must never be used as the runtime baseline.
 From a clean checkout with the repository-bundled dependencies:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-EngineTests TerraEngine-EditorTests
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-EngineTests TerraEngine-EditorTests
+cmake --build --preset Testing --target install
 ```
 
 physics validation accepts RelWithDebInfo exclusively for compile, test, install, and
@@ -110,11 +110,11 @@ Run the focused engine slice:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = "Physics;Physics.FixedStep;Physics.RigidBody;Physics.Serialization"
-./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+./out/build/Testing/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
-The canonical installed tree is `out/build/RelWithDebInfo/Build`. No globally installed
+The canonical installed tree is `out/build/Testing/Build`. No globally installed
 physics SDK is required or permitted. See [Docs/Testing.md](Testing.md) for
 CTest filters and full regression workflows.
 
@@ -126,11 +126,11 @@ repeat 10,000-ray batches, and exercise stale-world and Play Mode cycles.
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = "Physics.DeterminismStress;Physics.LifecycleStress"
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 
 $env:TERRAENGINE_TEST_FILTER = "Physics.Editor.Soak"
-& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+& .\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -140,7 +140,7 @@ data, authored-scene hashes, and shutdown status:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-  -InstallRoot out/build/RelWithDebInfo/Build `
+  -InstallRoot out/build/Testing/Build `
   -WorkRoot out/validation/installed-editor-physics-stress `
   -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 `
   -AllowLiveStress
@@ -169,7 +169,7 @@ checks orderly shutdown:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
-  -InstallRoot out/build/RelWithDebInfo/Build `
+  -InstallRoot out/build/Testing/Build `
   -WorkRoot out/ci/physics-export-baseline
 ```
 

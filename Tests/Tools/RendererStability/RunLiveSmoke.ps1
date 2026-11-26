@@ -1,7 +1,7 @@
 # RunLiveSmoke.ps1 - Opt-in, paced editor/runtime presentation smoke harness.
 #
 # Example:
-#   pwsh Tests/Tools/RendererStability/RunLiveSmoke.ps1 -Executable out/install/RelWithDebInfo/TerraEngine-Editor.exe `
+#   pwsh Tests/Tools/RendererStability/RunLiveSmoke.ps1 -Executable out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe `
 #     -Project VirtualizedGeometryTestProject -EvidenceDirectory out/validation/renderer-stability-editor-live `
 #     -AllowLiveGpuStress
 

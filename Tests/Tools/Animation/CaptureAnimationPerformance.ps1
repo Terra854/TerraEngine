@@ -8,10 +8,10 @@
 [CmdletBinding()]
 param(
 	[ValidateNotNullOrEmpty()]
-	[string]$InstallRoot = 'out/build/RelWithDebInfo/Build',
+	[string]$InstallRoot = 'out/build/Testing/Build',
 
 	[ValidateNotNullOrEmpty()]
-	[string]$BuildDirectory = 'out/build/RelWithDebInfo',
+	[string]$BuildDirectory = 'out/build/Testing',
 
 	[ValidateNotNullOrEmpty()]
 	# Keep the root deliberately short: installed-editor export projects can add

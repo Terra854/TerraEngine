@@ -1,5 +1,42 @@
 # TerraEngine Testing
 
+## Build, install, and run tests
+
+From a developer shell at the repository root, run:
+
+```powershell
+cmake --preset Testing
+cmake --build --preset Testing --parallel 2
+```
+
+The `Testing` target builds the test-enabled binaries and stages the install
+tree before running CTest. It uses `out/build/Testing`, the build path
+used by the installed acceptance tools. To build for a focused test command,
+request `--target install` and run CTest with the desired filter.
+
+On a machine with multiple matching Vulkan adapters, set
+`TERRAENGINE_VULKAN_REVIEW_DEVICE` to the exact Vulkan device name before
+building the `Testing` target so the GPU tests can select their adapter.
+
+Debug-specific test recipes below use
+`cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug`.
+
+## Build the editor with and without application validation
+
+From an x64 Visual Studio developer shell at the repository root, configure
+separate build directories and compile the same editor target in each:
+
+```powershell
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine-Editor
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine-Editor
+```
+
+The renderer efficiency acceptance endpoints and the navigation and locomotion
+acceptance hosts belong to the test-enabled build. Use its installed binaries
+when running the integration tests that drive those hosts.
+
 ## Current remediation behavior
 
 The current fixes have a bounded regression and build/install acceptance scope;
@@ -24,10 +61,10 @@ From an x64 Visual Studio developer shell, using the existing bundled dependency
 configuration, compile and install before testing:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Build/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
 ```
 
@@ -45,7 +82,7 @@ regressions do not constitute a new long soak or AAA performance qualification.
 ## Scene View occlusion during navigation
 
 Build and install as above, then run
-`ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.VirtualGeometryRenderer$' --output-on-failure`.
+`ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^Engine\.VirtualGeometryRenderer$' --output-on-failure`.
 The Scene View regression covers rejection of an older camera pose, including
 translation in a rebased view, and resumption when a completed depth pyramid
 matches the current view again.
@@ -65,7 +102,7 @@ disabled. The visible mesh and its silhouette should agree in both captures.
 ## Editor directional shadow reuse
 
 Build and install as above, then run
-`ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$' --output-on-failure`.
+`ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$' --output-on-failure`.
 For an editor check, open a scene with a shadow-casting directional light and a
 Game View camera. Put Scene View and Game View in separate visible panels, then
 hold both cameras still until resources are loaded. Move only the Scene View
@@ -88,15 +125,15 @@ and pinned repository dependencies. Complete the build before using native
 harnesses so executable and engine DLL layouts match.
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.(SceneMutationFailureSafety|ResourceAsyncLifecycle|SceneSaveFailureSafety|AudioWorldCellCapture|FrameFailureLifecycle|OwnedProcess)|Editor\.ExportLifecycle)$' --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine\.(SceneMutationFailureSafety|ResourceAsyncLifecycle|SceneSaveFailureSafety|AudioWorldCellCapture|FrameFailureLifecycle|OwnedProcess)|Editor\.ExportLifecycle)$' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 ```
 
 Native build-harness checks are distinct from installed runtime acceptance.
-The actual maintained install tree is `out/build/RelWithDebInfo/Build`, beneath
+The actual maintained install tree is `out/build/Testing/Build`, beneath
 ENGINE_INSTALL_DESTINATION. Installation includes native DLL closures, managed
 runtime/test dependencies, shaders, export tooling, child fixture and runner.
 Its final `correctness-artifacts.json` compares installed binaries against built
@@ -105,7 +142,7 @@ The installed runner rejects missing/hash-mismatched artifacts, an invocation
 from its source copy, and reused work directories.
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File out/build/RelWithDebInfo/Build/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/correctness-acceptance-fresh -AllowLiveAcceptance
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File out/build/Testing/Build/Tests/Tools/Correctness/RunInstalledCorrectnessAcceptance.ps1 -InstallRoot out/build/Testing/Build -WorkRoot out/validation/correctness-acceptance-fresh -AllowLiveAcceptance
 ```
 
 Live checks require Windows, a usable desktop/renderer and the installed bundled
@@ -133,20 +170,20 @@ dependencies. From a clean checkout, configure tests, compile, and install the
 same bytes before running installed tools:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --fresh --preset Testing
 if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
-cmake --build --preset RelWithDebInfo --parallel 2
+cmake --build --preset Testing --target all --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile failed.' }
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^(Engine\.RuntimeMemorySafety(\.|$)|Editor\.RuntimeMemorySafety\.Diagnostics|Runtime\.MemorySafety\.)' --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Focused CTest failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Complete CTest failed.' }
 ```
 
-The maintained install is `out/build/RelWithDebInfo/Build`, regardless of the
+The maintained install is `out/build/Testing/Build`, regardless of the
 preset's nominal install prefix. Runtime-memory tools live under its
 `Tests/Tools/RuntimeMemorySafety` directory. The installed
 `runtime-memory-safety-artifacts.json` pins their actual bytes and the required
@@ -184,14 +221,14 @@ frame admission after a complete replacement. It needs no GPU or resize event.
 After the build/install commands above, run it with:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^Engine\.VulkanPresentationReservationRecovery$' --output-on-failure
 ```
 
 For an installed allocator slice, after compilation and installation:
 
 ```powershell
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $slice = Join-Path $installRoot 'Tests/Tools/Correctness/RunNativeCorrectnessSlice.ps1'
 $engineTests = Join-Path $installRoot 'Tests/Engine/TerraEngine-EngineTests.exe'
 & $slice -Executable $engineTests -Filter 'Engine.RuntimeMemorySafety.Allocators' `
@@ -391,11 +428,11 @@ below. For a focused regression pass:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = 'WorldHierarchy,Engine.WorldSpatialTransaction'
-& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+& ./out/build/Testing/TerraEngine-EngineTests.exe
 $env:TERRAENGINE_TEST_FILTER = 'Editor.TransactionalMutation'
-& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+& ./out/build/Testing/TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmake --install out/build/RelWithDebInfo --config RelWithDebInfo
+cmake --install out/build/Testing --config RelWithDebInfo
 ```
 
 These tests check world-to-local conversion under rotated/nonuniform parents,
@@ -440,8 +477,8 @@ MCP requested approval; automated serialization round-trip coverage passed.
 Build and install the current configuration before checking startup rendering.
 
 ```powershell
-cmake --build out/build/RelWithDebInfo --config RelWithDebInfo --target install
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Engine\.(ResourceAsyncLifecycle|RuntimeMemorySafety\.(TaskCache|EmptyFramePolicy))|Editor\.HeadlessExport' --output-on-failure
+cmake --build out/build/Testing --config RelWithDebInfo --target install
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Engine\.(ResourceAsyncLifecycle|RuntimeMemorySafety\.(TaskCache|EmptyFramePolicy))|Editor\.HeadlessExport' --output-on-failure
 ```
 
 Launch the installed editor with a cold project containing several distinct cooked
@@ -451,7 +488,7 @@ records the first observable draw count and worker count. Pass the expected draw
 count for the fixture's stationary view.
 
 ```powershell
-python Tests/Tools/Correctness/TestInitialSceneDraws.py --editor out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe --project <disposable-project> --scene Startup --minimum-draws 8
+python Tests/Tools/Correctness/TestInitialSceneDraws.py --editor out/build/Testing/Build/Editor/TerraEngine-Editor.exe --project <disposable-project> --scene Startup --minimum-draws 8
 ```
 
 Export a scene with an authored camera and check that the first frame appears
@@ -464,9 +501,9 @@ appear without waiting for the failed asset indefinitely.
 ## Movement inspector usability
 
 Build `TerraEngine-Editor` and `TerraEngine-EditorTests` using the RelWithDebInfo
-workflow below, then run `ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo
+workflow below, then run `ctest --test-dir out/build/Testing -C RelWithDebInfo
 -R 'Editor.Locomotion|Editor.Navigation' --output-on-failure` and install with
-`cmake --install out/build/RelWithDebInfo --config RelWithDebInfo` (close the editor first).
+`cmake --install out/build/Testing --config RelWithDebInfo` (close the editor first).
 
 In the installed editor, select the navigation-demo knight. Both movement
 inspectors should show Essentials, with Advanced and read-only Runtime Diagnostics
@@ -501,8 +538,8 @@ and `out/inspector-usability-inspector-tests.log`.
 Build `TerraEngine-Editor` and `TerraEngine-EditorTests`, then run:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Editor.Animation' --output-on-failure
-cmake --install out/build/RelWithDebInfo --config RelWithDebInfo
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Editor.Animation' --output-on-failure
+cmake --install out/build/Testing --config RelWithDebInfo
 ```
 
 `Editor.Animation.FbxImport.PreservesAbsoluteAnimationRotations` compares
@@ -525,9 +562,9 @@ After the normal RelWithDebInfo build and install below, run:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = 'Editor.TransactionalMutation,Editor.Inspector'
-& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+& ./out/build/Testing/TerraEngine-EditorTests.exe
 $env:TERRAENGINE_TEST_FILTER = 'Engine.SceneChangePacket'
-& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+& ./out/build/Testing/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -563,9 +600,9 @@ Run the focused picking/overlay regressions from the build directory:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = 'SceneViewOverlay'
-& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+& ./out/build/Testing/TerraEngine-EditorTests.exe
 $env:TERRAENGINE_TEST_FILTER = 'Renderer.VulkanRecording'
-& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+& ./out/build/Testing/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -591,9 +628,9 @@ After building and installing with the preset below, run the focused native
 navigation matrix and editor authoring/logging checks:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Navigation|Editor.Animation' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Navigation|Editor.Animation' --output-on-failure
 $env:TERRAENGINE_TEST_FILTER = 'Editor.Automation.Service,Editor.MCP.StructuredLogs'
-& ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+& ./out/build/Testing/TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -641,7 +678,7 @@ moving. The fixture checks that scale on every update: position-only diagnostics
 cannot detect an accidentally reset mesh scale or prove correct rendering.
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Navigation|Engine.PhysicsConstraintsAndCharacters|Engine.PhysicsManaged' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Navigation|Engine.PhysicsConstraintsAndCharacters|Engine.PhysicsManaged' --output-on-failure
 ```
 
 ## Installed navigation acceptance
@@ -653,12 +690,12 @@ editor/export executables, and acceptance executable are required inputs.
 
 ```powershell
 git submodule update --init --recursive
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target `
     TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $navigationTool = Join-Path $installRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
 $navigationEvidence = [IO.Path]::GetFullPath('out/evidence/navigation')
 ```
@@ -773,9 +810,9 @@ install gate. Use a Visual Studio developer environment with MSVC and the
 Windows SDK available.
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Navigation|BulkScenePublication' --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Navigation|BulkScenePublication' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset Testing --target install
 $audit = Join-Path $installRoot 'Tests/Tools/Navigation/VerifyNavigationArchitecture.ps1'
 & $audit -Root $installRoot
 if ($LASTEXITCODE -ne 0) { throw 'Installed navigation architecture audit failed.' }
@@ -789,7 +826,7 @@ mode, worker count, lane, and workload so the code revision is the only intended
 comparison variable.
 
 ```powershell
-$baselineInstallRoot = (Resolve-Path 'out/prechange-baseline-worktree/out/build/RelWithDebInfo/Build').Path
+$baselineInstallRoot = (Resolve-Path 'out/prechange-baseline-worktree/out/build/Testing/Build').Path
 $candidateInstallRoot = $installRoot
 $baselineTool = Join-Path $baselineInstallRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
 $candidateTool = Join-Path $candidateInstallRoot 'Tests/Tools/Navigation/RunInstalledNavigationAcceptance.ps1'
@@ -868,11 +905,11 @@ From a clean checkout, build and run the production tests, then produce the
 mandatory install tree:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target `
 	TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
 This repository installs to `<build directory>/Build`; `--prefix` does not
@@ -882,8 +919,8 @@ the standalone benchmark directory containing its `CMakeLists.txt` and README:
 
 ```powershell
 $benchmarkRoot = (Resolve-Path $env:TERRAENGINE_MEMORY_BENCHMARK_ROOT).Path
-$benchmarkBuild = Join-Path $benchmarkRoot 'out/build/RelWithDebInfo'
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$benchmarkBuild = Join-Path $benchmarkRoot 'out/build/Testing'
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 cmake -S $benchmarkRoot -B $benchmarkBuild -DTERRAENGINE_INSTALL_ROOT=$installRoot
 cmake --build $benchmarkBuild --config RelWithDebInfo
 ctest --test-dir $benchmarkBuild -C RelWithDebInfo --output-on-failure
@@ -902,12 +939,12 @@ TEPAK binary/worker helpers. Configure from a clean checkout, build the native
 engine test target, run the focused registrations, and install the same build:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-Export
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine-EngineTests TerraEngine-Export
 $env:TERRAENGINE_TEST_FILTER = "Engine.Utilities;Engine.BinaryIO;Engine.WorkerPool"
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 The filter is an iteration aid. The complete CTest run remains the final native
@@ -920,9 +957,9 @@ The physics performance workflow is install-tree based. Configure and install a
 manifest. `-DryRun` validates discovery without claiming a baseline.
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target install
-& .\Tests\Tools\Physics\CapturePhysicsOptimizationBenchmark.ps1 -InstallRoot .\out\build\RelWithDebInfo\Build `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target install
+& .\Tests\Tools\Physics\CapturePhysicsOptimizationBenchmark.ps1 -InstallRoot .\out\build\Testing\Build `
 	-Manifest .\Tests\Fixtures\Performance\Physics\workloads.json `
 	-OutputDirectory .\out\evidence\physics-optimization\candidate -Runs 5 -DryRun
 ```
@@ -933,18 +970,18 @@ results must remain failures rather than being interpreted as zero regressions.
 The complete native and installed acceptance sequence is:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor `
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor `
 	TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler `
 	TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R "Physics|TransactionalMutation|SystemScheduler|Editor\.Automation|Editor\.Export|SceneRuntimeParity" --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
-& .\out\build\RelWithDebInfo\Build\Tests\Tools\Physics\TerraEnginePhysicsGameplayStress.exe
-& .\out\build\RelWithDebInfo\Build\Tests\Tools\Physics\TerraEnginePhysicsConstraintCharacterStress.exe
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
+& .\out\build\Testing\Build\Tests\Tools\Physics\TerraEnginePhysicsGameplayStress.exe
+& .\out\build\Testing\Build\Tests\Tools\Physics\TerraEnginePhysicsConstraintCharacterStress.exe
 & .\Tests\Tools\Physics\RunInstalledEditorPhysicsStress.ps1 `
-	-InstallRoot .\out\build\RelWithDebInfo\Build `
+	-InstallRoot .\out\build\Testing\Build `
 	-WorkRoot .\out\validation\physics-optimization\installed `
 	-RunWorkerScalingMatrix -RunProfilerCaptureChecks -CaptureLevel detailed `
 	-CaptureDurationSeconds 5 -AllowLiveStress
@@ -965,21 +1002,21 @@ audit of required tools, scenarios, fixtures, shaders, and production virtual-ge
 
 ```powershell
 git submodule update --init --recursive
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target `
 	TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests `
 	TerraEngineVirtualGeometryAssetTool TerraEngineVirtualGeometryBenchmark `
 	TerraEngineVirtualGeometryCodecExperiment
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R "^(Engine|Editor)\.VirtualGeometryProductionContracts$" `
 	--output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 Resolve every dry-run input from the installed tree:
 
 ```powershell
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $vgTools = Join-Path $installRoot 'Tests/Tools/VirtualGeometry'
 $vgRunner = Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryBenchmark.exe'
 $vgAdapter = Join-Path $vgTools 'VirtualGeometryRuntimeAdapter.cmd'
@@ -1062,7 +1099,7 @@ SDK and verify every package archive, license, and manifest entry after
 configuring:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
+cmake --fresh --preset Testing
 $dotnet = "External/dotnet/sdk/win-x64/10.0.404/dotnet.exe"
 & $dotnet --version
 $archives = @(
@@ -1106,13 +1143,13 @@ target runs automatically before any managed publish, but it can also be
 exercised independently:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo `
+cmake --fresh --preset Testing
+cmake --build --preset Testing `
 	--target TerraEngine.Managed.Restore
-cmake --build --preset RelWithDebInfo
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+cmake --build --preset Testing --target all
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	--output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 ## Virtual Geometry production evidence
@@ -1120,7 +1157,7 @@ cmake --build --preset RelWithDebInfo --target install
 Validate the setup manifests without launching a renderer:
 
 ```powershell
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $vgTools = Join-Path $installRoot 'Tests/Tools/VirtualGeometry'
 $vgRunner = Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryBenchmark.exe'
 & (Join-Path $vgTools 'CaptureVirtualGeometryPerformance.ps1') `
@@ -1258,7 +1295,7 @@ CTest exposes focused `Engine.Animation` and `Editor.Animation` registrations.
 Run both from an already configured build tree with:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R "^(Engine\.Animation|Editor\.Animation)$" --output-on-failure
 ```
 
@@ -1268,8 +1305,8 @@ silently filtered:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = "Animation"
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
-& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -1296,9 +1333,9 @@ on Windows:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="Scene.SkyComponent"
-.\out\build\Debug\TerraEngine-EngineTests.exe
+.\out\build\Testing-Debug\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 ```
 
 The editor harness currently runs the full editor test binary; the sky migration
@@ -1418,7 +1455,7 @@ After the configured compile/install above, run the focused production-stage and
 repository contract entries, then the complete applicable CTest suite:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^(Engine\.FrameStageContracts|Repository\.(SourceReviewAuditParser|SourceReviewContinuationContracts|StageOwnershipContracts|FrameStageReplayComparison|SourceReviewQuality))$' `
 	--no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Frame-stage/source-quality contracts failed.' }
@@ -1432,7 +1469,7 @@ qualifies the decoder rather than a complete Debug editor session. After the
 same configure, build and install workflow, run it with:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^Editor\.WorkspaceLayoutDecodeAssertions$' --no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Assertions-enabled layout decoding failed.' }
 ```
@@ -1443,7 +1480,7 @@ still allow a valid Scene View camera to restore; invalid root or camera data
 must preserve the current state. After the same build and install steps, run:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^Editor\.WorkspaceLayoutSections$' --no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Independent workspace section restore failed.' }
 ```
@@ -1486,17 +1523,17 @@ environment, Windows SDK, CMake and Ninja:
 ```powershell
 git submodule update --init --recursive
 if ($LASTEXITCODE -ne 0) { throw 'Dependency checkout failed.' }
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --preset Testing
 if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^(Engine\.(RenderCaptureContracts|ReadbackLifetime|VulkanImageReadback)|Editor\.RenderCaptureContracts|Runtime\.ReadbackLifetime\.ProtocolContracts)$' `
 	--no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Capture/readback regression failed.' }
 ```
 
-The maintained installation is `out/build/RelWithDebInfo/Build`. It contains the
+The maintained installation is `out/build/Testing/Build`. It contains the
 native/editor DLL closures, managed assets, shaders, fixture, decoder, scripts
 and watchdog. The runner verifies `readback-lifetime-artifacts.json` against
 actual installed bytes; use its installed copy and close installed editors before
@@ -1531,7 +1568,7 @@ mutant must fail the expected owner-count assertion without changing comments.
 From the same developer shell:
 
 ```powershell
-$readbackInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$readbackInstall = (Resolve-Path 'out/build/Testing/Build').Path
 $readbackTools = Join-Path $readbackInstall 'Tests/Tools/ReadbackLifetime'
 $readbackSensitivity = Join-Path $PWD ('out/validation/readback-sensitivity-' + [guid]::NewGuid().ToString('N'))
 & (Join-Path $readbackTools 'TestReadbackLifetimeSensitivity.ps1') `
@@ -1553,7 +1590,7 @@ Each invocation needs a nonexistent work directory outside the installation.
 Choose `Native`, `Editor` or `All`; `All` runs both lanes once:
 
 ```powershell
-$readbackInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$readbackInstall = (Resolve-Path 'out/build/Testing/Build').Path
 $readbackRunner = Join-Path $readbackInstall 'Tests/Tools/ReadbackLifetime/RunInstalledReadbackLifetime.ps1'
 $readbackMode = 'All' # Native, Editor or All
 $readbackWork = Join-Path $PWD ('out/validation/readback-' + $readbackMode + '-' + [guid]::NewGuid().ToString('N'))
@@ -1595,7 +1632,7 @@ need their own required acceptance. After implementation is integrated, also run
 the complete applicable CTest suite with its registered timeouts:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --no-tests=error --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Complete CTest failed.' }
 ```
 
@@ -1657,7 +1694,7 @@ device-loss injection helpers. Use this focused pass when changing renderer
 failure handling or diagnostics:
 
 ```powershell
-ctest --test-dir out/build/Debug -C Debug -R "RendererRecovery|DeviceLoss|ExportRuntime|RenderDiagnostics|SystemScheduler|PlatformUtils" --output-on-failure
+ctest --test-dir out/build/Testing-Debug -C Debug -R "RendererRecovery|DeviceLoss|ExportRuntime|RenderDiagnostics|SystemScheduler|PlatformUtils" --output-on-failure
 ```
 
 This pass proves fail-closed containment and diagnostics. TerraEngine does not
@@ -1672,16 +1709,16 @@ this focused pass while iterating on visible-command reuse:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="Renderer.VisibleCommandReuse;Renderer.VisibleStreamingTouches;Engine.SystemScheduler.DefaultResourcesAcceptVirtualGeometryRenderDeclaration"
-.\out\build\Debug\TerraEngine-EngineTests.exe
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EngineTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
 For CTest-based validation, run:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.Renderer|Engine.VirtualGeometry|Engine.Resource|Engine.SystemScheduler" --output-on-failure -C Debug
-ctest --test-dir out/build/Debug -R "Editor.VirtualGeometry|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.Renderer|Engine.VirtualGeometry|Engine.Resource|Engine.SystemScheduler" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Editor.VirtualGeometry|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
 ```
 
 
@@ -1700,8 +1737,8 @@ presentation, Profiler toolbar, Resource Residency virtual geometry diagnostic
 tables, or automation diagnostics contracts:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Profiler|RenderDiagnostics|VulkanFrameDiagnostics|ResourceResidencyWindow|GameViewStatsOverlay|ProfilerDiagnosticsAutomation|VirtualGeometryDiagnostics" --output-on-failure
-ctest --test-dir out/build/Debug -R "Engine\.SpatialUnitTests|Editor\.ExportUnitTests" --output-on-failure
+ctest --test-dir out/build/Testing-Debug -R "Profiler|RenderDiagnostics|VulkanFrameDiagnostics|ResourceResidencyWindow|GameViewStatsOverlay|ProfilerDiagnosticsAutomation|VirtualGeometryDiagnostics" --output-on-failure
+ctest --test-dir out/build/Testing-Debug -R "Engine\.SpatialUnitTests|Editor\.ExportUnitTests" --output-on-failure
 ```
 
 Expected coverage includes compact Game View stats, explicit unavailable GPU
@@ -1726,8 +1763,8 @@ run on Windows:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="Resource.Streaming;Scene.Streaming;Renderer.Streaming"
-.\out\build\Debug\TerraEngine-EngineTests.exe
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EngineTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -1737,25 +1774,25 @@ while implementing virtual geometry changes:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="VirtualGeometry;MeshCompiler;HiZ;ResourceStreaming;ResourceResidency;Renderer;AssetPipeline;Editor.Automation;Export"
-.\out\build\Debug\TerraEngine-EngineTests.exe
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EngineTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
 The CTest labels also expose stable virtual-geometry slices:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
 ```
 
 For changes to automatic geometry routing, configure with tests enabled, build
 the engine test executable, and install the editor used for the camera run:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests install
+cmake --preset Testing
+cmake --build out/build/Testing --target TerraEngine-EngineTests install
 $env:TERRAENGINE_TEST_FILTER = 'VirtualGeometry.RoutePolicy,VirtualGeometry.DirectRoute,VirtualGeometry.Stress'
-& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+& ./out/build/Testing/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -1775,7 +1812,7 @@ streaming, stronger Hi-Z validation, mixed-detail cluster selection, and runtime
 visualization. Use this pass while implementing or reviewing that feature:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry" --output-on-failure -C Debug
 ```
 
 The virtual geometry hardening milestone adds the staged hardening pass
@@ -1784,7 +1821,7 @@ counter source truth, transition stability, multi-view independence, visualizer
 cleanup, and broad asset coverage:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
 ```
 
 The GPU-driven batching milestone adds the staged virtual geometry
@@ -1793,7 +1830,7 @@ residency, performance gates, shadow-view selection, cone-safety metadata, and
 Hi-Z baseline preservation:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
 ```
 
 When implementing GPU-driven batching, run each capability slice before advancing to
@@ -1820,7 +1857,7 @@ The current CPU-selected cluster cut remains the correctness oracle, and the
 current Hi-Z behavior remains locked as the accepted baseline:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryRenderer|Engine.RendererRecovery" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryRenderer|Engine.RendererRecovery" --output-on-failure -C Debug
 ```
 
 When implementing GPU packet compaction, run each capability slice before advancing to
@@ -1846,27 +1883,27 @@ true page-sourced render contract. Use the page-streaming slices while
 implementing that feature:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryPageStreaming|Engine.VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryPageStreaming|Engine.VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
 ```
 
 For the page request, budget pressure, eviction, and re-request lifecycle, run
 the resource-labeled slice after the engine test target builds:
 
 ```powershell
-ctest --test-dir out/build/Debug -C Debug -L Resource --output-on-failure
+ctest --test-dir out/build/Testing-Debug -C Debug -L Resource --output-on-failure
 ```
 
 For capability validation page-source diagnostics, build both native test targets and run the
 registry filters that match the editor-facing contract names:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics&& out\build\Testing\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics&& out\build\Testing\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation&& out\build\Testing\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
 ```
 
 The literal task checkpoint
-`ctest --test-dir out/build/Debug -C Debug -R VirtualGeometry.Editor --output-on-failure`
+`ctest --test-dir out/build/Testing-Debug -C Debug -R VirtualGeometry.Editor --output-on-failure`
 currently matches no top-level CTest target. Treat the registry filters above
 as the focused registry workflow. Each corrected filter matches current registered
 names; the native harness fails on zero selected cases. Registry enumeration and
@@ -1876,10 +1913,10 @@ For capability validation asset cook/runtime integrity, run the inspector, runti
 automation slices before the asset-pipeline CTest checkpoint:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation&& out\build\RelWithDebInfo\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-ctest --test-dir out/build/Debug -C Debug -R AssetPipeline --output-on-failure
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector&& out\build\Testing\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh&& out\build\Testing\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation&& out\build\Testing\Build\Tests\Editor\TerraEngine-EditorTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+ctest --test-dir out/build/Testing-Debug -C Debug -R AssetPipeline --output-on-failure
 ```
 
 These checks protect the TEMF v1 page-integrity contract, tiny/simple mesh skip
@@ -1890,9 +1927,9 @@ For capability validation page-streaming performance and memory gates, run the p
 before the broad VirtualGeometry label checkpoint:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView&& out\build\RelWithDebInfo\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
-ctest --test-dir out/build/Debug -C Debug -L VirtualGeometry --output-on-failure
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate&& out\build\Testing\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView&& out\build\Testing\Build\Tests\Engine\TerraEngine-EngineTests.exe"; if ($LASTEXITCODE -ne 0) { throw 'Focused registry slice failed or selected zero cases.' }
+ctest --test-dir out/build/Testing-Debug -C Debug -L VirtualGeometry --output-on-failure
 ```
 
 The capability validation gates fail when resident page payload bytes exceed the configured page
@@ -1914,7 +1951,7 @@ The broader virtual-geometry regression set covers renderer, resource,
 editor asset pipeline, automation, export, and debug visualizer behavior:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
 ```
 
 capability validation broad asset coverage is represented by
@@ -1931,10 +1968,10 @@ same filters that the CTest entries apply:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="AdaptiveVirtualGeometry;VirtualGeometry.Render;VirtualGeometry.Resource;VirtualGeometry.Diagnostics;VirtualGeometry.HiZ;VirtualGeometry.Stress"
-.\out\build\Debug\TerraEngine-EngineTests.exe
+.\out\build\Testing-Debug\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 $env:TERRAENGINE_TEST_FILTER="AdaptiveVirtualGeometry;Editor.AssetPipeline.VirtualGeometry;VirtualGeometry.Editor.Inspector;VirtualGeometry.Editor.Automation;VirtualGeometry.Editor.Export;VirtualGeometry.Editor.DebugView"
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -1948,8 +1985,8 @@ For true page residency, run exact Resource Residency checks
 before renderer payload checks:
 
 ```powershell
-ctest --test-dir out/build/Debug -C Debug -R "ResourceResidency|ResourceStreaming|ResourceManagerMesh|ResourceResidencyWindow" --output-on-failure
-ctest --test-dir out/build/Debug -C Debug -R "VirtualGeometry\\.(Render|PageStreaming|ShaderLayout|Batching|HiZ|Hardening|MultiView|Diagnostics|PageResidency)|VirtualGeometry.*DebugView" --output-on-failure
+ctest --test-dir out/build/Testing-Debug -C Debug -R "ResourceResidency|ResourceStreaming|ResourceManagerMesh|ResourceResidencyWindow" --output-on-failure
+ctest --test-dir out/build/Testing-Debug -C Debug -R "VirtualGeometry\\.(Render|PageStreaming|ShaderLayout|Batching|HiZ|Hardening|MultiView|Diagnostics|PageResidency)|VirtualGeometry.*DebugView" --output-on-failure
 ```
 
 These tests must prove that `Stream CPU Bytes` and `Render GPU Bytes` are exact
@@ -1969,11 +2006,11 @@ tree has the matching TEMF loader, shaders, diagnostics, and asset pipeline
 behavior:
 
 ```powershell
-cmake --preset Debug
-cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
-cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install'
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target TerraEngine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target install'
 ```
 
 During virtual geometry hardening, run the hardening slice after each capability slice,
@@ -2008,9 +2045,9 @@ Studio developer environment and run the editor harness with the MCP/Automation
 or model package filters:
 
 ```powershell
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine-EditorTests TerraEngine-Editor"
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target TerraEngine-EditorTests TerraEngine-Editor"
 $env:TERRAENGINE_TEST_FILTER="Editor.MCP;Editor.Automation;Editor.AssetPipeline.Gltf;Editor.AssetPipeline.Fbx;Editor.AssetPipeline.ModelPackage"
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -2029,7 +2066,7 @@ For Linux-specific prerequisites and troubleshooting, see
 ### Configure
 
 ```bash
-cmake --preset Debug
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
 ```
 
 The checked-in preset uses Ninja. On Linux hosts without Ninja, configure an
@@ -2042,8 +2079,8 @@ cmake -S . -B out/build/LinuxDebugMake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=De
 ### Build Unit Tests
 
 ```bash
-cmake --build out/build/Debug --target TerraEngine-EngineTests
-cmake --build out/build/Debug --target TerraEngine-EditorTests
+cmake --build out/build/Testing-Debug --target TerraEngine-EngineTests
+cmake --build out/build/Testing-Debug --target TerraEngine-EditorTests
 ```
 
 ### Run CTest
@@ -2052,7 +2089,7 @@ Vendored dependency tests are disabled in the TerraEngine CMake configuration,
 so this command runs only the project-owned CTest entries.
 
 ```bash
-ctest --test-dir out/build/Debug --output-on-failure
+ctest --test-dir out/build/Testing-Debug --output-on-failure
 ```
 
 ### Transactional Mutation Checks
@@ -2082,12 +2119,12 @@ Run the authoritative local gate from a Windows x64 Visual Studio developer
 environment:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-Editor
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport|Editor.PhysicsExport|Engine.PhysicsExport" --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-Editor
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport|Editor.PhysicsExport|Engine.PhysicsExport" --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Testing/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
 Run the same installed gate beyond 360 characters whenever editor scripting,
@@ -2099,7 +2136,7 @@ $deepWorkRoot = "out/ci/export-runtime-baseline/" + (
 )
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
-  -InstallRoot out/build/RelWithDebInfo/Build `
+  -InstallRoot out/build/Testing/Build `
   -WorkRoot $deepWorkRoot `
   -RunId export-runtime-long-path
 ```
@@ -2108,18 +2145,18 @@ This lane fails unless the installed editor's ordinary Assembly-CSharp build
 reaches `Ready`, the NativeAOT export succeeds from its private short workspace,
 and no `Library/NativeAot` restore or publish state leaks into the project.
 
-The installed tools are read from `out/build/RelWithDebInfo/Build`; callers do
+The installed tools are read from `out/build/Testing/Build`; callers do
 not run an executable from the intermediate target directory. Verify these
 installed dependencies before running the baseline:
 
 ```text
-out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe
-out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe
-out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe
-out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine.dll
-out/build/RelWithDebInfo/Build/Editor/ExportRuntime/glfw3.dll
-out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll
-out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
+out/build/Testing/Build/Editor/TerraEngine-Export.exe
+out/build/Testing/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/Testing/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe
+out/build/Testing/Build/Editor/ExportRuntime/TerraEngine.dll
+out/build/Testing/Build/Editor/ExportRuntime/glfw3.dll
+out/build/Testing/Build/Editor/Managed/TerraEngine.CSharp.dll
+out/build/Testing/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
 ```
 
 Only files copied into exported games live below `Editor/ExportRuntime`.
@@ -2128,7 +2165,7 @@ Exporter/compiler tools and shared managed references remain editor-side.
 The direct headless CLI contract is:
 
 ```powershell
-& out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe `
+& out/build/Testing/Build/Editor/TerraEngine-Export.exe `
   --project out/ci/export-runtime-baseline/project `
   --profile out/ci/export-runtime-baseline/project/BuildProfiles/baseline.json `
   --output out/ci/export-runtime-baseline/project/Builds/Baseline `
@@ -2180,29 +2217,29 @@ The complete physics gate uses RelWithDebInfo on Windows x64. From a Visual
 Studio developer PowerShell, run the following in order:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Physics|TransactionalMutation|SystemScheduler|Editor\.Automation|Editor\.Export|SceneRuntimeParity" --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "Physics|TransactionalMutation|SystemScheduler|Editor\.Automation|Editor\.Export|SceneRuntimeParity" --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
 Run the focused stress and soak slices before live validation:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = "Physics.DeterminismStress;Physics.LifecycleStress"
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 $env:TERRAENGINE_TEST_FILTER = "Physics.Editor.Soak"
-& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+& .\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
 Then use the installed-editor harness and export baseline:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -AllowLiveStress
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/Testing/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -AllowLiveStress
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Testing/Build -WorkRoot out/ci/physics-export-baseline
 ```
 
 The live harness accepts `-RunManagedReloadAutomationLoopback -RunColliderCookIncrementalMatrix`
@@ -2233,18 +2270,18 @@ Build and run the focused native coverage from an x64 Visual Studio developer
 environment:
 
 ```powershell
-cmake --preset Debug
-cmake --build --preset Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Editor TerraEngine-Export
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
+cmake --build out/build/Testing-Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Editor TerraEngine-Export
 $env:TERRAENGINE_TEST_FILTER="Editor.MCP;Editor.Automation;AutomationTransaction;AutomationJob;AutomationLog;PlayMode;Prefab;ScriptCompilation;BuildProfile;SceneView;Profiler"
-.\out\build\Debug\TerraEngine-EditorTests.exe
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-ctest --test-dir out/build/Debug -C Debug -R "Editor\.Automation|Editor\.RendererRecovery|Editor\.Export|Engine\.TransactionalMutation|Engine\.SystemScheduler" --output-on-failure
-ctest --test-dir out/build/Debug -C Debug --output-on-failure
-cmake --build --preset Debug --target install
+ctest --test-dir out/build/Testing-Debug -C Debug -R "Editor\.Automation|Editor\.RendererRecovery|Editor\.Export|Engine\.TransactionalMutation|Engine\.SystemScheduler" --output-on-failure
+ctest --test-dir out/build/Testing-Debug -C Debug --output-on-failure
+cmake --build out/build/Testing-Debug --target install
 ```
 
 Installed-editor validation uses
-`out/build/Debug/Build/Editor/TerraEngine-Editor.exe`. Start at the project hub
+`out/build/Testing-Debug/Build/Editor/TerraEngine-Editor.exe`. Start at the project hub
 with isolated preferences, enable the bridge and writes from
 `Edit > Preferences... > MCP Bridge`, and run the end-to-end scenario in
 the editor automation validation workflow. Validation must cover one
@@ -2286,7 +2323,7 @@ the requested result directory, then removes the disposable scene.
 
 ```powershell
 & .\Tests\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
-	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
+	-InstalledEditor 'out/build/Testing/Build/Editor/TerraEngine-Editor.exe' `
 	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
 	-Asset 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan.glb' `
 	-Prefab 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan_Generated/CesiumMan.teprefab' `
@@ -2309,7 +2346,7 @@ guard, and retain the generated summaries and manifest:
 
 ```powershell
 & .\Tests\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
-	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
+	-InstalledEditor 'out/build/Testing/Build/Editor/TerraEngine-Editor.exe' `
 	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
 	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/profiler' `
 	-PairCount 5 -CaptureDurationSeconds 30 -McpPort 43155
@@ -2327,7 +2364,7 @@ Run the install target before finishing any task that changed code so the
 install tree stays verified with the compiled outputs.
 
 ```bash
-cmake --build out/build/Debug --target install
+cmake --build out/build/Testing-Debug --target install
 ```
 
 The install target also runs managed publish/build targets through the
@@ -2387,13 +2424,13 @@ does not pass a `--parallel` argument.
 
 ```powershell
 Remove-Item Env:TERRAENGINE_THREADPOOL_WORKERS -ErrorAction SilentlyContinue
-cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Editor
+cmake --build out/build/Testing --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Editor
 $env:TERRAENGINE_TEST_FILTER = "DerivedSceneCache;BulkScenePublication"
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
 $env:TERRAENGINE_TEST_FILTER = "ManagedReadiness;ProjectReadiness;ArchitectureHardening.PlayModeBulkRestore;MCP.ProjectLifecycle;MCP.Scripts;MCP.PlayMode;PhysicsExport"
-& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+& .\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER -ErrorAction SilentlyContinue
-cmake --build out/build/RelWithDebInfo --target install
+cmake --build out/build/Testing --target install
 ```
 
 The focused tests cover missing/cold cache creation, unchanged warm reuse,
@@ -2408,7 +2445,7 @@ After install, run the harness's capability validation matrix under a disposable
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-	-InstallRoot out/build/RelWithDebInfo/Build `
+	-InstallRoot out/build/Testing/Build `
 	-WorkRoot out/validation/readiness `
 	-RunReadinessMatrix -AllowLiveStress
 ```
@@ -2429,15 +2466,15 @@ after calling `VsDevCmd.bat`; a plain shell may fail before compiling project
 code because MSVC standard library include paths are not initialized.
 
 ```powershell
-cmake --preset Debug
-cmake --build out/build/Debug --target TerraEngine-EngineTests
-cmake --build out/build/Debug --target TerraEngine-EditorTests
-ctest --test-dir out/build/Debug --output-on-failure
-cmake --build out/build/Debug --target install
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
+cmake --build out/build/Testing-Debug --target TerraEngine-EngineTests
+cmake --build out/build/Testing-Debug --target TerraEngine-EditorTests
+ctest --test-dir out/build/Testing-Debug --output-on-failure
+cmake --build out/build/Testing-Debug --target install
 ```
 
 When using a non-preset build directory created by Codex or local automation,
-replace `out/build/Debug` with that directory. For example, the current Codex
+replace `out/build/Testing-Debug` with that directory. For example, the current Codex
 debug tree uses:
 
 ```powershell
@@ -2451,12 +2488,12 @@ work, run the same commands through `VsDevCmd.bat` when the shell is not already
 a Visual Studio Developer shell:
 
 ```powershell
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests"
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Testing --target TerraEngine-EngineTests TerraEngine-EditorTests"
 $env:TERRAENGINE_TEST_FILTER="Resource.Residency"
-.\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
-.\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+.\out\build\Testing\TerraEngine-EngineTests.exe
+.\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target install"
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Testing --target install"
 ```
 
 ## profiler rework V1 evidence and fixed-identity benchmark
@@ -2470,7 +2507,7 @@ first:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Profiling/CheckProfilerSource.ps1 `
-    -RepositoryRoot . -InstallRoot out/build/RelWithDebInfo/Build
+    -RepositoryRoot . -InstallRoot out/build/Testing/Build
 ```
 
 Run a clean-input dry run, then the canonical five-run installed-editor
@@ -2479,12 +2516,12 @@ comparison (use the five-minute canonical duration for release evidence):
 ```powershell
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
     -Project <project> -Scene <scene> -Manifest Tests/Tools/FramePublication/workloads.json `
-    -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
+    -InstallRoot out/build/Testing/Build -EditorExecutable <installed-editor> `
     -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
     -DurationSeconds 60 -DryRun
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
     -Project <project> -Scene <scene> -Manifest Tests/Tools/FramePublication/workloads.json `
-    -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
+    -InstallRoot out/build/Testing/Build -EditorExecutable <installed-editor> `
     -CameraHash <read-only-camera-hash> -OutputDirectory out/evidence/profiler-rework `
     -DurationSeconds 300
 ```
@@ -2514,13 +2551,13 @@ partial run cannot be mistaken for complete evidence:
 
 ```powershell
 # Run focused suites, then install and audit the installed tree.
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build out/build/RelWithDebInfo --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build out/build/Testing --target install --parallel 2
 
 # Run the exact-scene one-minute JournalV1 smoke and reopen/count check.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/Testing/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 5 `
   -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/smoke
 
@@ -2545,7 +2582,7 @@ remain passing.
 # Run a closed/open recording pair; the window opens only in the final minute.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/Testing/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode MatchedWindowOpen -Runs 1 `
   -DurationSeconds 300 -OpenProfilerAtSeconds 240 `
   -OutputDirectory out/evidence/profiler-rework/late-window
@@ -2602,7 +2639,7 @@ missing or unequal blocks. Raw samples remain available for diagnosis.
 # three-percent median/P95 gate; this smoke is not the canonical stability run.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/Testing/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode MatchedRecordingComparison -Runs 1 `
   -DurationSeconds 60 -OutputDirectory out/evidence/profiler-rework/overhead-smoke
 ```
@@ -2613,7 +2650,7 @@ missing or unequal blocks. Raw samples remain available for diagnosis.
 # memory, and Finish evidence; raw Engine CPU first/final windows are diagnostic.
 & .\Tests\Tools\Profiling\CaptureProfilerReworkBenchmark.ps1 `
   -Project <project> -Scene <project>/Assets/Scenes/Scene.tescene `
-  -InstallRoot out/build/RelWithDebInfo/Build -EditorExecutable <installed-editor> `
+  -InstallRoot out/build/Testing/Build -EditorExecutable <installed-editor> `
   -CameraHash <read-only-camera-hash> -Mode DetailedRecording -Runs 1 `
   -DurationSeconds 300 -OutputDirectory out/evidence/profiler-rework/final
 ```
@@ -2635,12 +2672,12 @@ before the complete suites:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="AnimatedVirtualGeometry;VirtualGeometry.ShaderLayout;Renderer.AnimationView;ShaderGeometryContract"
-.\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+.\out\build\Testing\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 $env:TERRAENGINE_TEST_FILTER="SkinnedMeshCook;DeformableDemandedPageFormat;VirtualGeometry"
-.\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+.\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 ```
 
 Then build and inspect the installed tree. The three compute binaries and public
@@ -2648,10 +2685,10 @@ geometry includes must be loaded from `Build/Editor/Shaders`, not the source
 tree:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target install
-Get-Item out/build/RelWithDebInfo/Build/Editor/Shaders/VirtualGeometry/AnimatedPageDeform.comp.spv
-Get-Item out/build/RelWithDebInfo/Build/Editor/Shaders/VirtualGeometry/AnimatedClusterBounds.comp.spv
-Get-Item out/build/RelWithDebInfo/Build/Editor/Shaders/VirtualGeometry/AnimatedRefinement.comp.spv
+cmake --build --preset Testing --target install
+Get-Item out/build/Testing/Build/Editor/Shaders/VirtualGeometry/AnimatedPageDeform.comp.spv
+Get-Item out/build/Testing/Build/Editor/Shaders/VirtualGeometry/AnimatedClusterBounds.comp.spv
+Get-Item out/build/Testing/Build/Editor/Shaders/VirtualGeometry/AnimatedRefinement.comp.spv
 ```
 
 For GPU acceptance, launch the installed editor and use the deterministic
@@ -2668,7 +2705,7 @@ To reproduce the animated LOD import regression specifically, run:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="SkinnedMeshCook.PreservesAdaptiveLodsAndPerMeshPercentageThresholds;PackageImport.AppliesPercentageOverridesPerGeneratedMesh"
-.\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+.\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -2683,7 +2720,7 @@ or writing authored assets:
 
 ```powershell
 $env:TERRAENGINE_CURRENT_PROJECT_ROOT = 'C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project'
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Editor\.CurrentProjectCompatibility' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Editor\.CurrentProjectCompatibility' --output-on-failure
 Remove-Item Env:TERRAENGINE_CURRENT_PROJECT_ROOT
 ```
 
@@ -2726,7 +2763,7 @@ After installation, run the native contract executable through the wrapper:
 
 ```powershell
 & '.\Tests\Tools\FramePublication\RunFramePublicationContracts.ps1' `
-	-InstallRoot '.\out\build\RelWithDebInfo\Build' `
+	-InstallRoot '.\out\build\Testing\Build' `
 	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
 	-OutputDirectory '.\out\evidence\frame-publication\contracts'
 ```
@@ -2738,7 +2775,7 @@ hash; the tool refuses to infer it or use multiple editor processes:
 & '.\Tests\Tools\FramePublication\CaptureFramePublicationPerformance.ps1' `
 	-Project $framePubProject -Scene $framePubScene -CameraHash $framePubCameraHash `
 	-Manifest '.\Tests\Tools\FramePublication\workloads.json' `
-	-InstallRoot '.\out\build\RelWithDebInfo\Build' `
+	-InstallRoot '.\out\build\Testing\Build' `
 	-OutputDirectory '.\out\evidence\frame-publication\candidate' -Runs 5 -WarmupSeconds 30 -DurationSeconds 60
 ```
 
@@ -2752,19 +2789,19 @@ Audio acceptance is intentionally split into deterministic and audible lanes.
 The authoritative CI lane does not require an output device:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineAudioClipCompiler
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^(Engine|Editor)\\.Audio" --output-on-failure
+cmake --preset Testing
+cmake --build out/build/Testing --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineAudioClipCompiler
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "^(Engine|Editor)\\.Audio" --output-on-failure
 ./Tests/Tools/Audio/AcquireAudioFixtures.ps1 -VerifyCommitted
 ./Tests/Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
-cmake --build out/build/RelWithDebInfo --target install
+cmake --build out/build/Testing --target install
 ```
 
 To validate real decoding and mixing on a muted workstation or headless runner,
 run the dedicated offline test:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^Engine.AudioOfflineRender$" --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "^Engine.AudioOfflineRender$" --output-on-failure
 ```
 
 This test configures miniaudio with `noDevice=true`, renders a committed WAV
@@ -2781,22 +2818,22 @@ manual lane as deferred; it must never be reported as an audible pass.
 Configure and compile the strict canonical runtime from a clean checkout, then run the feature filter:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-UnboundedSceneValidation
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-UnboundedSceneValidation
 $env:TERRAENGINE_TEST_FILTER = 'WorldCoordinate;WorldSpatial;WorldStreaming;SpatialIndex;TransactionalMutation;SystemScheduler;RenderReferenceFrame;Physics.Frame;Unbounded'
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
-& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
 Run the complete suite and mandatory install gate after the focused tests:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+ctest --test-dir out/build/Testing -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
-The installed fixture manifests, workloads, tools, translated-world shaders, and runtime binaries must be validated from the runnable bundle at `out/build/RelWithDebInfo/Build`; source-tree fallbacks are failures. Qualification requires the installed scenario matrix, five-run 5% timing gate, fixed-residency 2% memory gate, five-minute smoke, and six-hour release soak. Missing hardware or evidence is incomplete, never a zero-cost pass.
+The installed fixture manifests, workloads, tools, translated-world shaders, and runtime binaries must be validated from the runnable bundle at `out/build/Testing/Build`; source-tree fallbacks are failures. Qualification requires the installed scenario matrix, five-run 5% timing gate, fixed-residency 2% memory gate, five-minute smoke, and six-hour release soak. Missing hardware or evidence is incomplete, never a zero-cost pass.
 
 ## Terrain surface layers
 
@@ -2804,9 +2841,9 @@ Run the installed terrain surface matrix after the focused foundation and
 sculpt lanes:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
     -R "^(Engine|Editor)\\.Terrain\\.(Surface|Layers)$" --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 The installed audit must discover `Tests/Tools/Terrain/workloads.json`, the
@@ -2824,15 +2861,15 @@ Run the installed Jolt heightfield workload after the terrain collision
 provider-neutral recipe and publication tests:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
     -R "^(Engine|Editor)\\.Terrain\\.(Collision|CollisionAlignment)$" --output-on-failure
-cmake --build --preset RelWithDebInfo --target TerraEngineTerrainBenchmark
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+cmake --build --preset Testing --target TerraEngineTerrainBenchmark
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $tool = Join-Path $installRoot 'Tests/Tools/Terrain/TerraEngineTerrainBenchmark.exe'
 $manifest = Join-Path $installRoot 'Tests/Fixtures/Terrain/manifest.json'
 & $tool --fixture $manifest --route terrain-1000km-edit-route --collision true `
     --output (Join-Path $installRoot 'Tests/Tools/Terrain/terrain-collision-result.json')
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 The collision workload records Jolt sample counts 257/513/1025 and requires
@@ -2847,10 +2884,10 @@ Run deterministic operation and cancellation coverage after the selection query,
 procedural job, and spline grader sources are available:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
     -R "^(Engine|Editor)\\.Terrain\\.(Procedural|ProceduralJob|SplineGrading)$" --output-on-failure
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineTerrainBenchmark
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineTerrainBenchmark
+cmake --build --preset Testing --target install
 ```
 
 The installed audit must discover the procedural workload, selection and
@@ -2870,7 +2907,7 @@ is a bounded smoke run; it is useful for wiring checks but cannot satisfy the
 30-minute acceptance gate.
 
 ```powershell
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $tools = Join-Path $installRoot 'Tests/Tools/Terrain'
 & (Join-Path $tools 'RunTerrainSoak.ps1') -InstallRoot $installRoot `
     -OutputDirectory (Join-Path $tools 'terrain-soak-smoke') `
@@ -2897,13 +2934,13 @@ Terrain size expansion and crop adds the following focused registrations. Run th
 RelWithDebInfo configure before the complete serial suite:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineTerrainBenchmark
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineTerrainBenchmark
 $terrain055Regex = '^(Engine\.Terrain\.(Foundation|Resize|AtomicEdit|Surface|Lod|Residency|Collision|Procedural|MultithreadedStress|ExportRuntime)|Editor\.Terrain\.(CreateSculpt|CollisionAlignment|Procedural|Automation|History|Resize|SaveRecovery|LargeWorld))$'
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R $terrain055Regex --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R $terrain055Regex --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset Testing --target install
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 & (Join-Path $installRoot 'Tests/Tools/Terrain/VerifyInstalledTerrainContract.ps1') -InstallRoot $installRoot
 ```
 
@@ -2934,7 +2971,7 @@ must select every named lane and return zero; an empty selection is a failure.
 | Installed ContentMount/TEPAK runtime behavior | `Engine.Terrain.ExportRuntime` |
 
 ```powershell
-$buildRoot = 'out/build/RelWithDebInfo'
+$buildRoot = 'out/build/Testing'
 $terrain054Regex = '^(Engine\.Terrain\.(Format|Mapping|Surface|Sampler|Lod|Residency|MultithreadedStress|ExportRuntime)|Editor\.Terrain\.(Compatibility|Layers|MappingPreview))$'
 1..3 | ForEach-Object {
     Write-Host "Terrain rendering overhaul focused pass $_ of 3"
@@ -2957,7 +2994,7 @@ absolute checkout paths. ContentMount and TEPAK are checked separately because
 the artifact audit does not claim live runtime capability.
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 $sourceRoot = (Resolve-Path '.').Path
 $installRoot = (Resolve-Path "$buildRoot/Build").Path
 $terrainEvidence = Join-Path $sourceRoot 'out/evidence/terrain-rendering-overhaul'
@@ -3071,8 +3108,8 @@ complete, finish with the authoritative single-job suite and mandatory install
 gate. Any command failure stops completion.
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target `
     TerraEngine `
     TerraEngine-Editor `
     TerraEngine-EngineTests `
@@ -3088,7 +3125,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Terrain rendering overhaul compile gate failed
 
 ctest --test-dir $buildRoot -C RelWithDebInfo -j 1 --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Complete single-job CTest gate failed.' }
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 if ($LASTEXITCODE -ne 0) { throw 'Mandatory terrain rendering overhaul install gate failed.' }
 ```
 
@@ -3099,8 +3136,8 @@ comparable.
 # Lifecycle recovery validation
 
 Configure with `BUILD_TESTING=ON` in an x64 Visual Studio developer environment,
-then run `cmake --build --preset RelWithDebInfo --target install --parallel 2`.
-The maintained installed tree is `out/build/RelWithDebInfo/Build`. Tests and
+then run `cmake --build --preset Testing --target install --parallel 2`.
+The maintained installed tree is `out/build/Testing/Build`. Tests and
 installed acceptance must use matching binaries and `correctness-artifacts.json`.
 
 The six recovery CTest slices enforce these minimum selected case counts:
@@ -3148,7 +3185,7 @@ a fresh work directory outside the installed tree and retain an outer process
 watchdog for the complete run, including NativeAOT compilation:
 
 ```powershell
-$install = (Resolve-Path out/build/RelWithDebInfo/Build).Path
+$install = (Resolve-Path out/build/Testing/Build).Path
 $pwsh = (Get-Command pwsh.exe).Source
 & "$install/Tests/Tools/Correctness/RunWithWatchdog.ps1" `
 	-Executable $pwsh -TimeoutSeconds 1800 `
@@ -3226,22 +3263,22 @@ symlinks and require rejection. Preserve logs and actual Linux build results.
 
 ## Archive reads, independent terrain copies and HTTP authority
 
-Configure with `cmake --preset RelWithDebInfo -DBUILD_TESTING=ON`, then run
-`cmake --build --preset RelWithDebInfo --target install --parallel 2`. The installed
+Configure with `cmake --preset Testing`, then run
+`cmake --build --preset Testing --target install --parallel 2`. The installed
 native harnesses and validation utilities live under
-`out/build/RelWithDebInfo/Build/Tests`. Use the bundled compiler/dependency setup
+`out/build/Testing/Build/Tests`. Use the bundled compiler/dependency setup
 and the developer environment described above.
 
 Run the five independent native slices after installation:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.ContentArchiveSafety|Editor\.ContentArchiveSafety|Editor\.Terrain\.IndependentCopy|Editor\.McpAuthority|Engine\.AnimationCompileFailure)$' --no-tests=error --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine\.ContentArchiveSafety|Editor\.ContentArchiveSafety|Editor\.Terrain\.IndependentCopy|Editor\.McpAuthority|Engine\.AnimationCompileFailure)$' --no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Safety regressions failed.' }
 # Check that all five entries were discovered and executed. Each harness slice
 # enforces a nonzero contract case floor in its independent process watchdog.
-& out/build/RelWithDebInfo/Build/Tests/Tools/ContentArchive/RunArchiveSafetyWatchdog.ps1 -InstallRoot out/build/RelWithDebInfo/Build -LogDirectory out/validation/archive-trees-fresh
-& out/build/RelWithDebInfo/Build/Tests/Tools/ContentArchive/RunArchiveSafetyStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -LogDirectory out/validation/archive-stress-fresh
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+& out/build/Testing/Build/Tests/Tools/ContentArchive/RunArchiveSafetyWatchdog.ps1 -InstallRoot out/build/Testing/Build -LogDirectory out/validation/archive-trees-fresh
+& out/build/Testing/Build/Tests/Tools/ContentArchive/RunArchiveSafetyStress.ps1 -InstallRoot out/build/Testing/Build -LogDirectory out/validation/archive-stress-fresh
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 ```
 
 Use fresh evidence directories. Tree cases run in separate bounded children;
@@ -3291,7 +3328,7 @@ from the repository root using the test executable in the build directory:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = 'Engine.Resource.Texture.VisibleMaterialRequestsCookedPayload'
-& ./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+& ./out/build/Testing/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
@@ -3302,10 +3339,10 @@ resource workers and preserve the material's texture UUID.
 From the bundled developer environment, configure, compile and install:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine\.TextureRangeValidation|Engine\.TextureRgbaLayout|Engine\.JobGraphFailureSettlement|Engine\.UIHitTesting)$' --no-tests=error --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --preset Testing
+cmake --build --preset Testing --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine\.TextureRangeValidation|Engine\.TextureRgbaLayout|Engine\.JobGraphFailureSettlement|Engine\.UIHitTesting)$' --no-tests=error --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 ```
 
 The four owned-watchdog lanes require 8 texture bounds, 5 RGBA layout, 6 fatal
@@ -3320,7 +3357,7 @@ Installed GPU and physical-pointer acceptance requires an unlocked Windows
 desktop and a fresh owned directory:
 
 ```powershell
-pwsh -NoProfile -File out/build/RelWithDebInfo/Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/texture-ui-live-fresh -AllowLiveAcceptance
+pwsh -NoProfile -File out/build/Testing/Build/Tests/Tools/Correctness/RunInstalledTextureUiAcceptance.ps1 -InstallRoot out/build/Testing/Build -WorkRoot out/validation/texture-ui-live-fresh -AllowLiveAcceptance
 ```
 
 The installed runner verifies its artifact seal, matching native DLL closure,
@@ -3398,10 +3435,10 @@ On a machine with an available native desktop, enable the isolated renderer
 recovery test from an x64 Visual Studio developer terminal:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON -DTERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Editor\.RendererEfficiency\.NativeGlfwRecovery$' --no-tests=error --output-on-failure
-& ./out/build/RelWithDebInfo/Build/Tests/Editor/NativeGlfwRecovery/TerraEngine-RendererEfficiencyGlfwRecoveryTests.exe
+cmake --preset Testing -DTERRAENGINE_BUILD_NATIVE_GLFW_RECOVERY_TEST=ON
+cmake --build --preset Testing --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^Editor\.RendererEfficiency\.NativeGlfwRecovery$' --no-tests=error --output-on-failure
+& ./out/build/Testing/Build/Tests/Editor/NativeGlfwRecovery/TerraEngine-RendererEfficiencyGlfwRecoveryTests.exe
 ```
 
 The test creates one hidden GLFW window and uses the bundled GLFW/ImGui
@@ -3515,7 +3552,7 @@ Windows file lock. Run it from the freshly built and installed test tree:
 $priorAssetTemporaryTestFilter = [Environment]::GetEnvironmentVariable('TERRAENGINE_TEST_FILTER', 'Process')
 try {
 	$env:TERRAENGINE_TEST_FILTER = 'Renderer.Efficiency.Editor.AssetImportTemporary'
-	& ./out/build/RelWithDebInfo/Build/Tests/Editor/TerraEngine-EditorTests.exe
+	& ./out/build/Testing/Build/Tests/Editor/TerraEngine-EditorTests.exe
 	if($LASTEXITCODE -ne 0) { throw 'Private import-path regressions failed.' }
 } finally {
 	[Environment]::SetEnvironmentVariable('TERRAENGINE_TEST_FILTER', $priorAssetTemporaryTestFilter, 'Process')
@@ -3538,12 +3575,12 @@ From an x64 Visual Studio developer PowerShell at the repository root:
 
 ```powershell
 git submodule update --init --recursive
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$|^Renderer\.Efficiency\..*Contracts$' --no-tests=error --output-on-failure
+cmake --preset Testing
+cmake --build --preset Testing --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$|^Renderer\.Efficiency\..*Contracts$' --no-tests=error --output-on-failure
 ```
 
-Use the maintained installation at `out/build/RelWithDebInfo/Build`. Verify the
+Use the maintained installation at `out/build/Testing/Build`. Verify the
 files declared by its `renderer-efficiency-artifacts.json` and
 `correctness-artifacts.json`, including their actual hashes, before using
 installed tools. A checkout runner or mixed installation is not supported.
@@ -3552,14 +3589,14 @@ The current full registration contains 168 CTest groups. This CPU command select
 166, excluding the mixed nested-settlement group and hidden-window GLFW test:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -E '^(Engine\.NestedTaskSettlement|Editor\.RendererEfficiency\.NativeGlfwRecovery)$' --no-tests=error --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -E '^(Engine\.NestedTaskSettlement|Editor\.RendererEfficiency\.NativeGlfwRecovery)$' --no-tests=error --output-on-failure
 ```
 
 `Engine.SpatialUnitTests` already excludes the nested-settlement prefix. Run its
 ten CPU-only cases separately through the installed watchdog wrapper:
 
 ```powershell
-$installedTests = './out/build/RelWithDebInfo/Build/Tests'
+$installedTests = './out/build/Testing/Build/Tests'
 $nestedCpuFilter = 'Engine.NestedTaskSettlement.Animation,Engine.NestedTaskSettlement.UnqueuedPooledVoidRemoved,Engine.NestedTaskSettlement.NoThrowUnwind,Engine.NestedTaskSettlement.ConsumedFutureSkipped,Engine.NestedTaskSettlement.HeldSiblingSettled,Engine.NestedTaskSettlement.PrimaryExceptionPreserved,Engine.NestedTaskSettlement.SuccessfulCollection'
 & "$installedTests/Tools/Correctness/RunNativeCorrectnessSlice.ps1" -Executable "$installedTests/Engine/TerraEngine-EngineTests.exe" -Filter $nestedCpuFilter -MinimumCases 10 -TimeoutSeconds 120 -LogDirectory './out/evidence/renderer-efficiency-final-nested-cpu'
 if ($LASTEXITCODE -ne 0) { throw 'Nested CPU settlement slice failed.' }
@@ -3596,7 +3633,7 @@ matched total-frame baseline proof is supplied.
 After the configure/build/install commands above, select the new watched groups:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --no-tests=error -R '^(Engine\.(AudioControlContinuity|AudioPlaybackBinding|AudioSourceSettings|RenderPublicationAllocationSafety)|Editor\.AudioControlPersistence)$' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --no-tests=error -R '^(Engine\.(AudioControlContinuity|AudioPlaybackBinding|AudioSourceSettings|RenderPublicationAllocationSafety)|Editor\.AudioControlPersistence)$' --output-on-failure
 ```
 
 The harness floors are 12 `Audio.ControlContinuity`, 10 `Audio.PlaybackBinding`,
@@ -3609,7 +3646,7 @@ transaction rollback, scheduler and frame-failure tests remain required.
 Run the installed gameplay acceptance tool with a fresh work directory:
 
 ```powershell
-$audioInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$audioInstall = (Resolve-Path 'out/build/Testing/Build').Path
 $audioWork = Join-Path $PWD ('out/validation/audio-controls-' + [Guid]::NewGuid().ToString('N'))
 & "$audioInstall/Tests/Tools/Audio/RunInstalledAudioControlAcceptance.ps1" -InstallRoot $audioInstall -WorkRoot $audioWork -Lane All -Repetitions 100
 ```
@@ -3627,10 +3664,10 @@ The 069 remediation adds `Engine.ReviewRemediation` and
 in the supported developer shell before invoking them:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.ReviewRemediation$' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine|Editor)\.ReviewRemediation$' --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Review regression failed.' }
 ```
 
@@ -3640,7 +3677,7 @@ combined editor review runner requires 79 cases.
 The dedicated editor runner links the real editor implementations and owns
 private CPU-side ImGui contexts; these cases do not establish GPU rendering
 acceptance. The full-production review runner is installed at
-`out/build/RelWithDebInfo/Build/Editor/TerraEngine-EditorReviewTests.exe` beside
+`out/build/Testing/Build/Editor/TerraEngine-EditorReviewTests.exe` beside
 the editor's complete SDK and managed closure. Native compiler and managed-host ABI children are installed beside
 their corresponding test executables. Empty selections, skipped required cases,
 and watchdog termination cannot establish acceptance.
@@ -3708,7 +3745,7 @@ removal at protected boundaries, isolated synchronous cooking diagnostics,
 mesh-specific CPU animation offsets, noncommuting additive rotations on CPU and
 native Vulkan, deferred zero-extent presentation startup, and in-memory profiler
 workload quarantine. Configure, build and install using the workflow above before
-running `ctest --test-dir out/build/RelWithDebInfo --output-on-failure`.
+running `ctest --test-dir out/build/Testing --output-on-failure`.
 The native lifetime selection includes actual startup rollback/retry and genuine
 texture-upload failure controls; the native simulation selection includes fenced
 additive-shader readback. A hidden native window still requires a working desktop
@@ -3748,7 +3785,7 @@ requires a live runtime collector; CPU timing and deterministic hashes do not cl
 that acceptance gap. Run this regression after the normal configure/build/install:
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -R UnsupportedSoak --output-on-failure
+ctest --test-dir out/build/Testing -R UnsupportedSoak --output-on-failure
 ```
 
 On Windows, `Repository.ReviewEvidence.OwnedJobMembership` compiles the actual
@@ -3777,13 +3814,13 @@ source evidence, severity, and an explicit scope.
 Run the final checks from an x64 Visual Studio developer shell on Windows:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target install --parallel 2
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 ```
 
 Installation precedes CTest because several maintained tests execute installed
 tools together with their adjacent runtime dependencies. The install tree is
-`out/build/RelWithDebInfo/Build`; do not use a stale tree from an earlier build.
+`out/build/Testing/Build`; do not use a stale tree from an earlier build.
 This round's validation does not qualify AAA performance or a new long soak.
 
 Interactive prefab reset prepares bounded source bytes and concrete values on
@@ -3807,14 +3844,14 @@ PowerShell 7.4 or later and an unlocked desktop. The installed tools create
 their own projects and require a fresh evidence path for each invocation.
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target install
 # On a multi-adapter system, set this to the exact Vulkan device name first.
 # $env:TERRAENGINE_VULKAN_REVIEW_DEVICE = '<Vulkan device name>'
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R 'GraphicsSettings|PostProcess|IndexedGeometry' --no-tests=error --output-on-failure
 
-$install = (Resolve-Path out/build/RelWithDebInfo/Build).Path
+$install = (Resolve-Path out/build/Testing/Build).Path
 $tools = Join-Path $install 'Tests/Tools/PostProcessing'
 $evidence = Join-Path (Get-Location) ('out/validation/post-processing/run-' + (Get-Date -Format yyyyMMdd-HHmmss))
 & "$tools/TestInstalledGraphicsSettings.ps1" -InstallRoot $install -OutputDirectory "$evidence/settings"

@@ -58,14 +58,14 @@ live targets.
 
 ## Native Vulkan foundation
 
-Configure with `cmake --preset RelWithDebInfo -DBUILD_TESTING=ON` and install with
-`cmake --build --preset RelWithDebInfo --target install --parallel 2` from a
+Configure with `cmake --preset Testing -DBUILD_TESTING=ON` and install with
+`cmake --build --preset Testing --target install --parallel 2` from a
 Visual Studio developer shell. The fixture uses an owned Windows GLFW window and
 requires a working Vulkan device and validation layer. It reads installed shaders
 and writes its evidence to a fresh file.
 
 ```powershell
-$buildRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$buildRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $runId = [guid]::NewGuid().ToString('N')
 $evidence = Join-Path ((Resolve-Path 'out').Path) "post-process-foundation-$runId.json"
 & (Join-Path $buildRoot 'Tests/Tools/PostProcessing/PostProcessFoundationFixture.exe') `
@@ -100,7 +100,7 @@ After the applicable inputs and tests are implemented, run the installed build's
 registered CTest coverage from the repository root.
 
 ```powershell
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
 ```
 

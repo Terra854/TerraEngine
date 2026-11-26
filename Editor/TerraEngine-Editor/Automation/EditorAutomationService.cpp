@@ -2808,6 +2808,7 @@ namespace TerraEngine::Editor::Automation
 		AnimationAutomationJobs(jobService).PumpActiveMotionDatabaseBuilds();
 	}
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	bool EditorAutomationService::RestoreRendererEfficiencySourcesAtProtectedFrame(std::string& error)
 	{
 		if(rendererEfficiencyDirtySources.empty()) { error.clear(); return true; }
@@ -3329,8 +3330,10 @@ namespace TerraEngine::Editor::Automation
 		{ error = "Device recreation does not match the pending owned recovery step."; return false; }
 		error.clear(); return true;
 	}
+#endif
 	void EditorAutomationService::PumpRendererValidationMutationsAtProtectedFrame()
 	{
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		{
 			// Observe immutable renderer receipts at the existing protected editor
 			// boundary. Polling MCP status never becomes a frame producer.
@@ -3462,6 +3465,7 @@ namespace TerraEngine::Editor::Automation
 				}
 			}
 		}
+#endif
 		std::lock_guard lock(sparseTransformMutationMutex);
 		SparseTransformMutationState& state = sparseTransformMutation;
 		// A stop request disables new batches immediately, but the last batch may
@@ -6683,12 +6687,14 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("scene_view.capture")) return HandleSceneViewCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_object")) return HandleCameraObjectCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_custom")) return HandleCustomCameraCapture(arguments, requestId);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		if (operation == AutomationOperation("renderer.efficiency.stats")) return HandleRendererEfficiency(0, arguments, requestId);
 		if (operation == AutomationOperation("renderer.efficiency.validation.set")) return HandleRendererEfficiency(1, arguments, requestId);
 		if (operation == AutomationOperation("renderer.efficiency.validation.reset")) return HandleRendererEfficiency(2, arguments, requestId);
 		if (operation == AutomationOperation("renderer.efficiency.validation.start")) return HandleRendererEfficiency(3, arguments, requestId);
 		if (operation == AutomationOperation("renderer.efficiency.validation.status")) return HandleRendererEfficiency(4, arguments, requestId);
 		if (operation == AutomationOperation("renderer.efficiency.validation.stop")) return HandleRendererEfficiency(5, arguments, requestId);
+#endif
 		if (operation == AutomationOperation("renderer.virtualGeometry.stats")) return HandleRendererVirtualGeometryStats(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.capabilityEvidence")) return HandleRendererVirtualGeometryCapabilityEvidence(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.validationRoute.set")) return HandleRendererVirtualGeometryValidationRouteSet(arguments, requestId);
@@ -10946,6 +10952,7 @@ namespace TerraEngine::Editor::Automation
 		return result;
 	}
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	nlohmann::json EditorAutomationService::HandleRendererEfficiency(int action, const nlohmann::json& arguments, const std::string& requestId)
 	{
 		using namespace TerraEngine::Renderer;
@@ -11099,6 +11106,8 @@ namespace TerraEngine::Editor::Automation
 		}
 		return BuildSuccess(requestId, "Read validation progress without advancing fixture steps.", rendererEfficiencyValidation.Status());
 	}
+
+#endif
 
 	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId)
 	{

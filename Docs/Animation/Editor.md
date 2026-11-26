@@ -74,9 +74,9 @@ From a configured build tree, build the focused editor test target and run its
 Animation filter:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target TerraEngine-EditorTests
+cmake --build --preset Testing --target TerraEngine-EditorTests
 $env:TERRAENGINE_TEST_FILTER = 'Editor.Animation'
-./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
+./out/build/Testing/TerraEngine-EditorTests.exe
 ```
 
 Installed-editor click-through validation is performed separately by the implementation stage

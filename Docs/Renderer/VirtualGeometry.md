@@ -6,9 +6,9 @@ Clean-checkout validation always configures, builds, tests, and installs:
 
 ```powershell
 git submodule update --init --recursive
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests install
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Engine.VirtualGeometry|Editor.VirtualGeometry" --output-on-failure
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests install
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "Engine.VirtualGeometry|Editor.VirtualGeometry" --output-on-failure
 ```
 
 Use installed editor automation (`asset.virtualGeometry.inspect`,
@@ -207,7 +207,7 @@ coverage path and reports the fallback reason instead of publishing a
 new occlusion policy.
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
 ```
 
 Implementation must complete and test one capability slice before the next
@@ -270,7 +270,7 @@ automation responses include each gate's fixture id, view type, view id,
 metric, threshold, actual value, source, status, and diagnostic text.
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
 ```
 
 Implementation must complete and test one capability slice before the next
@@ -315,7 +315,7 @@ The implementation order is:
 Use the page-streaming fixture slice while implementing this feature:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
 ```
 
 Page-local mixed-detail validation uses the registered
@@ -1053,32 +1053,32 @@ zero-millisecond timings.
 
 ## Clean-Checkout Validation
 
-Configure from a clean checkout with the checked-in Debug preset and bundled
+Configure the test-enabled Debug build from a clean checkout with bundled
 dependencies:
 
 ```powershell
-cmake --preset Debug
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
 ```
 
 Build the affected runtime/editor targets from a Visual Studio developer
 environment:
 
 ```powershell
-cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target TerraEngine-Engine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
 ```
 
 Run the focused virtual geometry CTest entries for the GPU packet and
 compaction path:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
-ctest --test-dir out/build/Debug -R "Editor.VirtualGeometryDiagnostics|Editor.VirtualGeometryAutomation|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Editor.VirtualGeometryDiagnostics|Editor.VirtualGeometryAutomation|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
 ```
 
 Then run the broader renderer and virtual geometry regression pass:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
+ctest --test-dir out/build/Testing-Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
 ```
 
 The named CTest entries cover:
@@ -1104,7 +1104,7 @@ The named CTest entries cover:
 Finish with install verification:
 
 ```powershell
-cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install'
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target install'
 ```
 
 Expected installed files include `Editor/Shaders/Default.task.tspf`,

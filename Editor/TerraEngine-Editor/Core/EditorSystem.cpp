@@ -12,7 +12,9 @@
 #include "AssetDatabase.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Automation/EditorMcpBridge.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.h"
+#endif
 #include "Editor/Export/EditorExportOperationController.h"
 #include "../Profiling/EditorProfilerService.h"
 #include "../Windows/SceneViewWindow.h"
@@ -29,7 +31,9 @@
 #include "Engine/Profiling/ProfilerScope.h"
 #include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Utilities/PlatformUtils.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "NavigationApplicationValidation.h"
+#endif
 
 // ImGui
 #include <imgui.h>
@@ -152,6 +156,7 @@ void EditorSystem::SetTerrainInvariantOutputPath(const std::filesystem::path& ou
 	terrainInvariantOutputPath = outputPath;
 }
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 void EditorSystem::SetNavigationAgentValidationPaths(const std::filesystem::path& optionsPath,
 	const std::filesystem::path& reportPath) {
 	navigationAgentValidationOptionsPath = optionsPath;
@@ -263,6 +268,7 @@ void EditorSystem::ProcessLocomotionValidation(float deltaTime) {
 	if(mainEditor) mainEditor->StopPlayMode();
 	context.engine->SignalShutdown();
 }
+#endif
 
 void EditorSystem::ProcessTerrainInvariantValidation(float deltaTime) {
 	if(!terrainInvariantOutputPath || terrainInvariantRunAttempted) return;
@@ -431,7 +437,9 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	if (initialized) return;
 	// Reset validation ownership once per editor lifetime. A deferred renderer
 	// retry must retain accepted requests so each receives its matching receipt.
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); pendingRendererEfficiencyDeviceRecreation.reset(); rendererEfficiencyDeviceRecreationReceipt = {}; }
+#endif
 	awaitingRendererInitialization = false;
 
 	// Setup Context
@@ -665,7 +673,9 @@ void EditorSystem::LoadWorkspaceLayout() {
 
 
 void EditorSystem::Initialize() {
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	rendererEfficiencyBackendUnavailable = false;
+#endif
 	// Initialize ImGui and Backends
 	
 	// 1. Get Vulkan Context
@@ -911,8 +921,10 @@ void EditorSystem::Update(float deltaTime) {
 		pendingSaveLayout = false;
 	}
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	ProcessRendererEfficiencyDeviceRecreation();
 	if (rendererEfficiencyBackendUnavailable) return;
+#endif
 	auto& renderSystem = RenderSystem::Instance();
 	auto* rhi = renderSystem.GetContext();
 	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
@@ -1016,8 +1028,10 @@ void EditorSystem::Update(float deltaTime) {
 	// request publication all happen above. Running the validator here preserves
 	// that normal lifecycle and lets the next frame publish a genuine render
 	// result before a terminal report requests shutdown.
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	ProcessNavigationAgentValidation(deltaTime);
 	ProcessLocomotionValidation(deltaTime);
+#endif
 
 
 	if (managedUpdate) {
@@ -1143,11 +1157,13 @@ void EditorSystem::PrepareShutdown() {
 }
 
 void EditorSystem::Shutdown() {
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	{ std::lock_guard lock(rendererEfficiencyDeviceRecreationMutex); pendingRendererEfficiencyDeviceRecreation.reset();
 		if (rendererEfficiencyDeviceRecreationReceipt.status == RendererEfficiencyDeviceRecreationStatus::Pending) {
 			rendererEfficiencyDeviceRecreationReceipt.status = RendererEfficiencyDeviceRecreationStatus::Rejected;
 			rendererEfficiencyDeviceRecreationReceipt.reason = "Editor lifetime ended before device recreation.";
 		} }
+#endif
 	// Keep the first error for Engine's lifecycle report, but release every
 	// independent acquired owner before rethrowing. Workspace persistence may
 	// fail on a read-only/deleted project and must never bypass native cleanup.
@@ -1226,10 +1242,13 @@ void EditorSystem::Shutdown() {
 	// A failed release is reported after all stages have been attempted and
 	// cannot produce an orderly-shutdown acceptance claim.
 	if(firstFailure) std::rethrow_exception(firstFailure);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	if(navigationAgentValidationTerminalReport) navigationAgentValidationShutdownObserved = true;
 	if(locomotionValidationTerminalReport) locomotionValidationShutdownObserved = true;
+#endif
 }
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 int EditorSystem::FinalizeNavigationAgentValidationAfterEngineShutdown() {
 	if(!navigationAgentValidationReportPath)
 		return requestedProcessExitCode;
@@ -1284,6 +1303,7 @@ int EditorSystem::FinalizeLocomotionValidationAfterEngineShutdown() {
 	}
 	return requestedProcessExitCode;
 }
+#endif
 
 
 std::string EditorSystem::SystemName() {
@@ -1336,6 +1356,7 @@ void EditorSystem::GetManagedWindows(void (*callback)(const char*, int)) {
 	}
 }
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 bool EditorSystem::QueueRendererEfficiencyDeviceRecreation(const RendererEfficiencyDeviceRecreationRequest& request, std::string& reason)
 {
 	reason.clear();
@@ -1452,6 +1473,7 @@ void EditorSystem::ProcessRendererEfficiencyDeviceRecreation()
 	if (backendDetached && !receipt.rebound) rendererEfficiencyBackendUnavailable = true;
 	publish();
 }
+#endif
 
 void EditorSystem::InitializeImGuiVulkanBackend(VulkanContext& vulkan)
 {

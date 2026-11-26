@@ -43,12 +43,12 @@ cl /nologo /EHsc /std:c++20 /MD /O2 /DNDEBUG /DWIN32 /D_WINDOWS `
 	Tests/Tools/Animation/AdvancedAnimationFixtureMaterializer.cpp `
 	Editor/AssetCompilers/AnimationClipCompiler.cpp `
 	Editor/AssetCompilers/MotionDatabaseCompiler.cpp `
-	out/build/RelWithDebInfo/TerraEngine.lib `
+	out/build/Testing/TerraEngine.lib `
 	/Fe:$toolRoot/AdvancedAnimationFixtureMaterializer.exe `
 	/Fo:$toolRoot/ `
 	/Fd:$toolRoot/AdvancedAnimationFixtureMaterializer.pdb
 
-$env:PATH = "$(Resolve-Path out/build/RelWithDebInfo);$env:PATH"
+$env:PATH = "$(Resolve-Path out/build/Testing);$env:PATH"
 & "$toolRoot/AdvancedAnimationFixtureMaterializer.exe" `
 	"Tests/Fixtures/Animation/AdvancedAssets"
 & "$toolRoot/AdvancedAnimationFixtureMaterializer.exe" `

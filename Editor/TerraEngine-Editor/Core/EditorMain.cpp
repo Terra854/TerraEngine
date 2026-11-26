@@ -20,8 +20,10 @@
 #include "EditorStartupRendererConfiguration.h"
 #include "EditorSystem.h"
 #include "Engine/Resource/ResourceManager.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "Engine/Navigation/NavigationSettings.h"
 #include "Engine/Navigation/NavigationSystem.h"
+#endif
 #include "Engine/Utilities/PlatformUtils.h"
 
 namespace
@@ -42,6 +44,7 @@ namespace
 		if(path.is_relative()) path = (launchDirectory / path).lexically_normal();
 	}
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	// Managed live probes use only two fixed host presets. Keeping this parsing
 	// here prevents a validation JSON file from becoming a general gameplay
 	// NavigationSettings override or a new managed-facing configuration surface.
@@ -113,10 +116,12 @@ namespace
 		}
 		return managedProbe;
 	}
+#endif
 }
 
 int main(int argc, char** argv) {
 	EditorCommandLineOptions commandLine = ParseEditorCommandLine(argc, argv);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	if(commandLine.navigationAgentValidationArgumentInvalid)
 	{
 		std::cerr << "[Editor navigation validation] --validate-editor-navigation-agents requires <options-json> <report-json>.\n";
@@ -126,10 +131,19 @@ int main(int argc, char** argv) {
 		std::cerr << "[Editor locomotion validation] --validate-editor-locomotion requires <options-json> <report-json>.\n";
 		return 2;
 	}
+#else
+	// Refuse a test invocation before startup can create any runtime state.
+	if (commandLine.navigationAgentValidation || commandLine.navigationAgentValidationArgumentInvalid
+		|| commandLine.locomotionValidation || commandLine.locomotionValidationArgumentInvalid) {
+		std::cerr << "[Editor] Navigation and locomotion acceptance require BUILD_TESTING=ON.\n";
+		return 2;
+	}
+#endif
 	const std::filesystem::path launchDirectory = std::filesystem::current_path();
 	MakeCommandLinePathAbsolute(commandLine.startupProjectPath, launchDirectory);
 	MakeCommandLinePathAbsolute(commandLine.physicsInvariantOutputPath, launchDirectory);
 	MakeCommandLinePathAbsolute(commandLine.terrainInvariantOutputPath, launchDirectory);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	if(commandLine.navigationAgentValidation)
 	{
 		MakeCommandLinePathAbsolute(commandLine.navigationAgentValidation->optionsPath, launchDirectory);
@@ -151,6 +165,7 @@ int main(int argc, char** argv) {
 		std::cerr << "[Editor navigation validation] " << exception.what() << '\n';
 		return 2;
 	}
+#endif
 	const TerraEngine::Editor::EditorRuntimeLayout runtimeLayout =
 		TerraEngine::Editor::ResolveEditorRuntimeLayout(
 			TerraEngine::PlatformUtils::GetExecutableDirectory(), launchDirectory);
@@ -195,6 +210,7 @@ int main(int argc, char** argv) {
 	if (commandLine.terrainInvariantOutputPath.has_value()) {
 		editorSystem.SetTerrainInvariantOutputPath(*commandLine.terrainInvariantOutputPath);
 	}
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	if(commandLine.navigationAgentValidation && managedOutcomeProbe == ManagedOutcomeProbe::None) {
 		editorSystem.SetNavigationAgentValidationPaths(
 			commandLine.navigationAgentValidation->optionsPath,
@@ -203,6 +219,7 @@ int main(int argc, char** argv) {
 	if(commandLine.locomotionValidation)
 		editorSystem.SetLocomotionValidationPaths(commandLine.locomotionValidation->optionsPath,
 			commandLine.locomotionValidation->reportPath);
+#endif
 	// Pass the engine pointer to the editor system so it can access engine state/systems
 	editorSystem.Setup(&engine);
 	
@@ -211,10 +228,14 @@ int main(int argc, char** argv) {
 
 	engine.Run();
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	// The navigation command writes `orderlyShutdown` only after Engine has run
 	// EditorSystem::Shutdown; ordinary editor and other validation modes retain
 	// their existing exit-code behavior.
 	const int navigationExit = editorSystem.FinalizeNavigationAgentValidationAfterEngineShutdown();
 	const int locomotionExit = editorSystem.FinalizeLocomotionValidationAfterEngineShutdown();
 	return navigationExit != 0 ? navigationExit : locomotionExit;
+#else
+	return editorSystem.RequestedProcessExitCode();
+#endif
 }

@@ -19,7 +19,7 @@ Push-Location $repositoryRoot
 try {
 	$evidenceRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $OutputDirectory))
 	New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
-	$buildRoot = Join-Path $repositoryRoot 'out/build/RelWithDebInfo'
+	$buildRoot = Join-Path $repositoryRoot 'out/build/Testing'
 	$cachePath = Join-Path $buildRoot 'CMakeCache.txt'
 	$engineTests = Join-Path $buildRoot 'TerraEngine-EngineTests.exe'
 	if (-not (Test-Path $cachePath) -or -not (Test-Path $engineTests)) {

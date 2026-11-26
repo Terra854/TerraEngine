@@ -36,10 +36,10 @@ lighting. SSR/SSGI misses preserve their original environment terms.
 From an x64 Visual Studio developer shell with the bundled dependencies:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Build/install failed.' }
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $env:TERRAENGINE_TEST_FILTER = 'Renderer.PostProcess.Lighting.'
 & (Join-Path $installRoot 'Tests/Engine/TerraEngine-EngineTests.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Lighting contract tests failed.' }

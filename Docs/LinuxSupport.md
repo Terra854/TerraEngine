@@ -33,7 +33,7 @@ with global package-manager copies.
 ## Configure
 
 ```bash
-cmake --preset Debug
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
 ```
 
 If Ninja is not installed, use an equivalent Makefiles tree:
@@ -45,23 +45,23 @@ cmake -S . -B out/build/LinuxDebugMake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=De
 ## Build Unit Tests
 
 ```bash
-cmake --build out/build/Debug --target TerraEngine-EngineTests
-cmake --build out/build/Debug --target TerraEngine-EditorTests
+cmake --build out/build/Testing-Debug --target TerraEngine-EngineTests
+cmake --build out/build/Testing-Debug --target TerraEngine-EditorTests
 ```
 
-For the Makefiles fallback, replace `out/build/Debug` with
+For the Makefiles fallback, replace `out/build/Testing-Debug` with
 `out/build/LinuxDebugMake`.
 
 ## Run CTest
 
 ```bash
-ctest --test-dir out/build/Debug --output-on-failure
+ctest --test-dir out/build/Testing-Debug --output-on-failure
 ```
 
 ## Install
 
 ```bash
-cmake --build out/build/Debug --target install
+cmake --build out/build/Testing-Debug --target install
 ```
 
 The install target builds native tools, managed assemblies, shaders, and the
@@ -121,7 +121,7 @@ than requiring Visual Studio.
 - Missing X11 development packages usually appear during CMake configure while
   GLFW is being configured.
 - Missing Ninja appears before CMake configures the project when using
-  `cmake --preset Debug`; install Ninja or use the Makefiles fallback above.
+  `cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug`; install Ninja or use the Makefiles fallback above.
 - A missing or damaged repository SDK fails during configure with its expected
   path. Reconfigure with `-DTERRAENGINE_DOTNET_SDK_MODE=AUTO` to repair it, or
   use `OFF` to keep a disconnected build fail-closed.

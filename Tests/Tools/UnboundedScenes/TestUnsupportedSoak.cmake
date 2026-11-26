@@ -1,5 +1,5 @@
 # Configure/build with BUILD_TESTING=ON, then run:
-# ctest --test-dir out/build/RelWithDebInfo -R UnsupportedSoak --output-on-failure
+# ctest --test-dir out/build/Testing -R UnsupportedSoak --output-on-failure
 # This invokes the real CPU-only producer; it cannot qualify native performance.
 string(RANDOM LENGTH 24 ALPHABET 0123456789abcdef nonce)
 set(proof "${PROOF_ROOT}/${nonce}")

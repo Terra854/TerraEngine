@@ -108,12 +108,12 @@ Runtime generations remain immutable until their frame, GPU, and managed referen
 From a Visual Studio developer shell:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine-EngineTests TerraEngine-EditorTests
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R "Animation.AssetFormat|Animation.Codec|Editor.Animation.SkinnedMeshCook" `
 	--output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 All dependencies come from the repository; configuring, building, testing, and installing do not download animation models or require a global package manager. The install step is mandatory because editor/runtime validation uses installed binaries and assets.

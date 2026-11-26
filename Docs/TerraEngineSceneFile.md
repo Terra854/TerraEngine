@@ -102,13 +102,13 @@ Run the standard RelWithDebInfo configure, full build/test, and install steps
 from a clean checkout. The installed tree is authoritative for live runs:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
-Use `out/build/RelWithDebInfo/Build` for installed-editor/export commands; do
+Use `out/build/Testing/Build` for installed-editor/export commands; do
 not launch intermediate target binaries for acceptance. No build command passes
 `--parallel`, and no worker cap is implied by the scene format. Derived scene
 cache and managed-readiness files remain disposable `Library/` state and are
@@ -119,6 +119,6 @@ performance quickstart:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
-	-InstallRoot out/build/RelWithDebInfo/Build `
+	-InstallRoot out/build/Testing/Build `
 	-WorkRoot out/ci/export-runtime-baseline
 ```

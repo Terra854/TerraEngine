@@ -4,7 +4,7 @@
 # overhead. The authored crowd scene is opened without saving it.
 [CmdletBinding()]
 param(
-	[string]$InstalledEditor = 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe',
+	[string]$InstalledEditor = 'out/build/Testing/Build/Editor/TerraEngine-Editor.exe',
 	# Performance evidence must name its reviewed project explicitly; no user's
 	# personal checkout may become an accidental benchmark input.
 	[Parameter(Mandatory)]

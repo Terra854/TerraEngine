@@ -11,24 +11,24 @@ From a Visual Studio x64 developer shell, configure, build, and install the
 RelWithDebInfo tree before running the baseline:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-Editor TerraEngine-Export TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-EditorTests
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine-Editor TerraEngine-Export TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-EditorTests
+cmake --build --preset Testing --target install
 ```
 
 The install must contain:
 
-- `out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe`
-- `out/build/RelWithDebInfo/Build/Editor/Project/Templates/UserSettings/EditorLayout.ini`
-- `out/build/RelWithDebInfo/Build/Editor/Project/Templates/UserSettings/EditorLayout.terra`
-- `out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe`
-- `out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe`
-- `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe`
-- `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine.dll`
-- `out/build/RelWithDebInfo/Build/Editor/ExportRuntime/glfw3.dll`
-- `out/build/RelWithDebInfo/Build/Editor/TerraEnginePhysicsColliderCompiler.exe`
-- `out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll`
-- `out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll`
+- `out/build/Testing/Build/Editor/TerraEngine-Editor.exe`
+- `out/build/Testing/Build/Editor/Project/Templates/UserSettings/EditorLayout.ini`
+- `out/build/Testing/Build/Editor/Project/Templates/UserSettings/EditorLayout.terra`
+- `out/build/Testing/Build/Editor/TerraEngine-Export.exe`
+- `out/build/Testing/Build/Editor/TerraEngineModelPackageCompiler.exe`
+- `out/build/Testing/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe`
+- `out/build/Testing/Build/Editor/ExportRuntime/TerraEngine.dll`
+- `out/build/Testing/Build/Editor/ExportRuntime/glfw3.dll`
+- `out/build/Testing/Build/Editor/TerraEnginePhysicsColliderCompiler.exe`
+- `out/build/Testing/Build/Editor/Managed/TerraEngine.CSharp.dll`
+- `out/build/Testing/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll`
 
 The full install target may already build this editor closure; the explicit target
 list and inventory make that prerequisite visible. Preserve the complete installed
@@ -43,7 +43,7 @@ has passed.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
-	-InstallRoot out/build/RelWithDebInfo/Build `
+	-InstallRoot out/build/Testing/Build `
 	-WorkRoot out/ci/export-runtime-baseline
 ```
 

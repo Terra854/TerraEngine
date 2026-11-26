@@ -22,20 +22,20 @@ an installed editor before replacing its loaded binaries.
 ```powershell
 git submodule update --init --recursive
 if ($LASTEXITCODE -ne 0) { throw 'Pinned dependency initialization failed.' }
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --preset Testing -DBUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^(Engine|Editor)\.RuntimeMemorySafety\.|^Runtime\.MemorySafety\.' `
 	--no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Focused runtime memory safety checks failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	--no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Complete CTest failed; inspect retained evidence.' }
 ```
 
-The maintained install root is `out/build/RelWithDebInfo/Build`, beneath
+The maintained install root is `out/build/Testing/Build`, beneath
 `ENGINE_INSTALL_DESTINATION`. Invoke installed tools beneath
 `Tests/Tools/RuntimeMemorySafety`. Required entries include the runner and editor
 helper scripts, `RuntimeMemorySafetyFixture.exe`, timing tools, `ValidationCases.json`,
@@ -53,7 +53,7 @@ installs. Do not reuse one when changing mode. The examples create fresh roots
 and assume the complete installed closure above is available.
 
 ```powershell
-$installRoot = (Resolve-Path './out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path './out/build/Testing/Build').Path
 $runner = Join-Path $installRoot 'Tests/Tools/RuntimeMemorySafety/RunInstalledRuntimeMemorySafety.ps1'
 $evidenceRoot = Join-Path (Get-Location).Path 'out/validation/runtime-memory-safety'
 function New-RmsEvidenceRoot([string]$Lane) {

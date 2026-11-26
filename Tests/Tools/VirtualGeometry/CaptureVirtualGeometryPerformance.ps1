@@ -1,12 +1,12 @@
 [CmdletBinding()]
 param(
-	[string]$BenchmarkExecutable = 'out/build/RelWithDebInfo/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.exe',
+	[string]$BenchmarkExecutable = 'out/build/Testing/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.exe',
 	[string]$Output = ('out/evidence/virtual-geometry-production/performance/' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '.json'),
 	[string]$Workloads = 'Tests/Tools/VirtualGeometry/workloads.json',
 	[string]$Matrix = 'Tests/Tools/VirtualGeometry/hardware-matrix.json',
 	[string]$Quality = 'Tests/Tools/VirtualGeometry/quality-profiles.json',
 	[string]$WorkloadId = 'baseline-processor-expanded',
-	[string]$RuntimeAdapter = 'out/build/RelWithDebInfo/Build/Tests/Tools/VirtualGeometry/VirtualGeometryRuntimeAdapter.cmd',
+	[string]$RuntimeAdapter = 'out/build/Testing/Build/Tests/Tools/VirtualGeometry/VirtualGeometryRuntimeAdapter.cmd',
 	[ValidateRange(1, 86400)]
 	[int]$DurationSeconds = 6,
 	[ValidateRange(1, 600000)]

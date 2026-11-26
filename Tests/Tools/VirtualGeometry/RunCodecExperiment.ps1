@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[Parameter(Mandatory=$true)][string]$InputMesh,
-	[string]$ExperimentExecutable = 'out/build/RelWithDebInfo/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryCodecExperiment.exe',
+	[string]$ExperimentExecutable = 'out/build/Testing/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryCodecExperiment.exe',
 	[string]$OutputDirectory = 'out/evidence/virtual-geometry-production/codec-experiment',
 	[int[]]$PageSizesKiB = @(32, 64, 128),
 	[switch]$DryRun

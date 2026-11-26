@@ -72,35 +72,42 @@ Use a Git checkout rather than GitHub's source ZIP so dependency revisions and s
 On **Windows**, run these commands from an **x64 Visual Studio developer shell** at the repository root:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --parallel 2
 ```
+
+The four editor presets are `Debug`, `Release`, `RelWithDebInfo`, and
+`MinSizeRel`. Each uses its own build directory, sets `BUILD_TESTING=OFF`,
+and runs `install` by default. The `Testing` preset builds and runs the tests
+in a separate build directory.
 
 For contributors investigating **experimental Linux support**, the intended commands are below. They may fail to configure, compile, or install; this workflow is unverified:
 
 ```bash
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --parallel 2
 ```
 
 Check that each command succeeds before continuing. The first configure populates the pinned managed dependency caches; the first build compiles the native and managed targets. Two parallel build jobs are a conservative starting point for the large translation units; adjust to fit your machine.
 
 **Complete the install target before launching.** It stages matching native libraries, managed assemblies, the bundled SDK, project templates, tools, and compiled shaders. Building an executable alone does not produce the complete runtime layout.
 
-The maintained runnable tree is:
+The editor presets produce this runnable tree under
+`out/build/<preset>/Build/`. The `Testing` preset uses `out/build/Testing/Build/`.
 
 ```text
-out/build/RelWithDebInfo/Build/
+Build/
 ├── Editor/       Editor, asset/export tools, templates, Managed/, DotNet/, shaders
 ├── Engine/       Engine runtime payload
 ├── Launcher/     Export launcher and its native dependencies
-├── Tests/        Installed validation tools and fixtures when testing is enabled
+├── Tests/        Validation inputs, plus test executables when testing is enabled
 └── Docs/         Selected installed guides
 ```
 
 These paths are controlled by `ENGINE_INSTALL_DESTINATION` in `CMakeLists.txt`. Use this `Build/` tree even though the presets also define an `out/install/` prefix.
 
-The other available presets are `Debug`, `Release`, and `MinSizeRel`. Replace `RelWithDebInfo` consistently in the commands and output paths when using another preset. For experimental Linux setup notes and an intended Makefiles alternative, see [the Linux notes](Docs/LinuxSupport.md).
+For experimental Linux setup notes and an intended Makefiles alternative, see
+[the Linux notes](Docs/LinuxSupport.md).
 
 ### 3. Launch the editor
 
@@ -122,16 +129,19 @@ For C# gameplay, start with the [runtime API guide](Docs/CSharpRuntimeAPI.md). F
 
 ## Testing
 
-After the build and install succeed, run CTest from the repository root:
+From the repository root, configure and build the `Testing` preset. Its build
+target compiles the binaries, installs the runtime and test fixtures, and then
+runs CTest.
 
 ```sh
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --preset Testing
+cmake --build --preset Testing --parallel 2
 ```
 
 To run the aggregate native engine and editor unit entries:
 
 ```sh
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^(Engine\.SpatialUnitTests|Editor\.ExportUnitTests)$" --no-tests=error --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "^(Engine\.SpatialUnitTests|Editor\.ExportUnitTests)$" --no-tests=error --output-on-failure
 ```
 
 [Docs/Testing.md](Docs/Testing.md) is the authority for the current CTest workflow, focused regressions, stress/soak runs, and installed runtime acceptance. Full validation can include long-running tests, Windows-specific automation, separately acquired fixtures, and live renderer checks. Read the relevant prerequisites before running those gates. A native unit-test pass alone does not establish live GPU or installed-editor acceptance.

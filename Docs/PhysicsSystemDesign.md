@@ -1142,7 +1142,7 @@ No physics callback may outlive the world or engine.
 ## Performance and Memory Requirements
 
 The physics validation contract fixes the comparison identity: RelWithDebInfo,
-the installed tree under `out/build/RelWithDebInfo/Build`, 10,000 mixed bodies
+the installed tree under `out/build/Testing/Build`, 10,000 mixed bodies
 (1,000 dynamic, 1,000 kinematic, 8,000 static), 100 exact paused steps, and the
 repository-bundled dependencies. Max worker runs use hardware concurrency with
 no `TERRAENGINE_THREADPOOL_WORKERS` cap; only 1/2/4 runs are deliberate matrix
@@ -1154,7 +1154,7 @@ Profiler recordings use v2, while v1 is load-only compatibility; detailed,
 sampled, and aggregate five-second captures must remain at or below 10 MiB.
 Build commands intentionally do not pass `--parallel`.
 Export parity uses the installed baseline command
-`Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build`
+`Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Testing/Build`
 with a disposable `out/ci/export-runtime-baseline` work root.
 
 Target gates should be finalized during qualification planning, but the initial design expects:

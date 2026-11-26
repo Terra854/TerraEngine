@@ -157,10 +157,10 @@ Use [Testing.md](Testing.md) for the maintained build/install and CTest workflow
 A typical configured-checkout sequence is:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.FrameStageContracts$' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^Engine\.FrameStageContracts$' --output-on-failure
 ```
 
 Run the applicable complete suites and installed replay/acceptance checks after

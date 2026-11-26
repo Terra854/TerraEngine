@@ -831,12 +831,17 @@ endif()
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
 	${ENGINE_HEADERS}
-	# Application acceptance executes the real engine scheduler. Keep this
-	# validation-only utility outside production source directories.
-	Tests/Tools/Navigation/NavigationApplicationValidation.cpp
-	Tests/Tools/Locomotion/LocomotionValidationHarness.cpp
-	Tests/Tools/Locomotion/LocomotionReplaySystem.cpp
 )
+if(BUILD_TESTING)
+	# Installed acceptance runs against the real scheduler in the test-enabled
+	# host. Production builds leave the workload and replay systems out.
+	target_sources(TerraEngine-Engine PRIVATE
+		Tests/Tools/Navigation/NavigationApplicationValidation.cpp
+		Tests/Tools/Locomotion/LocomotionValidationHarness.cpp
+		Tests/Tools/Locomotion/LocomotionReplaySystem.cpp)
+	set_property(SOURCE Engine/Core/MainEngine.cpp APPEND PROPERTY
+		COMPILE_DEFINITIONS TERRAENGINE_APPLICATION_VALIDATION=1)
+endif()
 
 # Header-only dependencies stay bundled so texture decoding and OBJ parsing never
 # rely on external package managers.
@@ -1382,6 +1387,9 @@ add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
 )
 target_include_directories(TerraEngine-Launcher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Navigation ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tools/Locomotion)
+if(BUILD_TESTING)
+	target_compile_definitions(TerraEngine-Launcher PRIVATE TERRAENGINE_APPLICATION_VALIDATION=1)
+endif()
 set_target_properties(TerraEngine-Launcher PROPERTIES
 	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
@@ -1913,13 +1921,6 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
 	Editor/TerraEngine-Editor/Automation/RendererScratchDiagnostics.cpp
-	# Owned validation sessions copy evidence and queue changes at existing boundaries.
-	Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.cpp
-	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.cpp
-	# Fixture tokens wait for the scheduler's real committed scene publication.
-	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyScenePublication.cpp
-	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.cpp
-	Tests/Support/RendererEfficiency/Editor/RendererEfficiencyInstallIdentity.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationTransaction.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationJobService.cpp
@@ -2089,6 +2090,17 @@ if(WIN32)
 endif()
 
 add_dependencies(TerraEngine-Editor TerraEngineModelPackageCompiler TerraEngineMeshCompiler TerraEngineTextureCompiler TerraEngineShaderCompiler TerraEnginePhysicsColliderCompiler)
+
+if(BUILD_TESTING)
+	# The integration tests drive owned sessions at the protected editor boundary.
+	target_sources(TerraEngine-Editor PRIVATE
+		Tests/Support/RendererEfficiency/Editor/EditorRendererEfficiencyValidation.cpp
+		Tests/Support/RendererEfficiency/Editor/RendererEfficiencyFixtureBindings.cpp
+		Tests/Support/RendererEfficiency/Editor/RendererEfficiencyScenePublication.cpp
+		Tests/Support/RendererEfficiency/Editor/RendererEfficiencyEvidenceExport.cpp
+		Tests/Support/RendererEfficiency/Editor/RendererEfficiencyInstallIdentity.cpp)
+	target_compile_definitions(TerraEngine-Editor PRIVATE TERRAENGINE_APPLICATION_VALIDATION=1)
+endif()
 
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${TERRAENGINE_TERRAIN_STRESS_SOURCE}")
 	add_executable(TerraEngineTerrainTransactionStress ${TERRAENGINE_TERRAIN_STRESS_SOURCE})
@@ -3772,3 +3784,15 @@ function(terraengine_apply_optimization_policy directory)
 	endforeach()
 endfunction()
 terraengine_apply_optimization_policy("${CMAKE_CURRENT_SOURCE_DIR}")
+
+if(BUILD_TESTING AND CMAKE_GENERATOR STREQUAL "Ninja")
+	# Ninja's generated all target builds the same inputs as install. Wait for
+	# it before staging artifacts, then run CTest against that exact build.
+	add_custom_target(Testing
+		COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --config "$<CONFIG>"
+		COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${CMAKE_BINARY_DIR}"
+			--build-config "$<CONFIG>" --output-on-failure --no-tests=error
+		DEPENDS all
+		USES_TERMINAL
+		VERBATIM)
+endif()

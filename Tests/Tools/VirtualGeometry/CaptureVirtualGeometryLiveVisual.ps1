@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-	[string]$InstalledEditor = 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe',
+	[string]$InstalledEditor = 'out/build/Testing/Build/Editor/TerraEngine-Editor.exe',
 	[string]$Project = 'Tests/Fixtures/Animation/ImportValidation',
 	[string]$Asset = '',
 	[string]$Preferences = 'out/validation/virtual-geometry/live/editor-preferences.json',

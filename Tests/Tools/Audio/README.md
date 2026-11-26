@@ -8,11 +8,11 @@ fails acceptance. Native source-setting and queue tests remain device independen
 From a clean checkout, configure, compile and install before running tests:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --no-tests=error --output-on-failure
-$install = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+ctest --test-dir out/build/Testing -C RelWithDebInfo --no-tests=error --output-on-failure
+$install = (Resolve-Path 'out/build/Testing/Build').Path
 $work = Join-Path $PWD ('out/validation/audio-controls-' + [Guid]::NewGuid().ToString('N'))
 & "$install/Tests/Tools/Audio/RunInstalledAudioControlAcceptance.ps1" -InstallRoot $install -WorkRoot $work -Lane All -Repetitions 100
 ```

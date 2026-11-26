@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[string]$Output = 'Tests/Fixtures/RendererPerformanceBaseline/results/final/heterogeneous-static-native-60s.json',
-	[string]$BenchmarkExecutable = 'out/build/RelWithDebInfo/Tests/Tools/VirtualGeometry/TerraEngineRendererTopologyBenchmark.exe',
+	[string]$BenchmarkExecutable = 'out/build/Testing/Tests/Tools/VirtualGeometry/TerraEngineRendererTopologyBenchmark.exe',
 	[ValidateRange(1,86400)][int]$DurationSeconds = 60,
 	[ValidateRange(1,600000)][int]$SampleIntervalMilliseconds = 1000
 )

@@ -29,12 +29,12 @@ Run these commands from the repository root in a Windows x64 Visual Studio
 developer environment. They are the authoritative local validation gate.
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Testing/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
 The long-path lane uses the same installed binaries and fixture, but places the
@@ -49,7 +49,7 @@ $deepWorkRoot = "out/ci/export-runtime-baseline/" + (
 )
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
-  -InstallRoot out/build/RelWithDebInfo/Build `
+  -InstallRoot out/build/Testing/Build `
   -WorkRoot $deepWorkRoot `
   -RunId export-runtime-long-path
 ```
@@ -57,13 +57,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 After installation, the gate requires these files:
 
 ```text
-out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe
-out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe
-out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe
-out/build/RelWithDebInfo/Build/Editor/ExportRuntime/TerraEngine.dll
-out/build/RelWithDebInfo/Build/Editor/ExportRuntime/glfw3.dll
-out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll
-out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
+out/build/Testing/Build/Editor/TerraEngine-Export.exe
+out/build/Testing/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/Testing/Build/Editor/ExportRuntime/TerraEngine-Launcher.exe
+out/build/Testing/Build/Editor/ExportRuntime/TerraEngine.dll
+out/build/Testing/Build/Editor/ExportRuntime/glfw3.dll
+out/build/Testing/Build/Editor/Managed/TerraEngine.CSharp.dll
+out/build/Testing/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
 ```
 
 Only files copied into exported games are grouped under `Editor/ExportRuntime`.
@@ -73,7 +73,7 @@ To invoke the installed CLI directly after the disposable project has been
 prepared, use explicit project, profile, output, and evidence paths:
 
 ```powershell
-& out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe `
+& out/build/Testing/Build/Editor/TerraEngine-Export.exe `
   --project out/ci/export-runtime-baseline/project `
   --profile out/ci/export-runtime-baseline/project/BuildProfiles/baseline.json `
   --output out/ci/export-runtime-baseline/project/Builds/Baseline `
@@ -112,7 +112,7 @@ project-local `Library/NativeAot` directory after export.
 ## Local validation gate
 
 The supported gate is the ordered Windows x64 command sequence above. It uses
-the RelWithDebInfo preset, builds the focused targets, runs focused and full
+the Testing preset, builds the focused targets, runs focused and full
 CTest passes, installs the product, verifies installed paths, and exercises a
 clean prepared export. Commands retain their native exit codes so a failed
 stage cannot be mistaken for a successful result.

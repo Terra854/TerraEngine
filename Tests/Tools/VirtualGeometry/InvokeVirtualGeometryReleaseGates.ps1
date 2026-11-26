@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
 	[string]$OutputDirectory = 'out/evidence/virtual-geometry/production-gates',
-	[string]$BuildDirectory = 'out/build/RelWithDebInfo',
-	[string]$InstalledRoot = 'out/build/RelWithDebInfo/Build',
+	[string]$BuildDirectory = 'out/build/Testing',
+	[string]$InstalledRoot = 'out/build/Testing/Build',
 	[string]$CodecInputMesh = '',
 	[string]$HardwareImage = '',
 	[string]$ComputeImage = '',

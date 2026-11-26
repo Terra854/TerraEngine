@@ -35,7 +35,7 @@ RelWithDebInfo toolchain, then run:
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = 'Animation.CrossPlatformDeterminism'
 $env:TERRAENGINE_ANIMATION_DETERMINISM_TICKS = '100000'
-out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
+out/build/Testing/TerraEngine-EngineTests.exe
 ```
 
 On Ubuntu 24.04 x86_64, configure explicitly with `gcc-14` and `g++-14`, build

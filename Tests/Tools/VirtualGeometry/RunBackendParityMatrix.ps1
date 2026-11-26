@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[string]$Matrix = 'Tests/Tools/VirtualGeometry/hardware-matrix.json',
-	[string]$Runner = 'out/build/RelWithDebInfo/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.exe',
+	[string]$Runner = 'out/build/Testing/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.exe',
 	[string]$Output = 'out/evidence/virtual-geometry-production/backend-parity.json',
 	[string]$Workloads = 'Tests/Tools/VirtualGeometry/workloads.json',
 	[string]$Quality = 'Tests/Tools/VirtualGeometry/quality-profiles.json',

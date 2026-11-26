@@ -100,10 +100,10 @@ library (the Windows install intentionally ships runtime DLLs, not a link-time
 `.lib`):
 
 ```powershell
-& out/build/RelWithDebInfo/Build/Tests/Tools/Audio/VerifyInstalledAudioProviderContract.ps1 `
-  -IncludeRoot out/build/RelWithDebInfo/Build/include `
-  -LibraryPath out/build/RelWithDebInfo/TerraEngine.lib `
-  -RuntimeDirectory out/build/RelWithDebInfo/Build/Engine
+& out/build/Testing/Build/Tests/Tools/Audio/VerifyInstalledAudioProviderContract.ps1 `
+  -IncludeRoot out/build/Testing/Build/include `
+  -LibraryPath out/build/Testing/TerraEngine.lib `
+  -RuntimeDirectory out/build/Testing/Build/Engine
 ```
 
 This compiles, links, and runs a separate consumer, and fails if miniaudio's
@@ -126,17 +126,17 @@ Tests/Tools/Audio/GenerateAudioFixtures.ps1 -VerifyCommitted
 Build, install, and run the device-independent suite:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build out/build/RelWithDebInfo --target TerraEngine-Engine TerraEngine-Editor TerraEngine-Export TerraEngineAudioClipCompiler TerraEngineAudioStressRunner TerraEngine-EngineTests TerraEngine-EditorTests
-cmake --build out/build/RelWithDebInfo --target install
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^(Engine|Editor)\\.Audio" --output-on-failure
+cmake --preset Testing
+cmake --build out/build/Testing --target TerraEngine-Engine TerraEngine-Editor TerraEngine-Export TerraEngineAudioClipCompiler TerraEngineAudioStressRunner TerraEngine-EngineTests TerraEngine-EditorTests
+cmake --build out/build/Testing --target install
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "^(Engine|Editor)\\.Audio" --output-on-failure
 ```
 
 The installed stress runner hashes every prepared voice. The committed baseline
 requires at least 128 sources and 100 identical replays:
 
 ```powershell
-$audioTools = 'out/build/RelWithDebInfo/Build/Tests/Tools/Audio'
+$audioTools = 'out/build/Testing/Build/Tests/Tools/Audio'
 & "$audioTools/RunAudioStress.ps1" -RequestedSources 128 -RepeatCount 100 -Output "$audioTools/Evidence/stress.json"
 & "$audioTools/CompareAudioEvidence.ps1" -Evidence "$audioTools/Evidence/stress.json"
 & "$audioTools/RunAudioSoak.ps1" -DurationMinutes 30 -RequestedSources 128 -RepeatCount 100 -Output "$audioTools/Evidence/soak.json"

@@ -38,11 +38,11 @@ environment with Windows SDK, CMake and Ninja:
 ```powershell
 git submodule update --init --recursive
 if ($LASTEXITCODE -ne 0) { throw 'Dependency checkout failed.' }
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
+cmake --preset Testing -DBUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw 'Configure failed.' }
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --build --preset Testing --target install --parallel 2
 if ($LASTEXITCODE -ne 0) { throw 'Compile/install failed.' }
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R '^(Engine\.(RenderCaptureContracts|ReadbackLifetime|VulkanImageReadback)|Editor\.RenderCaptureContracts|Runtime\.ReadbackLifetime\.ProtocolContracts)$' `
 	--no-tests=error --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'Capture/readback regression failed.' }
@@ -58,7 +58,7 @@ Invoke the installed runner, choosing `Native`, `Editor` or `All`, with a fresh
 work directory outside the installation:
 
 ```powershell
-$cameraInstall = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$cameraInstall = (Resolve-Path 'out/build/Testing/Build').Path
 $cameraWork = Join-Path $PWD ('out/validation/camera-readback-' + [guid]::NewGuid().ToString('N'))
 & (Join-Path $cameraInstall 'Tests/Tools/ReadbackLifetime/RunInstalledReadbackLifetime.ps1') `
 	-InstallRoot $cameraInstall -WorkRoot $cameraWork -Mode All -Iterations 100

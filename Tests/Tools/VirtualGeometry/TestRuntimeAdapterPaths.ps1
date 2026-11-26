@@ -63,7 +63,7 @@ foreach($layout in @(
 		[IO.Directory]::CreateDirectory($scriptRoot) | Out-Null
 		if($layout.source) { [IO.File]::WriteAllText((Join-Path $expectedRoot 'CMakeLists.txt'),'# Owned source-root marker only',$utf8) }
 		foreach($assignment in $rootAssignments) { . $assignment }
-		$expectedInstall=if($layout.source) { Join-Path $expectedRoot 'out/build/RelWithDebInfo/Build' } else { $expectedRoot }
+		$expectedInstall=if($layout.source) { Join-Path $expectedRoot 'out/build/Testing/Build' } else { $expectedRoot }
 		Assert-Protocol ($sourceTree -eq $layout.source) 'Actual resolver must distinguish source and installed layouts.'
 		Assert-Protocol ($repositoryRoot -ceq $expectedRoot -and $workingRoot -ceq $expectedRoot -and $installedRoot -ceq $expectedInstall) 'Actual root assignments must preserve the expected layout including spaces/Unicode.'
 	}

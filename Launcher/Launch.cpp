@@ -50,8 +50,10 @@
 #include "Scripting/ScriptingSystem.h"
 #include "Navigation/NavigationSettings.h"
 #include "Navigation/NavigationSystem.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "NavigationApplicationValidation.h"
 #include "LocomotionValidationHarness.h"
+#endif
 #include "ThreadPool/ThreadPool.h"
 
 namespace {
@@ -124,6 +126,7 @@ bool HasArgument(int argc, char* argv[], const char* expectedArgument) {
 	return false;
 }
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 struct NavigationValidationCommand final {
 	fs::path optionsPath;
 	fs::path reportPath;
@@ -346,6 +349,7 @@ int RunExportLocomotionValidation(const NavigationValidationCommand& command, bo
 	return report.value("succeeded", false) && report.value("orderlyShutdown", false)
 		&& !report.value("pending", false) ? 0 : 1;
 }
+#endif
 
 // ConfigureExportBootstrap is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ConfigureExportBootstrap(const char* argv0) {
@@ -503,6 +507,7 @@ int main(int argc, char *argv[])
 			return 0;
 		}
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		if (HasArgument(argc, argv, "--validate-export-navigation-agents")) {
 			const std::optional<NavigationValidationCommand> command = FindNavigationValidationCommand(argc, argv);
 			if(!command) {
@@ -526,6 +531,13 @@ int main(int argc, char *argv[])
 			return RunExportLocomotionValidation(*command,
 				HasArgument(argc, argv, "--headless-cpu-fallback"));
 		}
+#else
+		if (HasArgument(argc, argv, "--validate-export-navigation-agents")
+			|| HasArgument(argc, argv, "--validate-export-locomotion")) {
+			std::cerr << "[Launcher] Navigation and locomotion acceptance require BUILD_TESTING=ON.\n";
+			return 2;
+		}
+#endif
 
 		if (HasArgument(argc, argv, "--validate-export-animation-parity")) {
 			Engine parityEngine;

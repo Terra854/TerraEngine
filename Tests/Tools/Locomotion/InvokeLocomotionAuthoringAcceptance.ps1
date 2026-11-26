@@ -9,7 +9,7 @@
   transaction/undo boundary used by Inspector multi-edit but does not simulate
   mouse interaction with the Inspector window.
 .EXAMPLE
-  ./InvokeLocomotionAuthoringAcceptance.ps1 -InstallRoot out/build/RelWithDebInfo/Build `
+  ./InvokeLocomotionAuthoringAcceptance.ps1 -InstallRoot out/build/Testing/Build `
     -ProjectPath out/locomotion-authoring/project -OutputDirectory out/evidence/locomotion/060/authoring -Port 43179
 #>
 [CmdletBinding()]

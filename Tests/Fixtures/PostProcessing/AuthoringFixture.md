@@ -19,8 +19,8 @@ The image checks use the same PowerShell .NET `System.Drawing.Common` decoder as
 the installed color collector; no Python or package installation is performed.
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
 
 pwsh -NoProfile -File <install>/Tests/Tools/PostProcessing/TestInstalledPostProcessAuthoring.ps1 `
   -InstallRoot <install> -OutputDirectory <fresh-evidence-directory>

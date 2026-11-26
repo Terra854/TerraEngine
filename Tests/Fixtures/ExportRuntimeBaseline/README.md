@@ -47,7 +47,7 @@ Run the installed-tree gate from the repository root:
 
 ```powershell
 pwsh -NoProfile -File Tests/Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
-	-InstallRoot out/build/Debug/Build `
+	-InstallRoot out/build/Testing-Debug/Build `
 	-WorkRoot out/ci/export-runtime-baseline
 ```
 

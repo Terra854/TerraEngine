@@ -427,22 +427,22 @@ they do not claim CLR/editor/export or installed-product runtime qualification.
 ## Build, test, and install
 
 From a clean Windows x64 checkout, initialize pinned submodules, configure the
-RelWithDebInfo preset, build the engine/editor/export and test executables, run
+Testing preset, build the engine/editor/export and test executables, run
 the focused locomotion and existing controller regressions, then run CTest and
 install. This follows the workflow in [Testing](Testing.md):
 
 ```powershell
 git submodule update --init --recursive
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Locomotion|Engine.PhysicsConstraintsAndCharacters|Engine.PhysicsManaged' --output-on-failure
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -j 1 --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R 'Locomotion|Engine.PhysicsConstraintsAndCharacters|Engine.PhysicsManaged' --output-on-failure
+ctest --test-dir out/build/Testing -C RelWithDebInfo -j 1 --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
 The installed application bundle is under
-`out/build/RelWithDebInfo/Build`. CTest results use the build tree at
-`out/build/RelWithDebInfo`.
+`out/build/Testing/Build`. CTest results use the build tree at
+`out/build/Testing`.
 
 On machines where the Visual Studio 18 developer shell omits the Windows SDK
 and UCRT include/library paths, use the repository helper for CMake configure,
@@ -450,9 +450,9 @@ build, and install commands. It selects the newest installed complete x64 SDK
 and restores the caller's environment after each invocation:
 
 ```powershell
-pwsh -NoProfile -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --fresh --preset RelWithDebInfo
-pwsh -NoProfile -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
-pwsh -NoProfile -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --build --preset RelWithDebInfo --target install
+pwsh -NoProfile -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --fresh --preset Testing
+pwsh -NoProfile -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+pwsh -NoProfile -File Tests/Tools/Locomotion/InvokeLocomotionBuild.ps1 --build --preset Testing --target install
 ```
 
 Use a Visual Studio x64 developer command with MSVC, CMake, Ninja, and a Windows

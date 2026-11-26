@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-	[string]$Runner = 'out/build/RelWithDebInfo/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.exe',
+	[string]$Runner = 'out/build/Testing/Build/Tests/Tools/VirtualGeometry/TerraEngineVirtualGeometryBenchmark.exe',
 	[string]$RuntimeAdapter = '',
 	[string]$Output = 'out/evidence/virtual-geometry-production/animated-benchmark.json',
 	[string]$Workloads = 'Tests/Tools/VirtualGeometry/workloads.json',

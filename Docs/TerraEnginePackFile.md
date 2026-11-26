@@ -120,9 +120,9 @@ Extraction preflights the complete selection and anchors its destination directo
 Use the repository's bundled dependencies and configured C++20 toolchain. From a clean checkout:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target install
-ctest --test-dir out/build/RelWithDebInfo -R 'ContentArchiveSafety|PackRoundTrip' --output-on-failure
+cmake --preset Testing
+cmake --build --preset Testing --target install
+ctest --test-dir out/build/Testing -R 'ContentArchiveSafety|PackRoundTrip' --output-on-failure
 ```
 
 See `Docs/Testing.md` for the current harness/CTest workflow and the maintained archive watchdog for individual malformed/deep tree cases. Writer-produced Raw, Zstd, dictionary, paged TEMF, and empty-file corpora are the compatibility oracle; root-only/deep fixtures are explicitly derived serialized metadata because the writer requires at least one eligible staged file.

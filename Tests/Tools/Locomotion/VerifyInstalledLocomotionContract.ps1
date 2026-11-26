@@ -1,7 +1,7 @@
 # VerifyInstalledLocomotionContract.ps1 - fail-closed installed locomotion audit.
 [CmdletBinding()]
 param(
-	[string]$InstallRoot = 'out/build/RelWithDebInfo/Build',
+	[string]$InstallRoot = 'out/build/Testing/Build',
 	[string]$OutputDirectory = 'out/evidence/locomotion/060/audit',
 	[string]$SourceRoot = ''
 )

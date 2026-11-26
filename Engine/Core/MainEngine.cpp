@@ -37,7 +37,9 @@
 #include "Navigation/Agents/NavigationAgentCommandSystem.h"
 #include "Navigation/Agents/NavigationAgentSystem.h"
 #include "Locomotion/LocomotionSystem.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "LocomotionReplaySystem.h"
+#endif
 #include "Navigation/NavigationSystem.h"
 #include "Navigation/Integration/NavigationRuntimeSceneCapture.h"
 #include "Navigation/Integration/NavigationSourceTransformObservation.h"
@@ -248,9 +250,11 @@ void Engine::RecordFrameFailure(std::string_view workload, std::string_view phas
 
 void Engine::ConfigureCharacterMotionReplayValidation()
 {
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	// Scheduler membership is frozen at initialization; replay is never a live
 	// gameplay mode switch and cannot take authority away from a running system.
 	if(systems.empty()) characterMotionReplayValidation = true;
+#endif
 }
 
 
@@ -376,6 +380,7 @@ void Engine::InitializeImpl()
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, scriptingSystem.SchedulerDeclaration());
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	// Intent is admitted after scripting's existing flush and before animation.
 	// A dormant system binds nothing until Physics has a live Play/runtime world.
 	if(characterMotionReplayValidation) {
@@ -384,6 +389,9 @@ void Engine::InitializeImpl()
 		RegisterEngineSystem(systems, systemScheduler, replay, replay.SchedulerDeclaration());
 		RegisterEngineSystem(systems, systemScheduler, roots, roots.SchedulerDeclaration());
 	} else {
+#else
+	{
+#endif
 		auto& locomotionSystem = TerraEngine::Locomotion::LocomotionSystem::Instance();
 		RegisterEngineSystem(systems, systemScheduler, locomotionSystem, locomotionSystem.SchedulerDeclaration());
 	}

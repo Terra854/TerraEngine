@@ -3,7 +3,7 @@
 Runs bounded concurrent independent-reader and animation fault/recovery children.
 .DESCRIPTION
 Prerequisites: configure BUILD_TESTING=ON, compile and install current harnesses.
-Example: ./RunArchiveSafetyStress.ps1 -InstallRoot ./out/build/RelWithDebInfo/Build -LogDirectory ./out/validation/archive-stress-fresh
+Example: ./RunArchiveSafetyStress.ps1 -InstallRoot ./out/build/Testing/Build -LogDirectory ./out/validation/archive-stress-fresh
 Each cycle runs three isolated native processes. Readers never share a mount;
 fixtures own unique temporary trees. The animation filter includes real pool
 failures and recovery. This validates isolation, not same-mount thread safety.

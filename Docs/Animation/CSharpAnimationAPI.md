@@ -307,13 +307,13 @@ legacy snapshot format independently.
 From a Visual Studio developer PowerShell in a clean checkout:
 
 ```powershell
-cmake --preset RelWithDebInfo
+cmake --preset Testing
 dotnet build Engine/Managed/TerraEngine.csproj -c RelWithDebInfo --no-restore
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests
+cmake --build --preset Testing --target TerraEngine-EngineTests
 $env:TERRAENGINE_TEST_FILTER = "Animation.Managed"
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 Use `Docs/Testing.md` for the full CTest workflow. Final acceptance also runs

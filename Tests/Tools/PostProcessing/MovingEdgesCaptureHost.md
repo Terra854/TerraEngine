@@ -41,8 +41,8 @@ draw state from statistics alone.
 The orchestrator's configure/build/install sequence is:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
 ```
 
 ## Required cooked project
@@ -110,7 +110,7 @@ fresh process and a fresh output directory. Adjust the installed Build and
 disposable project locations to the actual local install:
 
 ```powershell
-$install = (Resolve-Path ./out/build/RelWithDebInfo/Build).Path
+$install = (Resolve-Path ./out/build/Testing/Build).Path
 $project = (Resolve-Path ./out/validation/moving-edge-project).Path
 $fixture = (Resolve-Path ./Tests/Fixtures/PostProcessing/MovingEdgesPoses.json).Path
 $hostExe = Join-Path $install Tests/Tools/PostProcessing/PostProcessMovingEdgesCapture.exe

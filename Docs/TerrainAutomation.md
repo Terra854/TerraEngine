@@ -14,7 +14,7 @@ current compiler before retrying the original request.
 ## Installed validation
 
 ```powershell
-$install = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$install = (Resolve-Path 'out/build/Testing/Build').Path
 & (Join-Path $install 'Tests/Tools/Terrain/RunTerrainValidation.ps1') `
     -InstallRoot $install `
     -OutputDirectory (Join-Path $install 'out/terrain-validation') `

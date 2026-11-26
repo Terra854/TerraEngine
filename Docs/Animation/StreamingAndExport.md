@@ -95,10 +95,10 @@ The export-runtime fixture in `Tests/Fixtures/AnimationExportRuntime/` defines t
 From a Visual Studio developer shell, configure, build, test, and install the repository-contained implementation:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --parallel
-ctest --preset RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install --parallel
+cmake --preset Testing
+cmake --build --preset Testing --target all --parallel
+ctest --preset Testing --output-on-failure
+cmake --build --preset Testing --target install --parallel
 ```
 
 Focused coverage lives in:

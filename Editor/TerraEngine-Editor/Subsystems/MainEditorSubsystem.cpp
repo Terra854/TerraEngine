@@ -31,7 +31,9 @@
 #include "Engine/Animation/AnimationSystem.h"
 #include "Engine/Audio/AudioSystem.h"
 #include "Engine/Locomotion/LocomotionSystem.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "LocomotionValidationHarness.h"
+#endif
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/GraphicsSettings/PostProcessDiagnostics.h"
 #include "Engine/Renderer/Terrain/TerrainRenderProxyRegistry.h"
@@ -51,7 +53,9 @@
 #include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Navigation/Agents/NavigationAgentSystem.h"
 #include "Engine/Navigation/NavigationSystem.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "NavigationApplicationValidation.h"
+#endif
 #include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Utilities/PlatformUtils.h"
@@ -2839,6 +2843,7 @@ void MainEditorSubsystem::StopPlayMode()
 		m_NavigationAuthoringTransactions->ExitPlayMode();
 }
 
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 nlohmann::json MainEditorSubsystem::RunNavigationAgentPlayValidationFrame(nlohmann::json options)
 {
 	// EditorSystem calls this only from its protected post-frame work. The shared
@@ -2941,6 +2946,7 @@ nlohmann::json MainEditorSubsystem::RunLocomotionPlayValidationFrame(nlohmann::j
 			{"failure", std::string("Editor locomotion validation failed: ") + exception.what()}};
 	}
 }
+#endif
 
 TerraEngine::Editor::Navigation::NavigationAuthoringTransactions*
 MainEditorSubsystem::GetNavigationAuthoringTransactions() noexcept

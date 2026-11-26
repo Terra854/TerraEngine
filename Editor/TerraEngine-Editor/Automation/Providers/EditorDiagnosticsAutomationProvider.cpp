@@ -241,12 +241,14 @@ namespace TerraEngine::Editor::Automation
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_object", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, true, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_custom", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.stats", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.set", "renderer", MutationMode::EditorSelection, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.reset", "renderer", MutationMode::EditorSelection, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.start", "renderer", MutationMode::SceneMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.status", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.efficiency.validation.stop", "renderer", MutationMode::SceneMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
+#endif
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		// Validation-route overrides are transient session selections, like selecting
 		// an authored object. Project-write permission is sufficient and avoids

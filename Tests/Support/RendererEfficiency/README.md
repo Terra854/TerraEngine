@@ -20,9 +20,9 @@ controller optional or remove the backend readback hooks.
 From a Visual Studio developer shell, configure, compile and install with:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$' --output-on-failure
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$' --output-on-failure
 ```
 
 See `Docs/Testing.md` for bundled PowerShell configuration and the CTest workflow.

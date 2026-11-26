@@ -12,8 +12,10 @@ inline TerraEngine::Scheduling::SystemDeclaration MakeEditorSchedulerDeclaration
 	declaration.phase = "PostFrame";
 	declaration.reads = {
 		"RendererOutput", "PresentationState", "Window", "WindowSnapshot", "InputSnapshot",
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		// Validation observes immutable renderer copies after protected publication.
 		"RendererEfficiencyOptions", "RendererEfficiencyEvidence",
+#endif
 		"RendererRecoveryStateSnapshot",
 		"ProjectState", "EditorState", "ImGuiDrawData", "EditorAutomationQueue",
 		"EditorAutomationSession", "EditorExportWorkerResults", "AnimationRuntimeState",
@@ -29,8 +31,10 @@ inline TerraEngine::Scheduling::SystemDeclaration MakeEditorSchedulerDeclaration
 		"RendererOutput", "PresentationState", "RendererRecoveryStateSnapshot",
 		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
 		"SceneMutationQueue", "EditorProfilerTiming", "EditorProfilerWorkerCompletions",
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		// Requests enter the typed queue here and become visible at the next capture.
 		"RendererEfficiencyOptionsQueue",
+#endif
 		"EditorProfilerHealthPublication", "EditorExportOperationState",
 		"TerrainCopyOperationState", "TerrainCopyAssetRegistration", "TerrainCopyPrivateOutputs",
 		"ProjectState", "SceneGraph", "ObjectManager", "Resources",
@@ -45,7 +49,11 @@ inline TerraEngine::Scheduling::SystemDeclaration MakeEditorSchedulerDeclaration
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 	declaration.hardBoundary = true;
 	declaration.safeSubwork = "Terrain copy workers load captured durable roots, re-encode fresh identities and persist private staging without live scene or asset registration; automation schema validation and immutable request preparation may run on workers; immutable export requests and owned subprocesses, reference-impact scans, log filtering, editor subsystem snapshots, and profiler workers prepare owned results without touching live scene, scripting assemblies or ImGui.";
-	declaration.protectedCommit = "Consume native window-close intent and gate project teardown on settled receipts and cleanup; validation-owned device recreation drains resource workers, proves healthy native idle, releases old ImGui descriptors/backend before actual Vulkan replacement, and rebinds UI before drawing; terrain copy source validation, provisional asset registration, typed rebind admission, sole-receipt settlement and conditional cleanup with existing frame-end visibility; export admission, coherent result adoption and captured launch, immutable animation recording capture, profiler completion drain and health publication, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan recording and presentation.";
+	declaration.protectedCommit = "Consume native window-close intent and gate project teardown on settled receipts and cleanup; "
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
+		"validation-owned device recreation drains resource workers, proves healthy native idle, releases old ImGui descriptors/backend before actual Vulkan replacement, and rebinds UI before drawing; "
+#endif
+		"terrain copy source validation, provisional asset registration, typed rebind admission, sole-receipt settlement and conditional cleanup with existing frame-end visibility; export admission, coherent result adoption and captured launch, immutable animation recording capture, profiler completion drain and health publication, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan recording and presentation.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

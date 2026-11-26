@@ -55,10 +55,10 @@ The common status meanings are:
 Configure, build, test, and install from the repository root:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target all
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
 Use the asset-pipeline CTest coverage for model import validation,

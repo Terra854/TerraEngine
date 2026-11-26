@@ -6,7 +6,9 @@
 
 #include "Core/SystemBase.h"
 #include "EditorContext.h"
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 #include "Tests/Support/RendererEfficiency/Editor/RendererEfficiencyDeviceRecreation.h"
+#endif
 #include <filesystem>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -31,15 +33,19 @@ public:
 	// path leaves this unset and therefore never writes validation evidence.
 	void SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath);
 	void SetTerrainInvariantOutputPath(const std::filesystem::path& outputPath);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	void SetNavigationAgentValidationPaths(const std::filesystem::path& optionsPath,
 		const std::filesystem::path& reportPath);
 	void SetLocomotionValidationPaths(const std::filesystem::path& optionsPath,
 		const std::filesystem::path& reportPath);
+#endif
 	int RequestedProcessExitCode() const noexcept;
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	// Persist the terminal evidence only after Engine has invoked this system's
 	// Shutdown. This makes `orderlyShutdown` evidence a real lifecycle fact.
 	int FinalizeNavigationAgentValidationAfterEngineShutdown();
 	int FinalizeLocomotionValidationAfterEngineShutdown();
+#endif
 	void Setup(Engine* engine);
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -53,21 +59,27 @@ public:
 	void LoadWorkspaceLayout();
 
 	void Draw();
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	bool QueueRendererEfficiencyDeviceRecreation(const RendererEfficiencyDeviceRecreationRequest& request, std::string& reason);
 	RendererEfficiencyDeviceRecreationReceipt GetRendererEfficiencyDeviceRecreationReceipt() const;
+#endif
 
 private:
 #if defined(TERRAENGINE_EDITOR_TESTS)
 	// The fixture supplies CPU-only project/layout inputs without starting GPU UI.
 	friend class TerraEngine::EditorTests::LayoutPreferenceMigrationFixture;
 #endif
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	void ProcessRendererEfficiencyDeviceRecreation();
+#endif
 	void InitializeImGuiVulkanBackend(VulkanContext& vulkan);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	mutable std::mutex rendererEfficiencyDeviceRecreationMutex;
 	std::optional<RendererEfficiencyDeviceRecreationRequest> pendingRendererEfficiencyDeviceRecreation;
 	RendererEfficiencyDeviceRecreationReceipt rendererEfficiencyDeviceRecreationReceipt;
 	// After teardown begins, a failed rebind must suppress every old-handle draw.
 	bool rendererEfficiencyBackendUnavailable = false;
+#endif
 	EditorContext context;
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
 	std::shared_ptr<MainEditorSubsystem> mainEditor;
@@ -76,6 +88,7 @@ private:
 	std::optional<std::filesystem::path> startupProjectPath;
 	std::optional<std::filesystem::path> physicsInvariantOutputPath;
 	std::optional<std::filesystem::path> terrainInvariantOutputPath;
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	std::optional<std::filesystem::path> navigationAgentValidationOptionsPath;
 	std::optional<std::filesystem::path> navigationAgentValidationReportPath;
 	nlohmann::json navigationAgentValidationOptions;
@@ -84,6 +97,7 @@ private:
 	std::optional<std::filesystem::path> locomotionValidationReportPath;
 	nlohmann::json locomotionValidationOptions;
 	std::optional<nlohmann::json> locomotionValidationTerminalReport;
+#endif
 
 	// Managed Editor Hooks
 	typedef void (*ManagedInitFn)(void*);
@@ -115,25 +129,31 @@ private:
 	bool startupProjectOpenAttempted = false;
 	bool physicsInvariantRunAttempted = false;
 	bool terrainInvariantRunAttempted = false;
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	bool navigationAgentValidationRunAttempted = false;
 	bool navigationAgentValidationOptionsLoaded = false;
 	bool navigationAgentValidationShutdownObserved = false;
 	bool locomotionValidationOptionsLoaded = false;
 	bool locomotionValidationShutdownObserved = false;
+#endif
 	float terrainInvariantWaitSeconds = 0.0f;
 	// The installed acceptance command waits for the normal asynchronous
 	// Assembly-CSharp coordinator instead of canceling it during early shutdown.
 	float physicsInvariantManagedWaitSeconds = 0.0f;
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	float navigationAgentValidationWaitSeconds = 0.0f;
 	float locomotionValidationWaitSeconds = 0.0f;
+#endif
 	int requestedProcessExitCode = 0;
 	std::uint64_t imguiPresentationGeneration = 0;
 	void HandleProjectLoaded();
 	void ProcessStartupProjectOpen();
 	void ProcessPhysicsInvariantValidation(float deltaTime);
 	void ProcessTerrainInvariantValidation(float deltaTime);
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 	void ProcessNavigationAgentValidation(float deltaTime);
 	void ProcessLocomotionValidation(float deltaTime);
+#endif
 public:
 	void DrawWindowMenu();
 	void HideAllWindows();

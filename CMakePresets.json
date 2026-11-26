@@ -2,64 +2,85 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "base",
+      "name": "editor-base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
+        "BUILD_TESTING": "OFF",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
     {
       "name": "Debug",
-      "displayName": "Ninja Debug",
-      "inherits": "base",
+      "inherits": "editor-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "Release",
-      "displayName": "Ninja Release",
-      "inherits": "base",
+      "inherits": "editor-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {
       "name": "RelWithDebInfo",
-      "displayName": "Ninja RelWithDebInfo",
-      "inherits": "base",
+      "inherits": "editor-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     },
     {
       "name": "MinSizeRel",
-      "displayName": "Ninja MinSizeRel",
-      "inherits": "base",
+      "inherits": "editor-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel"
+      }
+    },
+    {
+      "name": "Testing",
+      "displayName": "Configure integration and native tests",
+      "inherits": "editor-base",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     }
   ],
   "buildPresets": [
     {
+      "name": "editor-install",
+      "hidden": true,
+      "targets": ["install"]
+    },
+    {
       "name": "Debug",
+      "inherits": "editor-install",
       "configurePreset": "Debug"
     },
     {
       "name": "Release",
+      "inherits": "editor-install",
       "configurePreset": "Release"
     },
     {
       "name": "RelWithDebInfo",
+      "inherits": "editor-install",
       "configurePreset": "RelWithDebInfo"
     },
     {
       "name": "MinSizeRel",
+      "inherits": "editor-install",
       "configurePreset": "MinSizeRel"
+    },
+    {
+      "name": "Testing",
+      "displayName": "Build, install, and run tests",
+      "configurePreset": "Testing",
+      "targets": ["Testing"]
     }
   ]
 }

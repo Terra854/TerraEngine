@@ -24,8 +24,8 @@ From an x64 Visual Studio developer shell, the repository build/install workflow
 is:
 
 ```powershell
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
 ```
 
 From a clean checkout, run the source scorer's numerical checks in a fresh

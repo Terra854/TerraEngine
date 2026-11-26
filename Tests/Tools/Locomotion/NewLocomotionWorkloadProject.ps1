@@ -6,7 +6,7 @@
   ./NewLocomotionWorkloadProject.ps1 -OutputDirectory out/locomotion-w8 `
     -ManifestPath Tests/Fixtures/Locomotion/workloads.json `
     -FixtureAssetRoot Tests/Fixtures/Locomotion/Generated -WorkerCount 8 `
-    -Population 1000 -InstallRoot out/build/RelWithDebInfo/Build
+    -Population 1000 -InstallRoot out/build/Testing/Build
 
 The project contains real production-cooked animation assets, a TERRAROOT1
 terrain source repeated across disjoint lanes, and authored scene components.

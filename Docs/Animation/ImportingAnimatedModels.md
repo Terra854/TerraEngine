@@ -119,13 +119,13 @@ Warnings may publish a complete generation only when the affected content has a 
 From a clean checkout in a Visual Studio developer shell:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target `
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target `
 	TerraEngineModelPackageCompiler TerraEngine-EngineTests TerraEngine-EditorTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+ctest --test-dir out/build/Testing -C RelWithDebInfo `
 	-R "Animation.AssetFormat|Animation.Codec|Editor.Animation.GltfImport|Editor.Animation.FbxImport|Editor.Animation.SubAssetIdentity|Editor.Animation.SkinnedMeshCook" `
 	--output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target install
 ```
 
 Then import the deterministic fixtures through the installed editor, inspect

@@ -3,7 +3,7 @@
 Runs malformed trees and a valid deep tree in independent bounded native children.
 .DESCRIPTION
 Prerequisites: BUILD_TESTING=ON, configure/build and install both native harnesses.
-Example: ./RunArchiveSafetyWatchdog.ps1 -InstallRoot ./out/build/RelWithDebInfo/Build -LogDirectory ./out/validation/archive-trees-fresh
+Example: ./RunArchiveSafetyWatchdog.ps1 -InstallRoot ./out/build/Testing/Build -LogDirectory ./out/validation/archive-trees-fresh
 Each case has its own process-tree watchdog and must select a real test. Evidence
 directories must be fresh. This utility never deletes existing caller data.
 #>

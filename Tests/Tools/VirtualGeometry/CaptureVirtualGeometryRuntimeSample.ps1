@@ -82,7 +82,7 @@ function Resolve-RuntimeAdapterRoots([string]$ScriptDirectory)
 	$isSourceTree = Test-Path -LiteralPath (Join-Path $root 'CMakeLists.txt') -PathType Leaf
 	$install = if($isSourceTree)
 	{
-		[IO.Path]::GetFullPath((Join-Path $root 'out/build/RelWithDebInfo/Build'))
+		[IO.Path]::GetFullPath((Join-Path $root 'out/build/Testing/Build'))
 	}
 	else
 	{

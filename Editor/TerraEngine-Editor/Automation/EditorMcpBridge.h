@@ -36,8 +36,10 @@ namespace TerraEngine::Editor::Automation
 		void Initialize(EditorContext* context, MainEditorSubsystem* mainEditor = nullptr);
 		void Shutdown();
 		// The editor reset handshake uses the service's fresh protected admission.
+#if defined(TERRAENGINE_APPLICATION_VALIDATION)
 		bool ValidateRendererEfficiencyDeviceRecreationOwner(const std::filesystem::path& root,
 			std::uint64_t generation, std::string_view operation, std::string_view step, std::string& error) const;
+#endif
 		void Update(float deltaTime);
 		// Runs only transport-originated calls at the later protected editor handoff.
 		// It intentionally leaves assistant-request draining to Update(), so a late

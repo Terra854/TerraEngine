@@ -10,12 +10,12 @@ From the repository root in an x64 Visual Studio developer PowerShell:
 
 ```powershell
 git submodule update --init --recursive
-cmake --preset RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build --preset RelWithDebInfo --target install --parallel 2
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$|^Renderer\.Efficiency\..*Contracts$' --no-tests=error --output-on-failure
+cmake --preset Testing -DBUILD_TESTING=ON
+cmake --build --preset Testing --target install --parallel 2
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^(Engine|Editor)\.RendererEfficiency$|^Renderer\.Efficiency\..*Contracts$' --no-tests=error --output-on-failure
 ```
 
-The maintained installation is `out/build/RelWithDebInfo/Build`. Its `renderer-efficiency-artifacts.json` seals the installed tools, editor, dependencies, shader and asset closures. Invoke the runner from that installation, with the same directory as `-InstallRoot`. A checkout script or a mixture of two installations is rejected. Reinstall after changing code, shaders, fixtures, schemas, or tools.
+The maintained installation is `out/build/Testing/Build`. Its `renderer-efficiency-artifacts.json` seals the installed tools, editor, dependencies, shader and asset closures. Invoke the runner from that installation, with the same directory as `-InstallRoot`. A checkout script or a mixture of two installations is rejected. Reinstall after changing code, shaders, fixtures, schemas, or tools.
 
 The focused CTest expression includes the engine/editor policy slices and the installed fixture, collection, recovery, native-evidence, lighting, depth, batching, and static-shadow contract tests. These CPU tests open no validation editor and cannot establish completed GPU work, pixels, timestamps, or a performance threshold. The optional hidden-window GLFW recovery test has its own desktop prerequisite and is documented in `Docs/Testing.md` in the source tree.
 
@@ -26,7 +26,7 @@ For the final broad CPU pass, the current 168 registered groups select 166 with 
 ## Runner contract and preflight
 
 ```powershell
-$install = (Resolve-Path './out/build/RelWithDebInfo/Build').Path
+$install = (Resolve-Path './out/build/Testing/Build').Path
 $runner = Join-Path $install 'Tests/Tools/RendererEfficiency/Invoke-RendererEfficiencyValidation.ps1'
 & $runner -InstallRoot $install -WorkRoot './out/validation/renderer-efficiency-preflight' -OutputDirectory './out/evidence/renderer-efficiency-preflight' -Stage All -Mode Compare -DryRun
 if ($LASTEXITCODE -ne 0) { throw 'Installed preflight failed.' }

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[ValidateNotNullOrEmpty()]
-	[string]$BuildDir = "out/build/RelWithDebInfo",
+	[string]$BuildDir = "out/build/Testing",
 
 	[string]$InstallRoot = "",
 

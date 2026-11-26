@@ -101,13 +101,13 @@ previously published generation active.
 From a clean checkout:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngineTerrainCompiler TerraEngineTerrainBenchmark TerraEngine-EngineTests TerraEngine-EditorTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "^(Engine|Editor)\\.Terrain|TransactionalMutation|SystemScheduler|VirtualGeometry|Physics" --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngineTerrainCompiler TerraEngineTerrainBenchmark TerraEngine-EngineTests TerraEngine-EditorTests
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R "^(Engine|Editor)\\.Terrain|TransactionalMutation|SystemScheduler|VirtualGeometry|Physics" --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
-Validate the installed tree under `out/build/RelWithDebInfo/Build`. Runtime
+Validate the installed tree under `out/build/Testing/Build`. Runtime
 terrain content must resolve through loose or TEPAK `ContentMount` paths; do
 not validate against arbitrary source-tree copies.
 
@@ -116,7 +116,7 @@ run the preset's clean target. Re-run the build, tests, and install commands
 above before collecting evidence:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target clean
+cmake --build --preset Testing --target clean
 ```
 
 ## Validation tools
@@ -130,7 +130,7 @@ Generate the sparse large-world fixture and deterministic route evidence from
 the installed tools:
 
 ```powershell
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $terrainTools = Join-Path $installRoot 'Tests/Tools/Terrain'
 & (Join-Path $terrainTools 'TerraEngineTerrainFixtureGenerator.exe') `
     --output (Join-Path $terrainTools 'terrain-256km.json')
@@ -197,7 +197,7 @@ and verifies that every attempt is accounted for as one complete commit or one
 rejection:
 
 ```powershell
-$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$installRoot = (Resolve-Path 'out/build/Testing/Build').Path
 $stress = Join-Path $installRoot 'Tests/Tools/Terrain/TerraEngineTerrainTransactionStress.exe'
 & $stress --workers 8 --iterations 25000 --seed 0x7e11a9
 ```
@@ -290,10 +290,10 @@ rejects atomically and keeps the last-known-good authored/render/collision state
 Configure, build, install, and audit only the installed tree:
 
 ```powershell
-cmake --fresh --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngineTerrainCompiler TerraEngineTerrainFixtureGenerator TerraEngineTerrainBenchmark TerraEngine-EngineTests TerraEngine-EditorTests
-cmake --build --preset RelWithDebInfo --target install
-$install = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+cmake --fresh --preset Testing
+cmake --build --preset Testing --target TerraEngine TerraEngine-Editor TerraEngineTerrainCompiler TerraEngineTerrainFixtureGenerator TerraEngineTerrainBenchmark TerraEngine-EngineTests TerraEngine-EditorTests
+cmake --build --preset Testing --target install
+$install = (Resolve-Path 'out/build/Testing/Build').Path
 & (Join-Path $install 'Tests/Tools/Terrain/VerifyInstalledTerrainContract.ps1') -InstallRoot $install -DryRun
 ```
 

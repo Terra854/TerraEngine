@@ -5,7 +5,7 @@
 .EXAMPLE
   ./NewLocomotionFixtureAssets.ps1 -OutputDirectory out/locomotion-assets `
     -ManifestPath Tests/Fixtures/Locomotion/workloads.json `
-    -MaterializerPath out/build/RelWithDebInfo/Build/Tests/Tools/Locomotion/TerraEngine-LocomotionFixtureMaterializer.exe
+    -MaterializerPath out/build/Testing/Build/Tests/Tools/Locomotion/TerraEngine-LocomotionFixtureMaterializer.exe
 
 The destination must be new or empty. Run against the final workloads.json to
 record its exact SHA-256; this tool emits assets and provenance, not acceptance.

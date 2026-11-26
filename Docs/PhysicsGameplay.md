@@ -90,9 +90,9 @@ become visible only through the declared transactional flush.
 From a Visual Studio x64 developer prompt:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.PhysicsQueriesAndEvents$' --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --build --preset Testing --target TerraEngine-EngineTests
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R '^Engine\.PhysicsQueriesAndEvents$' --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
 The worker-scaling suite covers concurrent deterministic commands, all query contracts,

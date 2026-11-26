@@ -35,9 +35,9 @@ To run these focused tests after they are registered by the shared test target:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = 'Physics.DeterminismStress;Physics.LifecycleStress'
-& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\Testing\TerraEngine-EngineTests.exe
 $env:TERRAENGINE_TEST_FILTER = 'Physics.Editor.Soak'
-& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+& .\out\build\Testing\TerraEngine-EditorTests.exe
 ```
 
 The final integrated build, CTest run, install-tree verification, and

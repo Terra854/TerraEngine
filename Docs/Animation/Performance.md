@@ -28,6 +28,8 @@ it must not be accepted by weakening a nearby constant.
 
 Candidate tools may write only below `out/` and may never overwrite the reference
 baseline tree. A candidate build is not allowed to become its own reference.
+Use the current [testing workflow](../Testing.md) for build commands. The
+animation README retains the commands from the frozen reference.
 
 ## Frozen reference host and platform
 
@@ -178,10 +180,10 @@ and invalid-evidence exits remain distinct.
 From a clean checkout, configure, compile, and install before any final run:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target install
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --preset Testing
+cmake --build --preset Testing --target all
+cmake --build --preset Testing --target install
+ctest --test-dir out/build/Testing -C RelWithDebInfo --output-on-failure
 ```
 
 During intermediate phases, verify only the definitions and protocols:
@@ -227,7 +229,7 @@ The full final invocation is intentionally not run by intermediate tasks:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Animation/RunAnimationSoak.ps1 `
-  -RunnerPath out/build/RelWithDebInfo/Build/Tests/Tools/Animation/TerraEngineAnimationSoakRunner.exe `
+  -RunnerPath out/build/Testing/Build/Tests/Tools/Animation/TerraEngineAnimationSoakRunner.exe `
   -OutputRoot out/validation/animation/final/soak `
   -DurationHours 24 -FinalPhase
 ```

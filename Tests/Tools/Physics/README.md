@@ -48,11 +48,11 @@ Run it only after the physics foundation RelWithDebInfo build, CTest, and instal
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-	-InstallRoot out/build/RelWithDebInfo/Build -ActiveDynamicCount 1000 -AllowLiveStress
+	-InstallRoot out/build/Testing/Build -ActiveDynamicCount 1000 -AllowLiveStress
 ```
 
 The repository's custom install target stages the runnable tree under
-`out/build/RelWithDebInfo/Build`; use that staged tree as `-InstallRoot`.
+`out/build/Testing/Build`; use that staged tree as `-InstallRoot`.
 Use `-WorkerCount 1`, `2`, `4`, or `max` (default) to select the shared native
 ThreadPool size for a run. `max` preserves hardware-concurrency behavior and
 removes `TERRAENGINE_THREADPOOL_WORKERS` from the child environment; the
@@ -66,7 +66,7 @@ For the worker-scaling acceptance matrix, run one isolated command:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-	-InstallRoot out/build/RelWithDebInfo/Build `
+	-InstallRoot out/build/Testing/Build `
 	-WorkRoot out/validation/worker-scaling `
 	-RunWorkerScalingMatrix -AllowLiveStress
 ```
@@ -119,7 +119,7 @@ install target succeeds:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-	-InstallRoot out/build/RelWithDebInfo/Build `
+	-InstallRoot out/build/Testing/Build `
 	-WorkRoot out/validation/readiness `
 	-RunReadinessMatrix -AllowLiveStress
 ```
@@ -164,7 +164,7 @@ Run the opt-in profiler evidence mode for each detail level:
 ```powershell
 foreach ($level in @("detailed", "sampled", "aggregate")) {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests/Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-        -InstallRoot out/build/RelWithDebInfo/Build `
+        -InstallRoot out/build/Testing/Build `
         -WorkRoot ("out/validation/profiler-capture/{0}-journal-v1" -f $level) `
         -CaptureLevel $level -RunProfilerCaptureChecks -AllowLiveStress
 }

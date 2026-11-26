@@ -1,7 +1,7 @@
 # Installed readback lifetime validation
 
-Configure with `cmake --preset RelWithDebInfo -DBUILD_TESTING=ON`, then build and
-install with `cmake --build --preset RelWithDebInfo --target install --parallel 2`
+Configure with `cmake --preset Testing -DBUILD_TESTING=ON`, then build and
+install with `cmake --build --preset Testing --target install --parallel 2`
 from a matching Visual Studio developer shell. Dependencies and PNG decoding use
 the committed copies. Native acceptance additionally requires a working Vulkan
 driver/desktop and the host diagnostic `VK_LAYER_KHRONOS_validation` layer; this
@@ -16,8 +16,8 @@ output second, exercising separate AO history ownership and valid presentation.
 Invoke the installed runner with PowerShell 7 and a nonexistent work directory:
 
 ```powershell
-& out/build/RelWithDebInfo/Build/Tests/Tools/ReadbackLifetime/RunInstalledReadbackLifetime.ps1 `
-	-InstallRoot "$PWD/out/build/RelWithDebInfo/Build" `
+& out/build/Testing/Build/Tests/Tools/ReadbackLifetime/RunInstalledReadbackLifetime.ps1 `
+	-InstallRoot "$PWD/out/build/Testing/Build" `
 	-WorkRoot "$PWD/out/validation/readback-fresh" -Mode All -Iterations 100
 ```
 

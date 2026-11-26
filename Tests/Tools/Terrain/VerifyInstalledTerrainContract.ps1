@@ -1,7 +1,7 @@
 # VerifyInstalledTerrainContract.ps1 - fail-closed installed terrain audit.
 [CmdletBinding()]
 param(
-	[string]$InstallRoot = 'out/build/RelWithDebInfo/Build',
+	[string]$InstallRoot = 'out/build/Testing/Build',
 	[string]$OutputDirectory = '',
 	[string]$SourceRoot = '',
 	[switch]$DryRun

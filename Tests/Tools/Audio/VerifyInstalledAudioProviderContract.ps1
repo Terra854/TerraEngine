@@ -1,7 +1,7 @@
 # VerifyInstalledAudioProviderContract.ps1 - compile the public provider seam.
 [CmdletBinding()]
 param(
-	[string]$IncludeRoot = 'out/build/RelWithDebInfo/Build/include',
+	[string]$IncludeRoot = 'out/build/Testing/Build/include',
 	[string]$LibraryPath = '',
 	[string]$RuntimeDirectory = ''
 )

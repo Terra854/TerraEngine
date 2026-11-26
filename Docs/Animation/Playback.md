@@ -160,14 +160,14 @@ From a Visual Studio developer PowerShell at the repository root, configure and
 exercise the CPU reference path with these reproducible commands:
 
 ```powershell
-cmake --preset RelWithDebInfo
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R Engine.Animation --output-on-failure
-cmake --build --preset RelWithDebInfo --target install
+cmake --preset Testing
+cmake --build --preset Testing --target TerraEngine-EngineTests
+ctest --test-dir out/build/Testing -C RelWithDebInfo -R Engine.Animation --output-on-failure
+cmake --build --preset Testing --target install
 ```
 
 The installed editor is then available at
-`out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe`. Launch an
+`out/build/Testing/Build/Editor/TerraEngine-Editor.exe`. Launch an
 isolated project with `--project <absolute-project-directory>`; do not validate
 against a source-tree editor binary because the installed tree is part of the
 feature contract. `Docs/Testing.md` describes the full CTest workflow.

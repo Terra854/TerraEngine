@@ -226,10 +226,11 @@ Use the Visual Studio developer environment on Windows so MSVC can locate the
 standard library headers:
 
 ```powershell
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine-EditorTests TerraEngine-Editor"
-.\out\build\Debug\TerraEngine-EditorTests.exe
-ctest --test-dir out\build\Debug --output-on-failure
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install"
+cmake --preset Testing -B out/build/Testing-Debug -DCMAKE_BUILD_TYPE=Debug --install-prefix out/install/Testing-Debug
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target TerraEngine-EditorTests TerraEngine-Editor"
+.\out\build\Testing-Debug\TerraEngine-EditorTests.exe
+ctest --test-dir out\build\Testing-Debug --output-on-failure
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build out/build/Testing-Debug --target install"
 ```
 
 Manual validation should use the installed editor tree. Open a project, open
